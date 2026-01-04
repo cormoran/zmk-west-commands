@@ -1,0 +1,4 @@
+board: ["seeeduino_xiao_ble"]
+shield: ["my_awesome_keyboard"]
+
+---

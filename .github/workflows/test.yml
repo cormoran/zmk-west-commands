@@ -1,0 +1,38 @@
+name: Test West Commands
+
+on:
+  push:
+    branches: ["**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    name: Build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache west modules
+        uses: actions/cache@v4
+        continue-on-error: true
+        env:
+          cache_name: cache-west-modules
+        with:
+          path: dependencies/
+          key:
+            ${{ runner.os }}-build-${{ env.cache_name }}-${{
+            hashFiles('scripts/west-test.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache_name }}-
+      - name: Init
+        run: |
+          git config --global --add safe.directory ${{ github.workspace }}
+          west init -l . --mf scripts/west-test-standalone.yml
+          west update --narrow
+          west zephyr-export
+      - name: Dry run command for quick check
+        run: west zmk-build tests/build_yaml -n
+      - name: Run test
+        run: python3 -m unittest -v

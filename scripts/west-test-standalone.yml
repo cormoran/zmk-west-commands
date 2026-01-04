@@ -1,0 +1,5 @@
+manifest:
+  self:
+    import:
+      file: scripts/west-test.yml
+      path-prefix: zmk-west-commands/dependencies

@@ -1,0 +1,11 @@
+west-commands:
+  - file: scripts/zmk_test.py
+    commands:
+      - name: zmk-test
+        class: ZMKTest
+        help: Run ZMK unit tests
+  - file: scripts/zmk_build.py
+    commands:
+      - name: zmk-build
+        class: ZMKBuild
+        help: Build ZMK firmware for given zmk-config
