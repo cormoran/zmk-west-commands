@@ -1,15 +1,9 @@
 {
   "editor.formatOnSave": true,
-  "python.formatting.provider": "black",
-  "python.linting.enabled": true,
-  "python.linting.pylintEnabled": false,
-  "python.linting.flake8Enabled": false,
-  "python.linting.ruffEnabled": true,
-  "python.linting.ruffArgs": [
-    "--config",
-    "${workspaceFolder}/pyproject.toml"
-  ],
   "[python]": {
     "editor.defaultFormatter": "ms-python.black-formatter"
-  }
+  },
+  "python.defaultInterpreterPath": "python",
+  "ruff.configuration": "${workspaceFolder}/pyproject.toml",
+  "ruff.lint.run": "onSave"
 }

@@ -130,7 +130,7 @@ class ZMKBuild(WestCommand):
             "-i",
             "--interactive",
             action="store_true",
-            help="Interactively select build target from all detected candidates. Requires `pip install -r <path to zmk-west-commands>/requirements.tx` to work.",
+            help="Interactively select build target from all detected candidates. Requires `pip install -r <path to zmk-west-commands>/requirements.txt` to work.",
         )
         parser.add_argument(
             "-P",
