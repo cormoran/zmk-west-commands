@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v4
       - name: Install ruff with pipx
         run: |
-          pipx install ruff
+          pipx install "ruff==0.1.11"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Lint with ruff
         run: ruff check .
