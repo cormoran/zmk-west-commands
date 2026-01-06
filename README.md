@@ -18,7 +18,7 @@ manifest:
       import: true
 ```
 
-Then, you can use `west zmk-build` and `west-zmk-test` commands.
+Then, you can use `west zmk-build` and `west zmk-test` commands.
 
 ```bash
 $ west update
