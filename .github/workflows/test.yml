@@ -4,7 +4,25 @@ on:
   push:
     branches: ["**"]
 
+permissions:
+  contents: read
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install ruff with pipx
+        run: |
+          pipx install "ruff==0.1.11"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Lint with ruff
+        run: ruff check .
+      - name: Check formatting with ruff
+        run: ruff format --check --diff .
+
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 10
