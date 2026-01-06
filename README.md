@@ -224,3 +224,11 @@ Below test script verifies output of above commands to detect regressions.
 ```bash
 python -m unittest
 ```
+
+### Linting & formatting
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+black .
+```
