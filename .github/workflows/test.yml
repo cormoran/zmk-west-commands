@@ -21,9 +21,7 @@ jobs:
           cache_name: cache-west-modules
         with:
           path: dependencies/
-          key:
-            ${{ runner.os }}-build-${{ env.cache_name }}-${{
-            hashFiles('scripts/west-test.yml') }}
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test.yml') }}
           restore-keys: |
             ${{ runner.os }}-build-${{ env.cache_name }}-
       - name: Init
