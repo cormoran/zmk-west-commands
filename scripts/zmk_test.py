@@ -19,9 +19,7 @@ class ZMKTest(WestCommand):
         )
 
     def do_add_parser(self, parser_adder):
-        parser = parser_adder.add_parser(
-            self.name, help=self.help, description=self.description
-        )
+        parser = parser_adder.add_parser(self.name, help=self.help, description=self.description)
         parser.add_argument(
             "test_path",
             nargs="?",
@@ -71,9 +69,7 @@ class ZMKTest(WestCommand):
             else Path.cwd()
         )
         build_dir = (
-            Path(args.build_dir).absolute()
-            if args.build_dir
-            else Path(west_topdir()) / "build"
+            Path(args.build_dir).absolute() if args.build_dir else Path(west_topdir()) / "build"
         )
         extra_modules = list(map(lambda m: str(Path(m).absolute()), args.extra_modules))
         log.inf(f"Running ZMK tests under {test_path} with build dir {build_dir}")
@@ -84,7 +80,5 @@ class ZMKTest(WestCommand):
         env["ZMK_EXTRA_MODULES"] = ";".join(extra_modules)
         env["ZMK_TESTS_VERBOSE"] = "1" if args.verbose else ""
         exit(
-            subprocess.run(
-                [f"{zmk_src_dir}/run-test.sh", "."], env=env, cwd=test_path
-            ).returncode
+            subprocess.run([f"{zmk_src_dir}/run-test.sh", "."], env=env, cwd=test_path).returncode
         )

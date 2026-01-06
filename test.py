@@ -19,9 +19,7 @@ def run_west(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 class WestCommandsTests(unittest.TestCase):
-    @unittest.skipUnless(
-        platform.system() == "Linux", "zmk-test is only supported on Linux"
-    )
+    @unittest.skipUnless(platform.system() == "Linux", "zmk-test is only supported on Linux")
     def test_zmk_test_runs_and_logs_results(self):
         tests_build = BUILD_DIR / "tests"
         if tests_build.exists():
@@ -93,9 +91,7 @@ class WestCommandsTests(unittest.TestCase):
             ]
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertFalse(
-            artifact_dir.exists(), "no-run should not create build outputs"
-        )
+        self.assertFalse(artifact_dir.exists(), "no-run should not create build outputs")
 
     def test_zmk_build_fails_without_targets(self):
         result = run_west(["zmk-build", "tests/test1", "-n"])
@@ -103,9 +99,7 @@ class WestCommandsTests(unittest.TestCase):
         self.assertIn("No build targets found", result.stdout + result.stderr)
 
     def test_zmk_build_with_zmk_config(self):
-        result = run_west(
-            ["zmk-build", "tests/zmk-config/config", "-m", "tests/zmk-config", "-q"]
-        )
+        result = run_west(["zmk-build", "tests/zmk-config/config", "-m", "tests/zmk-config", "-q"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         artifact = "seeeduino_xiao_ble__my_awesome_keyboard"
         config_path = BUILD_DIR / artifact / "zephyr" / ".config"

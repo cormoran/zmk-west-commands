@@ -25,9 +25,7 @@ class ZMKBuild(WestCommand):
         )
 
     def do_add_parser(self, parser_adder):
-        parser = parser_adder.add_parser(
-            self.name, help=self.help, description=self.description
-        )
+        parser = parser_adder.add_parser(self.name, help=self.help, description=self.description)
         parser.add_argument(
             "config_path",
             help="""
@@ -187,19 +185,13 @@ class ZMKBuild(WestCommand):
             yamls = list(filter(lambda y: y is not None, yaml.safe_load_all(f)))
             res = {
                 "boards": list(
-                    itertools.chain.from_iterable(
-                        map(lambda y: y.get("board", []), yamls)
-                    )
+                    itertools.chain.from_iterable(map(lambda y: y.get("board", []), yamls))
                 ),
                 "shields": list(
-                    itertools.chain.from_iterable(
-                        map(lambda y: y.get("shield", []), yamls)
-                    )
+                    itertools.chain.from_iterable(map(lambda y: y.get("shield", []), yamls))
                 ),
                 "include": list(
-                    itertools.chain.from_iterable(
-                        map(lambda y: y.get("include", []), yamls)
-                    )
+                    itertools.chain.from_iterable(map(lambda y: y.get("include", []), yamls))
                 ),
             }
             log.dbg(f"* Built setups from build.yml: {res}")
@@ -224,19 +216,13 @@ class ZMKBuild(WestCommand):
                 return False
             if len(arg_shields) > 0 and inc.get("shield") not in arg_shields:
                 return False
-            if (
-                args.artifact
-                and "artifact" in inc
-                and args.artifact != inc.get("artifact", None)
-            ):
+            if args.artifact and "artifact" in inc and args.artifact != inc.get("artifact", None):
                 return False
             return True
 
         matrix = list(filter(filter_out_matrix_by_args, matrix))
         if len(matrix) == 0:
-            log.die(
-                "No build targets found. Specify boards/shields or check build.yaml."
-            )
+            log.die("No build targets found. Specify boards/shields or check build.yaml.")
 
         # set artifact name if not exists
         for i, inc in enumerate(matrix):
@@ -256,24 +242,18 @@ class ZMKBuild(WestCommand):
 
             matrix = questionary.checkbox(
                 "Select build targets to build",
-                choices=[
-                    questionary.Choice(record["artifact"], record) for record in matrix
-                ],
+                choices=[questionary.Choice(record["artifact"], record) for record in matrix],
             ).ask()
         else:
             log.inf(f"{len(matrix)} build targets found")
             for i, inc in enumerate(matrix):
-                log.inf(
-                    f'- [{i}] {inc["artifact"]} board={inc["board"]}, shield={inc["shield"]}'
-                )
+                log.inf(f'- [{i}] {inc["artifact"]} board={inc["board"]}, shield={inc["shield"]}')
                 log.dbg(f"  - {inc}")
 
         if args.no_run:
             exit(0)
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=args.parallelism
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallelism) as executor:
             futures = [
                 executor.submit(self._run_single_build, id, zmk, manifest, args, inc)
                 for id, inc in enumerate(matrix)
@@ -298,27 +278,19 @@ class ZMKBuild(WestCommand):
             else Path(west_topdir()) / "build" / artifact_name
         )
         west_args = args.west_args
-        build_cmake_args = build_setup.get(
-            "cmake-args", build_setup.get("cmake_args", "")
-        )
+        build_cmake_args = build_setup.get("cmake-args", build_setup.get("cmake_args", ""))
         cmake_args = (
             args.cmake_args.split() if args.cmake_args else []
         ) + build_cmake_args.split()
         config_path = Path(args.config_path).absolute()
-        extra_modules = [
-            str(Path(extra_module).absolute()) for extra_module in args.extra_modules
-        ]
+        extra_modules = [str(Path(extra_module).absolute()) for extra_module in args.extra_modules]
         # NOTE: 'snippets' is this commands' extension. Not supported by ZMK official build
-        snippets = list(
-            map(lambda s: f"-S {s}", args.snippet + build_setup.get("snippets", []))
-        )
+        snippets = list(map(lambda s: f"-S {s}", args.snippet + build_setup.get("snippets", [])))
         if "snippet" in build_setup:
             snippets.append(f"-S {build_setup['snippet']}")
         os.makedirs(build_dir, exist_ok=True)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w+", suffix=".txt", delete=False
-        ) as out_log:
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as out_log:
             command = (
                 [
                     "west",

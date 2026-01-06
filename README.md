@@ -229,6 +229,6 @@ python -m unittest
 
 ```bash
 pip install -r requirements-dev.txt
+ruff format .
 ruff check .
-black .
 ```
