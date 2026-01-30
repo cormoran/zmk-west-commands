@@ -255,9 +255,12 @@ class ZMKBuild(WestCommand):
             log.dbg(f"[*] Built setups from build.yml: {res}")
             return res
 
-    def discover_extra_modules(self, id: int, strategy: str, config_path: Path) -> list[str]:
+    def discover_extra_modules(self, id: int, strategy: str, config_path: Path) -> tuple[list[str], str]:
         candidates = []
         if strategy == "zmk-config":
+            # Check both the config_path itself and its parent
+            # This handles both cases: config at root of module, and config in a subdirectory
+            candidates.append(config_path.absolute())
             candidates.append(config_path.parent.absolute())
         elif strategy == "current":
             candidates.append(Path.cwd().absolute())
@@ -270,9 +273,11 @@ class ZMKBuild(WestCommand):
         result = list(
             map(str, filter(lambda p: (p / "zephyr" / "module.yml").exists(), candidates))
         )
+        log_msg = ""
         if len(result) > 0:
-            log.inf(f"[{id}] Auto discovered extra modules ({strategy}): {result}")
-        return result
+            log_msg = f"[{id}] Auto discovered extra modules ({strategy}): {result}"
+            log.inf(log_msg)
+        return result, log_msg
 
     def _run_for_all(self, zmk, manifest, args, build_yaml: dict):
         # build all build matrix
@@ -377,19 +382,30 @@ class ZMKBuild(WestCommand):
             + (["-DCONFIG_ZMK_SETTINGS_RESET_ON_START=y"] if args.reset else [])
         )
         config_path = Path(args.config_path).absolute()
+        
+        # If config_path has a 'config' subdirectory, use that instead
+        # This handles the common zmk-config structure where configs are in a subdirectory
+        config_subdir = config_path / "config"
+        if config_subdir.is_dir():
+            config_path = config_subdir
+            log.inf(f"[{id}] Using config subdirectory: {config_path}")
+        
+        discovery_results = [
+            self.discover_extra_modules(id, strategy, Path(args.config_path).absolute())
+            for strategy in args.extra_module_auto_discovery
+        ]
         extra_modules = list(
             set(
                 [str(Path(extra_module).absolute()) for extra_module in args.extra_modules]
                 + list(
                     itertools.chain.from_iterable(
-                        [
-                            self.discover_extra_modules(id, strategy, config_path)
-                            for strategy in args.extra_module_auto_discovery
-                        ]
+                        [modules for modules, _ in discovery_results]
                     )
                 )
             )
         )
+        discovery_log_messages = [msg for _, msg in discovery_results if msg]
+        
         # NOTE: 'snippets' is this commands' extension. Not supported by ZMK official build
         snippets = list(map(lambda s: f"-S {s}", args.snippet + build_setup.get("snippets", [])))
         if "snippet" in build_setup:
@@ -397,6 +413,9 @@ class ZMKBuild(WestCommand):
         os.makedirs(build_dir, exist_ok=True)
 
         with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as out_log:
+            # Write discovery log messages to the log file
+            for msg in discovery_log_messages:
+                out_log.write(msg + "\n")
             command = (
                 [
                     "west",
