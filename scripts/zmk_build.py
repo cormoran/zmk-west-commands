@@ -24,9 +24,14 @@ class ZMKBuild(WestCommand):
         "-DCONFIG_LOG=y",
         "-DCONFIG_LOG_BACKEND_RTT=y",
         "-DCONFIG_LOG_BACKEND_UART=n",
-        "CONFIG_SHELL=y",
-        "CONFIG_KERNEL_SHELL=y",
-        "CONFIG_SHELL_BACKEND_RTT=y",
+        # Enable shell
+        "-DCONFIG_SHELL=y",
+        "-DCONFIG_KERNEL_SHELL=y",
+        "-DCONFIG_SHELL_BACKEND_RTT=y",
+        # Enable debug info
+        "-DCONFIG_DEBUG_INFO=y",
+        "-DCONFIG_THREAD_NAME=y",
+        "-DCONFIG_DEBUG_THREAD_INFO=y",
     ]
 
     def __init__(self):
