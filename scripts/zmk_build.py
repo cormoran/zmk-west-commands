@@ -1,4 +1,5 @@
 import concurrent.futures
+from email.policy import default
 import itertools
 import shutil
 from west import log
@@ -14,6 +15,20 @@ import tempfile
 
 
 class ZMKBuild(WestCommand):
+    # CMake args for debug build with Segger J-Link and RTT console
+    DEBUG_CMAKE_ARGS = [
+        "-DCMAKE_BUILD_TYPE=Debug",
+        # Enable RTT
+        "-DCONFIG_USE_SEGGER_RTT=y" "-DCONFIG_RTT_CONSOLE=y",
+        "-DCONFIG_UART_CONSOLE=n",
+        "-DCONFIG_LOG=y",
+        "-DCONFIG_LOG_BACKEND_RTT=y",
+        "-DCONFIG_LOG_BACKEND_UART=n",
+        "CONFIG_SHELL=y",
+        "CONFIG_KERNEL_SHELL=y",
+        "CONFIG_SHELL_BACKEND_RTT=y",
+    ]
+
     def __init__(self):
         super().__init__(
             name="zmk-build",
@@ -28,6 +43,8 @@ class ZMKBuild(WestCommand):
         parser = parser_adder.add_parser(self.name, help=self.help, description=self.description)
         parser.add_argument(
             "config_path",
+            nargs="?",
+            default=Path.cwd(),
             help="""
             path to your zmk-config/config directory
             """,
@@ -58,6 +75,19 @@ class ZMKBuild(WestCommand):
             help="""
             Additional ZMK modules to include.
             When building your zmk-config, root of the zmk-config should be specified.
+            """,
+        )
+        parser.add_argument(
+            "--extra-module-auto-discovery",
+            nargs="*",
+            choices=["zmk-config", "current", "walk-up", "none"],
+            default=["zmk-config", "current", "walk-up"],
+            help="""
+            Strategies to find extra modules automatically.
+            'zmk-config': add parent of config directory as extra module if zephyr/module.yml exists there
+            'current': add current working directory as extra module if zephyr/module.yml exists there
+            'walk-up': walk up from parent of current directory to find zephyr/module.yml and add the first matched directory as extra module
+            'none': to disable auto discovery
             """,
         )
         parser.add_argument(
@@ -103,6 +133,15 @@ class ZMKBuild(WestCommand):
             Artifact .uf2 file will be placed at <build dir>/<artifact name>/zephyr/zmk.uf2
             zmk-config directory name by default if build target is only one.
             If multiple build targets are specified, board name and shield name are appended to artifact name.
+            If --reset is specified, '_reset' is appended to artifact name.
+            If --debug-jlink is specified, '_debug' is appended to artifact name.
+            """,
+        )
+        parser.add_argument(
+            "-as",
+            "--artifact-suffix",
+            help="""
+            Suffix to append to artifact name for build directory naming.
             """,
         )
         parser.add_argument(
@@ -139,28 +178,47 @@ class ZMKBuild(WestCommand):
             Number of parallel build jobs. Defaults to number of CPU cores.
             """,
         )
-        # parser.add_argument(
-        #     '-v', '--verbose',
-        #     action='store_true',
-        #     help='Enable verbose output (the same to west build argument)'
-        # )
         parser.add_argument(
             "-p",
             "--pristine",
             choices=["auto", "always", "never"],
-            default="auto",
+            default="always",
             help="pristine build folder setting (the same to west build argument)",
+        )
+        parser.add_argument(
+            "--debug-jlink",
+            action="store_true",
+            help="""
+            Build for debug with Segger J-Link and RTT console.
+            """,
+        )
+        parser.add_argument(
+            "--reset",
+            action="store_true",
+            help="""'
+            Build with reset settings on startup mode by specifying -DCONFIG_ZMK_SETTINGS_RESET_ON_START
+            """,
+        )
+        parser.add_argument(
+            "--flash",
+            nargs="?",
+            default=None,
+            const=True,
+            help="""
+            Flash the built firmware after successful build.
+            Optional argument to specify the runner to flash to. (The same to west flash --runner)
+            """,
         )
         return parser
 
     def do_run(self, args, unknown_args):
         manifest = Manifest.from_topdir()
-        log.inf(f"west workspace: {manifest.topdir}")
-        log.inf(f"west manifest: {manifest.abspath}")
+        log.inf(f"[*] west workspace: {manifest.topdir}")
+        log.inf(f"[*] west manifest: {manifest.abspath}")
         try:
             zmk = next(filter(lambda p: p.name == "zmk", manifest.projects))
         except StopIteration:
-            log.die("ZMK project not found in manifest.")
+            log.die("[*] ZMK project not found in manifest.")
 
         zmk_config = args.config_path
         build_yaml = (
@@ -176,7 +234,7 @@ class ZMKBuild(WestCommand):
             for ext in ["yaml", "yml"]:
                 build_yml = search_dir / f"build.{ext}"
                 if build_yml.exists():
-                    log.inf(f"Found build.yaml at: {build_yml}")
+                    log.inf(f"[*] Found build.yaml at: {build_yml}")
                     return self._load_yaml(build_yml)
         return {}
 
@@ -194,8 +252,27 @@ class ZMKBuild(WestCommand):
                     itertools.chain.from_iterable(map(lambda y: y.get("include", []), yamls))
                 ),
             }
-            log.dbg(f"* Built setups from build.yml: {res}")
+            log.dbg(f"[*] Built setups from build.yml: {res}")
             return res
+
+    def discover_extra_modules(self, id: int, strategy: str, config_path: Path) -> list[str]:
+        candidates = []
+        if strategy == "zmk-config":
+            candidates.append(config_path.parent.absolute())
+        elif strategy == "current":
+            candidates.append(Path.cwd().absolute())
+        elif strategy == "walk-up":
+            current_dir = Path.cwd().absolute()
+            for parent in current_dir.parents:
+                if (parent / "zephyr" / "module.yml").exists():
+                    candidates.append(parent.absolute())
+                    break
+        result = list(
+            map(str, filter(lambda p: (p / "zephyr" / "module.yml").exists(), candidates))
+        )
+        if len(result) > 0:
+            log.inf(f"[{id}] Auto discovered extra modules ({strategy}): {result}")
+        return result
 
     def _run_for_all(self, zmk, manifest, args, build_yaml: dict):
         # build all build matrix
@@ -224,6 +301,9 @@ class ZMKBuild(WestCommand):
         if len(matrix) == 0:
             log.die("No build targets found. Specify boards/shields or check build.yaml.")
 
+        if len(matrix) > 1 and args.flash:
+            log.die("Cannot flash when multiple build targets are specified.")
+
         # set artifact name if not exists
         for i, inc in enumerate(matrix):
             if "artifact" not in inc:
@@ -244,11 +324,15 @@ class ZMKBuild(WestCommand):
                 "Select build targets to build",
                 choices=[questionary.Choice(record["artifact"], record) for record in matrix],
             ).ask()
+            if not matrix:
+                log.die("No build targets selected.")
         else:
-            log.inf(f"{len(matrix)} build targets found")
+            log.inf(f"[*] {len(matrix)} build targets found")
             for i, inc in enumerate(matrix):
-                log.inf(f'- [{i}] {inc["artifact"]} board={inc["board"]}, shield={inc["shield"]}')
-                log.dbg(f"  - {inc}")
+                log.inf(
+                    f'[*] - [{i}] {inc["artifact"]} board={inc["board"]}, shield={inc["shield"]}'
+                )
+                log.dbg(f"[*]  - {inc}")
 
         if args.no_run:
             exit(0)
@@ -270,6 +354,13 @@ class ZMKBuild(WestCommand):
 
     def _run_single_build(self, id, zmk, manifest, args, build_setup):
         artifact_name = build_setup["artifact"]
+        if args.reset:
+            artifact_name += "_reset"
+        if args.debug_jlink:
+            artifact_name += "_debug"
+        if args.artifact_suffix:
+            artifact_name += f"_{args.artifact_suffix}"
+
         log.inf(f"[{id}] Building for {artifact_name}")
         zmk_src_dir = Path(zmk.abspath) / "app"
         build_dir = (
@@ -280,10 +371,25 @@ class ZMKBuild(WestCommand):
         west_args = args.west_args
         build_cmake_args = build_setup.get("cmake-args", build_setup.get("cmake_args", ""))
         cmake_args = (
-            args.cmake_args.split() if args.cmake_args else []
-        ) + build_cmake_args.split()
+            (args.cmake_args.split() if args.cmake_args else [])
+            + build_cmake_args.split()
+            + (self.DEBUG_CMAKE_ARGS if args.debug_jlink else [])
+            + (["-DCONFIG_ZMK_SETTINGS_RESET_ON_START=y"] if args.reset else [])
+        )
         config_path = Path(args.config_path).absolute()
-        extra_modules = [str(Path(extra_module).absolute()) for extra_module in args.extra_modules]
+        extra_modules = list(
+            set(
+                [str(Path(extra_module).absolute()) for extra_module in args.extra_modules]
+                + list(
+                    itertools.chain.from_iterable(
+                        [
+                            self.discover_extra_modules(id, strategy, config_path)
+                            for strategy in args.extra_module_auto_discovery
+                        ]
+                    )
+                )
+            )
+        )
         # NOTE: 'snippets' is this commands' extension. Not supported by ZMK official build
         snippets = list(map(lambda s: f"-S {s}", args.snippet + build_setup.get("snippets", [])))
         if "snippet" in build_setup:
@@ -333,6 +439,10 @@ class ZMKBuild(WestCommand):
 
         if proc.returncode != 0:
             log.err(f"[{id}] Build failed in {build_dir}. See log in {log_file_path}")
+            if args.quiet:
+                with open(log_file_path, "r") as f:
+                    for line in f:
+                        log.err(f"[{id}] " + line.rstrip())
         elif not Path(build_dir / "zephyr" / "zmk.uf2").exists():
             log.err(
                 f'[{id}] Build succeeded but firmware artifact not found in {build_dir / "zephyr" / "zmk.uf2"}'
@@ -342,4 +452,42 @@ class ZMKBuild(WestCommand):
                 f'[{id}] Build succeeded. Firmware artifact at: {build_dir / "zephyr" / "zmk.uf2"}'
             )
 
+        if args.flash and proc.returncode == 0:
+            return self._flash(id, args, build_dir)
+
+        return proc.returncode
+
+    def _flash(self, id, args, build_dir: Path):
+        command = [
+            "west",
+            "flash",
+            "-d",
+            str(build_dir),
+        ]
+        if isinstance(args.flash, str):
+            command += ["--runner", args.flash]
+        log.inf(f"[{id}] Flashing with command: " + " ".join(command))
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as flash_log:
+            proc = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=10
+            )
+            for line in proc.stdout:
+                flash_log.write(line)
+                if not args.quiet:
+                    log.inf(f"[{id}] " + line.rstrip())
+        log.inf(f"[{id}] Waiting for flashing to complete...")
+        proc.wait()
+        log_file_path = build_dir / "flash.log"
+        shutil.move(flash_log.name, log_file_path)
+
+        if proc.returncode != 0:
+            log.err(
+                f"[{id}] Flashing failed for build dir: {build_dir} See log in {log_file_path}"
+            )
+            if args.quiet:
+                with open(log_file_path, "r") as f:
+                    for line in f:
+                        log.err(f"[{id}] " + line.rstrip())
+        else:
+            log.inf(f"[{id}] Flashing succeeded for build dir: {build_dir}")
         return proc.returncode

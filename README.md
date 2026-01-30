@@ -36,15 +36,43 @@ $ pip install -r <path to zmk-west-commands>/requirements.txt
 
 Small `west build` wrapper command for zmk modules.
 
-This command reads build-setup from zmk's `build.yaml` and automatically configures options for `west build`.
+This command reads zmk's `build.yaml` and automatically configures options for `west build`.
 
 ```bash
-# Select build targets interactively
-$ west zmk-build <path to your zmk-config/config> -m <path to your zmk-config> -i
-
-# Build all targets in parallel
-$ west zmk-build <path to your zmk-config/config> -m <path to your zmk-config> -q # q: suppress build log
+$ cd <path to your zmk-config>
+$ west zmk-build
 ```
+
+You can filter build target if multiple target exists in `build.yaml`.
+
+```bash
+# Select build targets interactively by -i (requires additional dependency)
+$ west zmk-build -i
+
+# Filter build target by artifact name (Build if artifact name=*mykdb*)
+$ west zmk-build -a mykbd
+```
+
+You can also flash directly after build. It internally executes `west flash -d <build dir>`.
+
+```
+# Using default runner of the target board (e.g. UF2 for XIAO nrf52840)
+$ west zmk-build --flash
+# Specify runner (the same to west flash --runner XXXX)
+$ west zmk-build --flash jlink
+```
+
+There some useful shortcuts to specify useful cmake-args
+
+```
+# Erase persistent settings (e.g. BLE pairing setting) on restart
+# It's the same to --cmake-args ' -DCONFIG_ZMK_SETTINGS_RESET_ON_START'
+$ west zmk-build --reset
+# Build with debug mode and enable RTT console for segger jlink
+$ west zmk-build --debug-jlink
+```
+
+##### Extended behavior
 
 As extended behavior, this command recognizes `snippets` field in `build.yaml` to allow specifying multiple snippets.
 
@@ -63,7 +91,9 @@ include:
 
 ```
 $ west zmk-build -h
-usage: west zmk-build [-h] [-d BUILD_DIR] [-m [EXTRA_MODULES ...]] [--build-yaml BUILD_YAML] [-b BOARD [BOARD ...]] [-s SHIELD [SHIELD ...]] [-S SNIPPET [SNIPPET ...]] [-a ARTIFACT] [--cmake-args CMAKE_ARGS] [-q] [-n] [-i] [-P PARALLELISM] [-p {auto,always,never}] config_path [west_args ...]
+usage: west zmk-build [-h] [-d BUILD_DIR] [-m [EXTRA_MODULES ...]] [--extra-module-auto-discovery [{zmk-config,current,walk-up,none} ...]] [--build-yaml BUILD_YAML] [-b BOARD [BOARD ...]] [-s SHIELD [SHIELD ...]]
+                      [-S SNIPPET [SNIPPET ...]] [-a ARTIFACT] [-as ARTIFACT_SUFFIX] [--cmake-args CMAKE_ARGS] [-q] [-n] [-i] [-P PARALLELISM] [-p {auto,always,never}] [--debug-jlink] [--reset] [--flash [FLASH]]
+                      [config_path] [west_args ...]
 
 Build ZMK firmware with specified zmk-config directory using west build. The command parses build.yaml to set up the build target automatically.
 
@@ -77,8 +107,12 @@ options:
                         Path to the directory to output test artifacts. Artifact name is appended and the output results in `<build dir>/<artifact name>/`. `<west workspace root>/build` by default.
   -m [EXTRA_MODULES ...], --extra-modules [EXTRA_MODULES ...]
                         Additional ZMK modules to include. When building your zmk-config, root of the zmk-config should be specified.
+  --extra-module-auto-discovery [{zmk-config,current,walk-up,none} ...]
+                        Strategies to find extra modules automatically. 'zmk-config': add parent of config directory as extra module if zephyr/module.yml exists there 'current': add current working directory as extra module if
+                        zephyr/module.yml exists there 'walk-up': walk up from parent of current directory to find zephyr/module.yml and add the first matched directory as extra module 'none': to disable auto discovery
   --build-yaml BUILD_YAML
-                        Path to build.yaml file. By default, searched in order: <config_path>/../build.y[a]ml (zmk-config's official way) -> <config_path>/build.y[a]ml (this command's extension). In addition to ZMK's offical definition, 'snippets' field is recognized to specify multiple snippets
+                        Path to build.yaml file. By default, searched in order: <config_path>/../build.y[a]ml (zmk-config's official way) -> <config_path>/build.y[a]ml (this command's extension). In addition to ZMK's offical
+                        definition, 'snippets' field is recognized to specify multiple snippets
   -b BOARD [BOARD ...], --board BOARD [BOARD ...]
                         Specify the target boards to build for. Prioritized over build.yaml setting (=works as filter if build.yaml found).
   -s SHIELD [SHIELD ...], --shield SHIELD [SHIELD ...]
@@ -86,17 +120,23 @@ options:
   -S SNIPPET [SNIPPET ...], --snippet SNIPPET [SNIPPET ...]
                         Specify snippets to build for. Merged with build.yaml setting.
   -a ARTIFACT, --artifact ARTIFACT
-                        Used for build directory naming. Prioritized over build.yaml setting. Works as filter for build.yaml records with artifact name. Artifact .uf2 file will be placed at <build dir>/<artifact name>/zephyr/zmk.uf2 zmk-config directory name by default if build target is only one. If multiple
-                        build targets are specified, board name and shield name are appended to artifact name.
+                        Used for build directory naming. Prioritized over build.yaml setting. Works as filter for build.yaml records with artifact name. Artifact .uf2 file will be placed at <build dir>/<artifact name>/zephyr/zmk.uf2
+                        zmk-config directory name by default if build target is only one. If multiple build targets are specified, board name and shield name are appended to artifact name. If --reset is specified, '_reset' is appended
+                        to artifact name. If --debug-jlink is specified, '_debug' is appended to artifact name.
+  -as ARTIFACT_SUFFIX, --artifact-suffix ARTIFACT_SUFFIX
+                        Suffix to append to artifact name for build directory naming.
   --cmake-args CMAKE_ARGS
                         Additional arguments to pass like `west build -- <cmake-args>`. Merged with build.yaml. Need to be passed as string with white space like --cmake-args ' -D foo -D bar'
   -q, --quiet           Reduce output verbosity if build succeeds.
   -n, --no-run          Skip build and just outputs list of detected build targets.
-  -i, --interactive     Interactively select build target from all detected candidates. Requires `pip install -r <path to zmk-west-commands>/requirements.tx` to work.
+  -i, --interactive     Interactively select build target from all detected candidates. Requires `pip install -r <path to zmk-west-commands>/requirements.txt` to work.
   -P PARALLELISM, --parallelism PARALLELISM
                         Number of parallel build jobs. Defaults to number of CPU cores.
   -p {auto,always,never}, --pristine {auto,always,never}
                         pristine build folder setting (the same to west build argument)
+  --debug-jlink         Build for debug with Segger J-Link and RTT console.
+  --reset               ' Build with reset settings on startup mode by specifying -DCONFIG_ZMK_SETTINGS_RESET_ON_START
+  --flash [FLASH]       Flash the built firmware after successful build. Optional argument to specify the runner to flash to. (The same to west flash --runner)
 ```
 
 </details>
