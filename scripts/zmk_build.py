@@ -390,6 +390,9 @@ class ZMKBuild(WestCommand):
             config_path = config_subdir
             log.inf(f"[{id}] Using config subdirectory: {config_path}")
         
+        # Note: We pass the original args.config_path to module discovery, not the modified config_path.
+        # This is intentional - module discovery should check if the user-provided path is a module,
+        # not the config subdirectory.
         discovery_results = [
             self.discover_extra_modules(id, strategy, Path(args.config_path).absolute())
             for strategy in args.extra_module_auto_discovery
