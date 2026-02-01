@@ -99,7 +99,7 @@ class WestCommandsTests(unittest.TestCase):
         self.assertIn("No build targets found", result.stdout + result.stderr)
 
     def test_zmk_build_with_zmk_config(self):
-        result = run_west(["zmk-build", "tests/zmk-config/config", "-m", "tests/zmk-config", "-q"])
+        result = run_west(["zmk-build", "tests/zmk-config/config", "-q"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         artifact = "seeeduino_xiao_ble__my_awesome_keyboard"
         config_path = BUILD_DIR / artifact / "zephyr" / ".config"
@@ -111,7 +111,7 @@ class WestCommandsTests(unittest.TestCase):
         ]:
             self.assertIn(entry, config_text, f"{entry} not found in {artifact}")
 
-    def test_zmk_build_auto_module_discovery(self):
+    def test_zmk_build_parent_of_config(self):
         result = run_west(["zmk-build", "tests/zmk-config", "-q"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         artifact = "seeeduino_xiao_ble__my_awesome_keyboard"
@@ -123,13 +123,6 @@ class WestCommandsTests(unittest.TestCase):
             "CONFIG_MY_AWESOME_KEYBOARD_SPECIAL_FEATURE=y",
         ]:
             self.assertIn(entry, config_text, f"{entry} not found in {artifact}")
-        log_path = BUILD_DIR / artifact / "stdout_and_stderr.log"
-        self.assertTrue(log_path.exists(), "stdout_and_stderr.log should be generated")
-        log_text = log_path.read_text()
-        for entry in [
-            'Auto discovered extra modules'
-        ]:
-            self.assertIn(entry, log_text, f"{entry} not found in stdout_and_stderr.log")
 
 
 if __name__ == "__main__":

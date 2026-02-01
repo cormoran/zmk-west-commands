@@ -1,5 +1,4 @@
 import concurrent.futures
-from email.policy import default
 import itertools
 import shutil
 from west import log
@@ -49,9 +48,9 @@ class ZMKBuild(WestCommand):
         parser.add_argument(
             "config_path",
             nargs="?",
-            default=Path.cwd(),
+            default=Path.cwd() / "config",
             help="""
-            path to your zmk-config/config directory
+            path to your zmk-config/config directory or zmk-config directory.
             """,
         )
         parser.add_argument(
@@ -225,6 +224,11 @@ class ZMKBuild(WestCommand):
         except StopIteration:
             log.die("[*] ZMK project not found in manifest.")
 
+        # Rewrite args
+        if (Path(args.config_path) / "config").is_dir():
+            log.inf(f"[*] zmk-config/config directory: {Path(args.config_path)}")
+            args.config_path = str(Path(args.config_path) / "config")
+
         zmk_config = args.config_path
         build_yaml = (
             self._load_yaml(args.build_yaml)
@@ -317,7 +321,7 @@ class ZMKBuild(WestCommand):
                     inc["artifact"] = f'{prefix}{inc["board"]}__{inc["shield"]}'
                 else:
                     inc["artifact"] = (
-                        args.artifact if args.artifact else Path(args.config_path).name
+                        args.artifact if args.artifact else Path(args.config_path).parent.name
                     )
         if len(matrix) != len(set(map(lambda inc: inc["artifact"], matrix))):
             log.die("Duplicated artifact names found.")
@@ -382,6 +386,7 @@ class ZMKBuild(WestCommand):
             + (["-DCONFIG_ZMK_SETTINGS_RESET_ON_START=y"] if args.reset else [])
         )
         config_path = Path(args.config_path).absolute()
+
         extra_modules = list(
             set(
                 [str(Path(extra_module).absolute()) for extra_module in args.extra_modules]
