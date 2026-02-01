@@ -1,10 +1,10 @@
 # zmk-west-commands
 
-west module which provides useful commands for zmk-config build and zmk-module development.
+A west module that provides useful commands for zmk-config build and zmk-module development.
 
 ## How to use
 
-Add below items to your west manifest.
+Add the following items to your west manifest.
 
 ```yaml:west.yml
 manifest:
@@ -34,7 +34,7 @@ $ pip install -r <path to zmk-west-commands>/requirements.txt
 
 ### west zmk-build
 
-Small `west build` wrapper command for zmk modules.
+A small `west build` wrapper command for zmk modules.
 
 This command reads zmk's `build.yaml` and automatically configures options for `west build`.
 
@@ -43,30 +43,30 @@ $ cd <path to your zmk-config>
 $ west zmk-build
 ```
 
-You can filter build target if multiple target exists in `build.yaml`.
+You can filter build targets if multiple targets exist in `build.yaml`.
 
 ```bash
 # Select build targets interactively by -i (requires additional dependency)
 $ west zmk-build -i
 
-# Filter build target by artifact name (Build if artifact name=*mykdb*)
+# Filter build targets by artifact name (Build if artifact name=*mykbd*)
 $ west zmk-build -a mykbd
 ```
 
-You can also flash directly after build. It internally executes `west flash -d <build dir>`.
+You can also flash directly after the build. It internally executes `west flash -d <build dir>`.
 
 ```
-# Using default runner of the target board (e.g. UF2 for XIAO nrf52840)
+# Using the default runner of the target board (e.g. UF2 for XIAO nrf52840)
 $ west zmk-build --flash
-# Specify runner (the same to west flash --runner XXXX)
+# Specify runner (the same as west flash --runner XXXX)
 $ west zmk-build --flash jlink
 ```
 
-There some useful shortcuts to specify useful cmake-args
+There are some useful shortcuts to specify cmake arguments:
 
 ```
 # Erase persistent settings (e.g. BLE pairing setting) on restart
-# It's the same to --cmake-args ' -DCONFIG_ZMK_SETTINGS_RESET_ON_START'
+# It's the same as --cmake-args ' -DCONFIG_ZMK_SETTINGS_RESET_ON_START'
 $ west zmk-build --reset
 # Build with debug mode and enable RTT console for segger jlink
 $ west zmk-build --debug-jlink
@@ -74,7 +74,7 @@ $ west zmk-build --debug-jlink
 
 ##### Extended behavior
 
-As extended behavior, this command recognizes `snippets` field in `build.yaml` to allow specifying multiple snippets.
+As an extended behavior, this command recognizes the `snippets` field in `build.yaml` to allow specifying multiple snippets.
 
 ```yaml:build.yaml
 include:
@@ -143,7 +143,7 @@ options:
 
 ### west zmk-test
 
-The command wraps zmk's `run-test.sh` to setup required env vars automatically.
+This command wraps zmk's `run-test.sh` to set up required environment variables automatically.
 
 ```bash
 # Run all tests under specified directory
@@ -157,7 +157,7 @@ usage: west zmk-test [-h] [-d BUILD_DIR] [-m [EXTRA_MODULES ...]] [-v] [test_pat
 Run the ZMK test suite with zmk's run-test.sh script.
 
 positional arguments:
-  test_path             Specify (parent) test directory to run. The command finds tests recursively by searching `native_posix_64.keymap`. Current directory by default.
+  test_path             Specify the (parent) test directory to run. The command finds tests recursively by searching `native_posix_64.keymap`. Current directory by default.
 
 options:
   -h, --help            show this help message and exit
@@ -180,7 +180,7 @@ TODO
 
 There are two west workspace layout options.
 
-**Option1: Download dependencies in parent directory**
+**Option 1: Download dependencies in parent directory**
 
 This option is west's standard way. Choose this option if you want to re-use dependent projects in other zephyr module development.
 
@@ -193,7 +193,7 @@ west update --narrow
 west zephyr-export
 ```
 
-The directory structure becomes like below:
+The directory structure becomes as follows:
 
 ```
 west-workspace
@@ -208,27 +208,26 @@ west-workspace
   - your-other-repo
 ```
 
-**Option2: Download dependencies in ./dependencies (Enabled in dev-container)**
+**Option 2: Download dependencies in ./dependencies (Enabled in dev-container)**
 
 Choose this option if you want to download dependencies under this directory (like `node_modules` in npm).
-This option is useful for specifying cache target in CI. The layout is relatively easy to recognize if you want to isolate dependencies.
+This option is useful for specifying cache target in CI. This layout is easier to understand if you want to isolate dependencies.
 
-Note that `.west` is placed in parent directory. Creating empty parent directory is required like option1 to avoid conflict with other zephyr module development.
+Note that `.west` is placed in the parent directory. Creating an empty parent directory is required like option 1 to avoid conflicts with other zephyr module development.
 
 ```bash
 mkdir west-workspace
 cd west-workspace
 west init -l . --mf scripts/west-test-standalone.yml
-# If you use dev container, start from below commands. Above commands are executed
+# If you use dev container, start from the following commands. Above commands are executed
 # automatically. (but directory name is /workspace instead of west-workspace for dev container)
 west update --narrow
 west zephyr-export
 ```
 
-The directory structure becomes like below:
+The directory structure becomes as follows:
 
 ```
-The directory structure becomes like below:
 west-workspace
   - .west/config
   - build : build output directory
@@ -241,25 +240,25 @@ west-workspace
 
 #### Dev container
 
-Dev container is configured for setup option2. The container creates below volumes to re-use resources among containers.
+The dev container is configured for setup option 2. The container creates the following volumes to re-use resources among containers.
 
-- zmk-dependencies: dependencies dir for setup option2
+- zmk-dependencies: dependencies dir for setup option 2
 - zmk-build: build output directory
-- zmk-root-user: /root, the same to ZMK's official dev container
+- zmk-root-user: /root, the same as ZMK's official dev container
 
 If you don't want to share resources, please rename the volume name in `devcontainer.json`.
 
 ### Test
 
-`./tests` directory contains zmk-config to test west commands.
-You can try with below command.
+The `./tests` directory contains zmk-config to test west commands.
+You can try it with the following commands.
 
 ```bash
 west zmk-test tests
 west zmk-build tests/build_yaml
 ```
 
-Below test script verifies output of above commands to detect regressions.
+The following test script verifies the output of the above commands to detect regressions.
 
 ```bash
 python -m unittest
