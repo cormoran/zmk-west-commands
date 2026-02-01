@@ -96,7 +96,7 @@ class ZMKTest(WestCommand):
                 out_log.write(line)
                 if (
                     line.startswith("PASS:")
-                    or line.startswith("FAIL:")
+                    or line.startswith("FAILED:")
                     or line.startswith("PENDING:")
                     or line.startswith("Running:")
                 ):
@@ -111,5 +111,5 @@ class ZMKTest(WestCommand):
             log.err(f"Tests failed. See {log_file_path} for details.")
             with open(log_file_path, "r") as log_file:
                 for line in log_file:
-                    log.err(line.rstrip())
+                    log.inf(line.rstrip())
         return proc.returncode
