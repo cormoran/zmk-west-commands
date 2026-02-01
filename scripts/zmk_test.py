@@ -1,3 +1,5 @@
+import shutil
+import tempfile
 from west import log
 from west.commands import WestCommand
 from west.util import west_topdir
@@ -78,7 +80,36 @@ class ZMKTest(WestCommand):
         env["ZMK_SRC_DIR"] = zmk_src_dir
         env["ZMK_BUILD_DIR"] = str(build_dir)
         env["ZMK_EXTRA_MODULES"] = ";".join(extra_modules)
-        env["ZMK_TESTS_VERBOSE"] = "1" if args.verbose else ""
-        exit(
-            subprocess.run([f"{zmk_src_dir}/run-test.sh", "."], env=env, cwd=test_path).returncode
-        )
+        env["ZMK_TESTS_VERBOSE"] = "1"
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as out_log:
+            proc = subprocess.Popen(
+                [f"{zmk_src_dir}/run-test.sh", "."],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=10,
+                env=env,
+                cwd=test_path,
+            )
+
+            for line in proc.stdout:
+                out_log.write(line)
+                if (
+                    line.startswith("PASS:")
+                    or line.startswith("FAIL:")
+                    or line.startswith("PENDING:")
+                    or line.startswith("Running:")
+                ):
+                    log.inf(line.rstrip())
+                elif args.verbose:
+                    log.dbg(line.rstrip())
+        proc.wait()
+        log_file_path = build_dir / "stdout_and_stderr.log"
+        shutil.move(out_log.name, log_file_path)
+
+        if proc.returncode != 0 and not args.verbose:
+            log.err(f"Tests failed. See {log_file_path} for details.")
+            with open(log_file_path, "r") as log_file:
+                for line in log_file:
+                    log.err(line.rstrip())
+        return proc.returncode
