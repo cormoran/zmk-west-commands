@@ -18,10 +18,11 @@ class ZMKBuild(WestCommand):
     DEBUG_CMAKE_ARGS = [
         "-DCMAKE_BUILD_TYPE=Debug",
         # Enable RTT
-        "-DCONFIG_USE_SEGGER_RTT=y" "-DCONFIG_RTT_CONSOLE=y",
+        "-DCONFIG_USE_SEGGER_RTT=y",
+        "-DCONFIG_RTT_CONSOLE=y",
         "-DCONFIG_UART_CONSOLE=n",
         "-DCONFIG_LOG=y",
-        "-DCONFIG_LOG_BACKEND_RTT=y",
+        "-DCONFIG_LOG_BACKEND_RTT=n",
         "-DCONFIG_LOG_BACKEND_UART=n",
         # Enable shell
         "-DCONFIG_SHELL=y",
@@ -31,6 +32,9 @@ class ZMKBuild(WestCommand):
         "-DCONFIG_DEBUG_INFO=y",
         "-DCONFIG_THREAD_NAME=y",
         "-DCONFIG_DEBUG_THREAD_INFO=y",
+        "-DCONFIG_THREAD_MONITOR=y",
+        "-DCONFIG_THREAD_STACK_INFO=y",
+        "-DCONFIG_INIT_STACKS=y",
     ]
 
     def __init__(self):
