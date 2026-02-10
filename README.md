@@ -72,6 +72,21 @@ $ west zmk-build --reset
 $ west zmk-build --debug-jlink
 ```
 
+#### VSCode Integration
+
+You can generate VSCode settings for IntelliSense and debugging:
+
+```bash
+# Generate .vscode/c_cpp_properties.json and .vscode/launch.json
+$ west zmk-build --vscode
+```
+
+This creates:
+- `.vscode/c_cpp_properties.json` - IntelliSense configuration using compile_commands.json
+- `.vscode/launch.json` - Debugging configuration for Cortex-Debug extension with J-Link
+
+Note: Currently only supports nRF52840 boards.
+
 ##### Extended behavior
 
 As an extended behavior, this command recognizes the `snippets` field in `build.yaml` to allow specifying multiple snippets.
@@ -92,7 +107,7 @@ include:
 ```
 $ west zmk-build -h
 usage: west zmk-build [-h] [-d BUILD_DIR] [-m [EXTRA_MODULES ...]] [--extra-module-auto-discovery [{zmk-config,current,walk-up,none} ...]] [--build-yaml BUILD_YAML] [-b BOARD [BOARD ...]] [-s SHIELD [SHIELD ...]]
-                      [-S SNIPPET [SNIPPET ...]] [-a ARTIFACT] [-as ARTIFACT_SUFFIX] [--cmake-args CMAKE_ARGS] [-q] [-n] [-i] [-P PARALLELISM] [-p {auto,always,never}] [--debug-jlink] [--reset] [--flash [FLASH]]
+                      [-S SNIPPET [SNIPPET ...]] [-a ARTIFACT] [-as ARTIFACT_SUFFIX] [--cmake-args CMAKE_ARGS] [-q] [-n] [-i] [-P PARALLELISM] [-p {auto,always,never}] [--debug-jlink] [--reset] [--flash [FLASH]] [--vscode]
                       [config_path] [west_args ...]
 
 Build ZMK firmware with specified zmk-config directory using west build. The command parses build.yaml to set up the build target automatically.
@@ -137,6 +152,7 @@ options:
   --debug-jlink         Build for debug with Segger J-Link and RTT console.
   --reset               ' Build with reset settings on startup mode by specifying -DCONFIG_ZMK_SETTINGS_RESET_ON_START
   --flash [FLASH]       Flash the built firmware after successful build. Optional argument to specify the runner to flash to. (The same to west flash --runner)
+  --vscode              Generate vscode settings for the build targets. .vscode/c_cpp_properties.json for IntelliSense and .vscode/launch.json for debugging with Cortex-Debug extension is generated. It only supports nRF52840 for now.
 ```
 
 </details>
