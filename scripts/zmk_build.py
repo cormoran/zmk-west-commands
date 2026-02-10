@@ -1,5 +1,6 @@
 import concurrent.futures
 import itertools
+import json
 import shutil
 from west import log
 from west.commands import WestCommand
@@ -217,6 +218,14 @@ class ZMKBuild(WestCommand):
             Optional argument to specify the runner to flash to. (The same to west flash --runner)
             """,
         )
+        parser.add_argument(
+            "--vscode",
+            action="store_true",
+            help="""Generate vscode settings for the build targets.
+            .vscode/c_cpp_properties.json for IntelliSense and .vscode/launch.json for debugging with Cortex-Debug extension is generated.
+            It only supports nRF52840 for now.
+            """,
+        )
         return parser
 
     def do_run(self, args, unknown_args):
@@ -350,6 +359,18 @@ class ZMKBuild(WestCommand):
         if args.no_run:
             exit(0)
 
+        # Modify matrix
+        for inc in matrix:
+            if args.reset:
+                inc["artifact"] += "_reset"
+            if args.debug_jlink:
+                inc["artifact"] += "_debug"
+            if args.artifact_suffix:
+                inc["artifact"] += f"_{args.artifact_suffix}"
+
+        if args.vscode:
+            self._generate_vscode_settings(args, matrix)
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallelism) as executor:
             futures = [
                 executor.submit(self._run_single_build, id, zmk, manifest, args, inc)
@@ -367,12 +388,6 @@ class ZMKBuild(WestCommand):
 
     def _run_single_build(self, id, zmk, manifest, args, build_setup):
         artifact_name = build_setup["artifact"]
-        if args.reset:
-            artifact_name += "_reset"
-        if args.debug_jlink:
-            artifact_name += "_debug"
-        if args.artifact_suffix:
-            artifact_name += f"_{args.artifact_suffix}"
 
         log.inf(f"[{id}] Building for {artifact_name}")
         zmk_src_dir = Path(zmk.abspath) / "app"
@@ -505,3 +520,111 @@ class ZMKBuild(WestCommand):
         else:
             log.inf(f"[{id}] Flashing succeeded for build dir: {build_dir}")
         return proc.returncode
+
+    def _generate_vscode_settings(self, args, matrix):
+        vscode_dir = Path.cwd() / ".vscode"
+        os.makedirs(vscode_dir, exist_ok=True)
+        # Generate c_cpp_properties.json
+        c_cpp_properties_path = vscode_dir / "c_cpp_properties.json"
+        if not c_cpp_properties_path.exists():
+            c_cpp_properties = {
+                "configurations": [],
+                "version": 4,
+            }
+        else:
+            try:
+                with open(c_cpp_properties_path, "r") as f:
+                    c_cpp_properties = json.load(f)
+            except json.JSONDecodeError:
+                log.err(
+                    f"[0] Failed to parse existing c_cpp_properties.json at {c_cpp_properties_path}. Overwriting."
+                )
+                exit(1)
+        configurations_by_name = {
+            config["name"]: config for config in c_cpp_properties.get("configurations", [])
+        }
+        has_update = False
+        new_configurations = []
+        for build_setup in matrix:
+            artifact_name = build_setup["artifact"]
+            build_dir = (
+                Path(args.build_dir) / artifact_name
+                if args.build_dir
+                else Path(west_topdir()) / "build" / artifact_name
+            )
+            if artifact_name in configurations_by_name:
+                new_configurations.append(configurations_by_name[artifact_name])
+                log.inf(f"[0] VSCode configuration already exists: {artifact_name}")
+            else:
+                new_config = {
+                    "name": artifact_name,
+                    "compileCommands": [
+                        str(os.path.relpath(build_dir / "compile_commands.json", Path.cwd()))
+                    ],
+                }
+                new_configurations.append(new_config)
+                has_update = True
+        if has_update:
+            c_cpp_properties["configurations"] = new_configurations
+            with open(c_cpp_properties_path, "w") as f:
+                json.dump(c_cpp_properties, f, indent=4)
+            log.inf(f"[0] Generated/Updated VSCode C/C++ properties at {c_cpp_properties_path}")
+
+        # Generate launch.json
+        launch_path = vscode_dir / "launch.json"
+        if not launch_path.exists():
+            launch_config = {
+                "version": "0.2.0",
+                "configurations": [],
+            }
+        else:
+            try:
+                with open(launch_path, "r") as f:
+                    launch_config = json.load(f)
+            except json.JSONDecodeError:
+                log.err(f"[0] Failed to parse existing launch.json at {launch_path}. Overwriting.")
+                exit(1)
+        configurations_by_name = {
+            config["name"]: config for config in launch_config.get("configurations", [])
+        }
+        has_update = False
+        new_configurations = []
+        for build_setup in matrix:
+            artifact_name = build_setup["artifact"]
+            build_dir = (
+                Path(args.build_dir) / artifact_name
+                if args.build_dir
+                else Path(west_topdir()) / "build" / artifact_name
+            )
+            if artifact_name in configurations_by_name:
+                new_configurations.append(configurations_by_name[artifact_name])
+                log.inf(f"[0] VSCode configuration already exists: {artifact_name}")
+            else:
+                zmk_elf = str(os.path.relpath(build_dir / "zephyr" / "zmk.elf", Path.cwd()))
+                new_config = {
+                    "name": f"Debug ZMK - {artifact_name}",
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "servertype": "jlink",
+                    "rtos": "Zephyr",
+                    "device": "nRF52840_xxAA",
+                    "interface": "swd",
+                    "cwd": "${workspaceFolder}",
+                    "executable": zmk_elf,
+                    "svdFile": "${env:ZEPHYR_BASE}/soc/arm/nordic_nrf/nrf52/svd/nrf52840.svd",
+                    "loadFiles": [zmk_elf],
+                    "gdbPath": "${env:ZEPHYR_SDK_INSTALL_DIR}/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb",
+                    "rttConfig": {
+                        "enabled": True,
+                        "address": "auto",
+                        "searchSize": 4096,
+                        "decoders": [{"label": "RTT0", "port": 0, "type": "console"}],
+                    },
+                }
+                new_configurations.append(new_config)
+                has_update = True
+        if has_update:
+            launch_config["configurations"] = new_configurations
+            with open(launch_path, "w") as f:
+                json.dump(launch_config, f, indent=4)
+            log.inf(f"[0] Generated/Updated VSCode launch configurations at {launch_path}")
