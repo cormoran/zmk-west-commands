@@ -336,6 +336,7 @@ class ZMKBuild(WestCommand):
                     inc["artifact"] = (
                         args.artifact if args.artifact else Path(args.config_path).parent.name
                     )
+                inc["artifact"] = inc["artifact"].replace(" ", "_")
         if len(matrix) != len(set(map(lambda inc: inc["artifact"], matrix))):
             log.die("Duplicated artifact names found.")
 
