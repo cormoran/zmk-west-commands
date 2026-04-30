@@ -12,6 +12,15 @@ from pathlib import Path
 import os
 import subprocess
 import tempfile
+import re
+import argparse
+
+
+def check_regex(pattern):
+    try:
+        return re.compile(pattern)
+    except re.error:
+        raise argparse.ArgumentTypeError(f"Invalid regex pattern: {pattern}")
 
 
 class ZMKBuild(WestCommand):
@@ -144,6 +153,14 @@ class ZMKBuild(WestCommand):
             If multiple build targets are specified, board name and shield name are appended to artifact name.
             If --reset is specified, '_reset' is appended to artifact name.
             If --debug-jlink is specified, '_debug' is appended to artifact name.
+            """,
+        )
+        parser.add_argument(
+            "-af",
+            "--artifact-filter",
+            type=check_regex,
+            help="""
+            Filter build targets by given regex pattern. Matches to substring by default.
             """,
         )
         parser.add_argument(
@@ -317,6 +334,10 @@ class ZMKBuild(WestCommand):
                 return False
             if args.artifact and "artifact" in inc and args.artifact != inc.get("artifact", None):
                 return False
+            if args.artifact_filter:
+                artifact_name = inc.get("artifact", "")
+                if not args.artifact_filter.search(artifact_name):
+                    return False
             return True
 
         matrix = list(filter(filter_out_matrix_by_args, matrix))
