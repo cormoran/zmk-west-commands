@@ -221,8 +221,15 @@ class ZMKBuild(WestCommand):
         parser.add_argument(
             "--reset",
             action="store_true",
-            help="""'
+            help="""
             Build with reset settings on startup mode by specifying -DCONFIG_ZMK_SETTINGS_RESET_ON_START
+            """,
+        )
+        parser.add_argument(
+            "--debug-print",
+            action="store_true",
+            help="""
+            Build with debug print settings by specifying -S zmk-usb-logging
             """,
         )
         parser.add_argument(
@@ -386,7 +393,9 @@ class ZMKBuild(WestCommand):
             if args.reset:
                 inc["artifact"] += "_reset"
             if args.debug_jlink:
-                inc["artifact"] += "_debug"
+                inc["artifact"] += "_debug_jlink"
+            if args.debug_print:
+                inc["artifact"] += "_debug_print"
             if args.artifact_suffix:
                 inc["artifact"] += f"_{args.artifact_suffix}"
 
@@ -460,6 +469,8 @@ class ZMKBuild(WestCommand):
         snippets = list(map(lambda s: f"-S {s}", args.snippet + build_setup.get("snippets", [])))
         if "snippet" in build_setup:
             snippets.append(f"-S {build_setup['snippet']}")
+        if args.debug_print:
+            snippets.append("-S zmk-usb-logging")
         os.makedirs(build_dir, exist_ok=True)
 
         with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as out_log:
@@ -530,12 +541,13 @@ class ZMKBuild(WestCommand):
         else:
             log.err(f"[{id}] {result['message']}")
 
-        if args.flash and proc.returncode == 0:
-            return self._flash(id, args, build_dir)
-
+        if args.flash and result["success"]:
+            if self._flash(id, args, build_dir) != 0:
+                result["message"] += " but flashing failed."
+                result["success"] = False
         return result
 
-    def _flash(self, id, args, build_dir: Path):
+    def _flash(self, id, args, build_dir: Path) -> int:
         command = [
             "west",
             "flash",
