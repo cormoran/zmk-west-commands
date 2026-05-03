@@ -12,6 +12,15 @@ from pathlib import Path
 import os
 import subprocess
 import tempfile
+import re
+import argparse
+
+
+def check_regex(pattern):
+    try:
+        return re.compile(pattern)
+    except re.error:
+        raise argparse.ArgumentTypeError(f"Invalid regex pattern: {pattern}")
 
 
 class ZMKBuild(WestCommand):
@@ -147,6 +156,14 @@ class ZMKBuild(WestCommand):
             """,
         )
         parser.add_argument(
+            "-af",
+            "--artifact-filter",
+            type=check_regex,
+            help="""
+            Filter build targets by given regex pattern. Matches to substring by default.
+            """,
+        )
+        parser.add_argument(
             "-as",
             "--artifact-suffix",
             help="""
@@ -248,7 +265,7 @@ class ZMKBuild(WestCommand):
             if args.build_yaml
             else self._find_build_yaml(Path(zmk_config))
         )
-        self._run_for_all(zmk, manifest, args, build_yaml)
+        exit(self._run_for_all(zmk, manifest, args, build_yaml))
 
     def _find_build_yaml(self, config_path: Path) -> dict:
         parent_dir = config_path.parent
@@ -293,10 +310,10 @@ class ZMKBuild(WestCommand):
             map(str, filter(lambda p: (p / "zephyr" / "module.yml").exists(), candidates))
         )
         if len(result) > 0:
-            log.inf(f"[{id}] Auto discovered extra modules ({strategy}): {result}")
+            log.dbg(f"[{id}] Auto discovered extra modules ({strategy}): {result}")
         return result
 
-    def _run_for_all(self, zmk, manifest, args, build_yaml: dict):
+    def _run_for_all(self, zmk, manifest, args, build_yaml: dict) -> int:
         # build all build matrix
         boards = set(args.board if args.board else build_yaml.get("boards", []))
         shields = set(args.shield if args.shield else build_yaml.get("shields", []))
@@ -317,6 +334,10 @@ class ZMKBuild(WestCommand):
                 return False
             if args.artifact and "artifact" in inc and args.artifact != inc.get("artifact", None):
                 return False
+            if args.artifact_filter:
+                artifact_name = inc.get("artifact", "")
+                if not args.artifact_filter.search(artifact_name):
+                    return False
             return True
 
         matrix = list(filter(filter_out_matrix_by_args, matrix))
@@ -358,7 +379,7 @@ class ZMKBuild(WestCommand):
                 log.dbg(f"[*]  - {inc}")
 
         if args.no_run:
-            exit(0)
+            return 0
 
         # Modify matrix
         for inc in matrix:
@@ -377,17 +398,32 @@ class ZMKBuild(WestCommand):
                 executor.submit(self._run_single_build, id, zmk, manifest, args, inc)
                 for id, inc in enumerate(matrix)
             ]
-            code = 0
-            for future in concurrent.futures.as_completed(futures):
+            any_failed = False
+            results = []
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
                 try:
-                    code2 = future.result()
-                    if code2 != 0:
-                        code = code2
+                    result = future.result()
+                    results.append(result)
+                    if not result["success"]:
+                        any_failed = True
                 except Exception as e:
-                    log.err(f"Build failed: {e}")
-            exit(code)
+                    results.append(
+                        {"id": i, "success": False, "message": "Unexpected error: " + str(e)}
+                    )
+                    any_failed = True
+            if any_failed:
+                log.err("Some builds failed!")
+                for result in results:
+                    message = f'[{result["id"]}] {result["artifact"]} : {result["message"]}'
+                    if not result["success"]:
+                        log.err(message)
+                    else:
+                        log.inf(message)
+            else:
+                log.inf("All builds succeeded.")
+            return 1 if any_failed else 0
 
-    def _run_single_build(self, id, zmk, manifest, args, build_setup):
+    def _run_single_build(self, id, zmk, manifest, args, build_setup) -> dict:
         artifact_name = build_setup["artifact"]
 
         log.inf(f"[{id}] Building for {artifact_name}")
@@ -467,25 +503,37 @@ class ZMKBuild(WestCommand):
         log_file_path = build_dir / "stdout_and_stderr.log"
         shutil.move(out_log.name, log_file_path)
 
+        result = {
+            "id": id,
+            "artifact": artifact_name,
+            # "success": boolean
+            # "message": string
+        }
         if proc.returncode != 0:
-            log.err(f"[{id}] Build failed in {build_dir}. See log in {log_file_path}")
+            result["message"] = f"Failed. See log in {log_file_path}"
+            result["success"] = False
             if args.quiet:
                 with open(log_file_path, "r") as f:
-                    for line in f:
-                        log.err(f"[{id}] " + line.rstrip())
+                    logs = [f"[{id}] " + line.rstrip() for line in f]
+                    log.err("\n".join(logs))
         elif not Path(build_dir / "zephyr" / "zmk.uf2").exists():
-            log.err(
-                f'[{id}] Build succeeded but firmware artifact not found in {build_dir / "zephyr" / "zmk.uf2"}'
-            )
+            result[
+                "message"
+            ] = f"Succeeded but firmware artifact not found. See log in {log_file_path}"
+            result["success"] = False
         else:
-            log.inf(
-                f'[{id}] Build succeeded. Firmware artifact at: {build_dir / "zephyr" / "zmk.uf2"}'
-            )
+            result["message"] = f"Succeeded in {build_dir / 'zephyr' / 'zmk.uf2'}"
+            result["success"] = True
+
+        if result["success"]:
+            log.inf(f"[{id}] {result['message']}")
+        else:
+            log.err(f"[{id}] {result['message']}")
 
         if args.flash and proc.returncode == 0:
             return self._flash(id, args, build_dir)
 
-        return proc.returncode
+        return result
 
     def _flash(self, id, args, build_dir: Path):
         command = [
