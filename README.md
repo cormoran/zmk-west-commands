@@ -49,8 +49,10 @@ You can filter build targets if multiple targets exist in `build.yaml`.
 # Select build targets interactively by -i (requires additional dependency)
 $ west zmk-build -i
 
-# Filter build targets by artifact name (Build if artifact name=*mykbd*)
+# Specify specific artifact
 $ west zmk-build -a mykbd
+# Filter build targets by artifact name regex pattern
+$ west zmk-build -af 'mykbd-*'
 ```
 
 You can also flash directly after the build. It internally executes `west flash -d <build dir>`.
@@ -82,6 +84,7 @@ $ west zmk-build --vscode
 ```
 
 This creates:
+
 - `.vscode/c_cpp_properties.json` - IntelliSense configuration using compile_commands.json
 - `.vscode/launch.json` - Debugging configuration for Cortex-Debug extension with J-Link
 
