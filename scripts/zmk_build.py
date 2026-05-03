@@ -323,7 +323,10 @@ class ZMKBuild(WestCommand):
                     candidates.append(parent.absolute())
                     break
         result = list(
-            map(str, filter(lambda p: (p / "zephyr" / "module.yml").exists(), candidates))
+            map(
+                str,
+                filter(lambda p: (p / "zephyr" / "module.yml").exists(), candidates),
+            )
         )
         if len(result) > 0:
             log.dbg(f"[{id}] Auto discovered extra modules ({strategy}): {result}")
@@ -368,7 +371,7 @@ class ZMKBuild(WestCommand):
             if "artifact" not in inc:
                 if len(matrix) > 0:
                     prefix = (args.artifact + "__") if args.artifact else ""
-                    inc["artifact"] = f'{prefix}{inc["board"]}__{inc["shield"]}'
+                    inc["artifact"] = f"{prefix}{inc['board']}__{inc['shield']}"
                 else:
                     inc["artifact"] = (
                         args.artifact if args.artifact else Path(args.config_path).parent.name
@@ -390,7 +393,7 @@ class ZMKBuild(WestCommand):
             log.inf(f"[*] {len(matrix)} build targets found")
             for i, inc in enumerate(matrix):
                 log.inf(
-                    f'[*] - [{i}] {inc["artifact"]} board={inc["board"]}, shield={inc["shield"]}'
+                    f"[*] - [{i}] {inc['artifact']} board={inc['board']}, shield={inc['shield']}"
                 )
                 log.dbg(f"[*]  - {inc}")
 
@@ -438,7 +441,7 @@ class ZMKBuild(WestCommand):
             if any_failed:
                 log.err("Some builds failed!")
                 for result in results:
-                    message = f'[{result["id"]}] {result["artifact"]} : {result["message"]}'
+                    message = f"[{result['id']}] {result['artifact']} : {result['message']}"
                     if not result["success"]:
                         log.err(message)
                     else:
@@ -529,9 +532,7 @@ class ZMKBuild(WestCommand):
             ]
             + cmake_args
         )
-        log.inf(
-            f"[{id}] Building for {artifact_name} with command: " + " ".join(command)
-        )
+        log.inf(f"[{id}] Building for {artifact_name} with command: " + " ".join(command))
         log_file_path = build_dir / "stdout_and_stderr.log"
         proc = TeePopen(
             command,
@@ -552,9 +553,9 @@ class ZMKBuild(WestCommand):
                 with open(log_file_path, "r") as f:
                     log.err(f.read())
         elif not Path(build_dir / "zephyr" / "zmk.uf2").exists():
-            result[
-                "message"
-            ] = f"Succeeded but firmware artifact not found. See log in {log_file_path}"
+            result["message"] = (
+                f"Succeeded but firmware artifact not found. See log in {log_file_path}"
+            )
             result["success"] = False
         else:
             result["message"] = f"Succeeded in {build_dir / 'zephyr' / 'zmk.uf2'}"
