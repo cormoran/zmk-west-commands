@@ -55,13 +55,15 @@ $ west zmk-build -a mykbd
 $ west zmk-build -af 'mykbd-*'
 ```
 
-You can also flash directly after the build. It internally executes `west flash -d <build dir>`.
+You can also flash directly after the build. It internally executes `west flash -d <build dir> --skip-build`.
 
 ```bash
 # Using the default runner of the target board (e.g. UF2 for XIAO nrf52840)
 $ west zmk-build --flash
-# Specify runner (the same as west flash --runner XXXX)
-$ west zmk-build --flash jlink
+# Specify runner arguments with `+` prefix
+$ west zmk-build --flash +r jlink
+# Skip build
+$ west zmk-build --flash -sb
 ```
 
 There are some useful shortcuts to specify cmake arguments:

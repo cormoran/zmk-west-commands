@@ -1,7 +1,7 @@
 import concurrent.futures
 import itertools
 import json
-import shutil
+import sys
 from west import log
 from west.commands import WestCommand
 from west.util import west_topdir
@@ -10,10 +10,10 @@ import yaml
 
 from pathlib import Path
 import os
-import subprocess
-import tempfile
 import re
 import argparse
+import traceback
+from lib.tee_popen import TeePopen
 
 
 def check_regex(pattern):
@@ -233,13 +233,22 @@ class ZMKBuild(WestCommand):
             """,
         )
         parser.add_argument(
+            "-sb",
+            "--skip-build",
+            action="store_true",
+            help="""
+            Skip the build process and only perform other actions like flashing.
+            """,
+        )
+
+        parser.add_argument(
             "--flash",
-            nargs="?",
+            nargs="*",
             default=None,
-            const=True,
             help="""
             Flash the built firmware after successful build.
-            Optional argument to specify the runner to flash to. (The same to west flash --runner)
+            Flash arguments can be specified like `+r uf2 ++foo bar`.
+            + or ++ is replaced with -, -- and passed to west flash command.
             """,
         )
         parser.add_argument(
@@ -351,7 +360,7 @@ class ZMKBuild(WestCommand):
         if len(matrix) == 0:
             log.die("No build targets found. Specify boards/shields or check build.yaml.")
 
-        if len(matrix) > 1 and args.flash:
+        if len(matrix) > 1 and args.flash is not None:
             log.die("Cannot flash when multiple build targets are specified.")
 
         # set artifact name if not exists
@@ -416,8 +425,14 @@ class ZMKBuild(WestCommand):
                     if not result["success"]:
                         any_failed = True
                 except Exception as e:
+                    trace_str = traceback.format_exc()
                     results.append(
-                        {"id": i, "success": False, "message": "Unexpected error: " + str(e)}
+                        {
+                            "id": i,
+                            "artifact": matrix[i]["artifact"],
+                            "success": False,
+                            "message": "Unexpected error: " + f"{e}\n{trace_str}",
+                        }
                     )
                     any_failed = True
             if any_failed:
@@ -434,14 +449,32 @@ class ZMKBuild(WestCommand):
 
     def _run_single_build(self, id, zmk, manifest, args, build_setup) -> dict:
         artifact_name = build_setup["artifact"]
-
-        log.inf(f"[{id}] Building for {artifact_name}")
-        zmk_src_dir = Path(zmk.abspath) / "app"
         build_dir = (
             Path(args.build_dir) / artifact_name
             if args.build_dir
             else Path(west_topdir()) / "build" / artifact_name
         )
+        result = {
+            "id": id,
+            "artifact": artifact_name,
+            "success": True,
+            "message": "",
+        }
+        log.inf(f"[{id}] ---------------------")
+        if not args.skip_build:
+            result.update(self._build(id, zmk, args, build_setup, build_dir))
+        else:
+            log.inf(f"[{id}] Skipping build for {artifact_name} as per argument.")
+        if args.flash is not None and result["success"]:
+            log.inf(f"[{id}] ---------------------")
+            if self._flash(id, args, build_dir) != 0:
+                result["message"] += " but flashing failed."
+                result["success"] = False
+        return result
+
+    def _build(self, id, zmk, args, build_setup, build_dir) -> dict:
+        artifact_name = build_setup["artifact"]
+        zmk_src_dir = Path(zmk.abspath) / "app"
         west_args = args.west_args
         build_cmake_args = build_setup.get("cmake-args", build_setup.get("cmake_args", ""))
         cmake_args = (
@@ -473,50 +506,42 @@ class ZMKBuild(WestCommand):
             snippets.append("-S zmk-usb-logging")
         os.makedirs(build_dir, exist_ok=True)
 
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as out_log:
-            command = (
-                [
-                    "west",
-                    "build",
-                    "-s",
-                    str(zmk_src_dir),
-                    "-d",
-                    str(build_dir),
-                    "-b",
-                    build_setup["board"],
-                    "-p",
-                    args.pristine,
-                ]
-                + west_args
-                + snippets
-                + [
-                    "--",
-                    f'-DSHIELD={build_setup["shield"]}',
-                    f'-DZMK_EXTRA_MODULES={";".join(extra_modules)}',
-                    f"-DZMK_CONFIG={config_path}",
-                ]
-                + cmake_args
-            )
-            log.dbg(f"[{id}] command: " + " ".join(command))
-            proc = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=10,
-            )
-            for line in proc.stdout:
-                out_log.write(line)
-                if not args.quiet:
-                    log.inf(f"[{id}] " + line.rstrip())
-
-        proc.wait()
+        command = (
+            [
+                "west",
+                "build",
+                "-s",
+                str(zmk_src_dir),
+                "-d",
+                str(build_dir),
+                "-b",
+                build_setup["board"],
+                "-p",
+                args.pristine,
+            ]
+            + west_args
+            + snippets
+            + [
+                "--",
+                f"-DSHIELD={build_setup['shield']}",
+                f"-DZMK_EXTRA_MODULES={';'.join(extra_modules)}",
+                f"-DZMK_CONFIG={config_path}",
+            ]
+            + cmake_args
+        )
+        log.inf(
+            f"[{id}] Building for {artifact_name} with command: " + " ".join(command)
+        )
         log_file_path = build_dir / "stdout_and_stderr.log"
-        shutil.move(out_log.name, log_file_path)
-
+        proc = TeePopen(
+            command,
+            output_prefix=f"[{id}] ",
+            stdin=sys.stdin,
+            stdout=sys.stdout if not args.quiet else None,
+            log_file=open(log_file_path, "w", buffering=1),
+        ).start()
+        proc.wait()
         result = {
-            "id": id,
-            "artifact": artifact_name,
             # "success": boolean
             # "message": string
         }
@@ -525,8 +550,7 @@ class ZMKBuild(WestCommand):
             result["success"] = False
             if args.quiet:
                 with open(log_file_path, "r") as f:
-                    logs = [f"[{id}] " + line.rstrip() for line in f]
-                    log.err("\n".join(logs))
+                    log.err(f.read())
         elif not Path(build_dir / "zephyr" / "zmk.uf2").exists():
             result[
                 "message"
@@ -540,11 +564,6 @@ class ZMKBuild(WestCommand):
             log.inf(f"[{id}] {result['message']}")
         else:
             log.err(f"[{id}] {result['message']}")
-
-        if args.flash and result["success"]:
-            if self._flash(id, args, build_dir) != 0:
-                result["message"] += " but flashing failed."
-                result["success"] = False
         return result
 
     def _flash(self, id, args, build_dir: Path) -> int:
@@ -553,22 +572,24 @@ class ZMKBuild(WestCommand):
             "flash",
             "-d",
             str(build_dir),
+            "--skip-rebuild",
         ]
-        if isinstance(args.flash, str):
-            command += ["--runner", args.flash]
+        # replace + or ++ with - or -- for flash arguments
+        command += [
+            re.sub(r"^\+{1,2}", lambda m: "-" * len(m.group(0)), flash_arg)
+            for flash_arg in args.flash
+        ]
         log.inf(f"[{id}] Flashing with command: " + " ".join(command))
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as flash_log:
-            proc = subprocess.Popen(
-                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=10
-            )
-            for line in proc.stdout:
-                flash_log.write(line)
-                if not args.quiet:
-                    log.inf(f"[{id}] " + line.rstrip())
+        log_file_path = build_dir / "flash.log"
+        proc = TeePopen(
+            command,
+            output_prefix=f"[{id}] ",
+            stdin=sys.stdin,
+            stdout=sys.stdout if not args.quiet else None,
+            log_file=open(log_file_path, "w", buffering=1),
+        ).start()
         log.inf(f"[{id}] Waiting for flashing to complete...")
         proc.wait()
-        log_file_path = build_dir / "flash.log"
-        shutil.move(flash_log.name, log_file_path)
 
         if proc.returncode != 0:
             log.err(
@@ -576,8 +597,7 @@ class ZMKBuild(WestCommand):
             )
             if args.quiet:
                 with open(log_file_path, "r") as f:
-                    for line in f:
-                        log.err(f"[{id}] " + line.rstrip())
+                    log.err(f.read())
         else:
             log.inf(f"[{id}] Flashing succeeded for build dir: {build_dir}")
         return proc.returncode
