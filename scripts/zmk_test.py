@@ -112,4 +112,4 @@ class ZMKTest(WestCommand):
             with open(log_file_path, "r") as log_file:
                 for line in log_file:
                     log.inf(line.rstrip())
-        return proc.returncode
+        exit(proc.returncode)
