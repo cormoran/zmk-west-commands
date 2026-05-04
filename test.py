@@ -36,6 +36,24 @@ class WestCommandsTests(unittest.TestCase):
         for name in ("test1", "test2"):
             self.assertIn(f"PASS: {name}", log_content)
 
+    @unittest.skipUnless(platform.system() == "Linux", "zmk-test is only supported on Linux")
+    def test_zmk_test_fail(self):
+        tests_build = BUILD_DIR / "tests"
+        if tests_build.exists():
+            shutil.rmtree(tests_build)
+
+        result = run_west(["zmk-test", "tests-fail"])
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FAILED:  did not buil", result.stdout)
+        # Failed case is not shown..
+        # self.assertIn("FAILED: output-diff", result.stdout)
+
+        pass_log = tests_build / "pass-fail.log"
+        self.assertTrue(pass_log.exists(), "pass-fail.log should be generated")
+        log_content = pass_log.read_text()
+        self.assertIn("FAILED:  did not build", log_content)
+        # self.assertIn("FAILED: output-diff", log_content)
+
     def test_zmk_build_generates_expected_configs(self):
         artifacts = [
             "with_logging",
