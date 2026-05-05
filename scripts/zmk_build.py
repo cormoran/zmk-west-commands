@@ -538,7 +538,8 @@ class ZMKBuild(WestCommand):
             command,
             output_prefix=f"[{id}] ",
             stdin=sys.stdin,
-            stdout=sys.stdout if not args.quiet else None,
+            stdout=sys.stdout if not args.quiet else open(os.devnull, "w"),
+            stderr=sys.stdout if not args.quiet else open(os.devnull, "w"),
             log_file=open(log_file_path, "w", buffering=1),
         ).start()
         proc.wait()
