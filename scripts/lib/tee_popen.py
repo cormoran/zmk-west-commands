@@ -47,15 +47,11 @@ class TeePopen:
                     self._log_file.write(line)
                 buf.append(line)
         finally:
-            if self._log_file:
-                self._log_file.close()
             pipe.close()
 
     def __del__(self):
         if self._proc and self._proc.poll() is None:
             self._proc.terminate()
-        if self._log_file:
-            self._log_file.close()
 
     def start(self):
         self._proc = subprocess.Popen(
@@ -95,8 +91,6 @@ class TeePopen:
 
         for t in self._threads:
             t.join()
-        if self._log_file:
-            self._log_file.close()
         return returncode
 
     def run(self):
