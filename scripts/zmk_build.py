@@ -7,6 +7,8 @@ from west.commands import WestCommand
 from west.util import west_topdir
 from west.manifest import Manifest
 import yaml
+import tempfile
+import shutil
 
 from pathlib import Path
 import os
@@ -534,14 +536,18 @@ class ZMKBuild(WestCommand):
         )
         log.inf(f"[{id}] Building for {artifact_name} with command: " + " ".join(command))
         log_file_path = build_dir / "stdout_and_stderr.log"
-        proc = TeePopen(
-            command,
-            output_prefix=f"[{id}] ",
-            stdin=sys.stdin,
-            stdout=sys.stdout if not args.quiet else None,
-            log_file=open(log_file_path, "w", buffering=1),
-        ).start()
-        proc.wait()
+
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as log_file:
+            proc = TeePopen(
+                command,
+                output_prefix=f"[{id}] ",
+                stdin=sys.stdin,
+                stdout=sys.stdout if not args.quiet else open(os.devnull, "w"),
+                stderr=sys.stderr if not args.quiet else open(os.devnull, "w"),
+                log_file=log_file,
+            ).start()
+            proc.wait()
+        shutil.move(log_file.name, log_file_path)
         result = {
             # "success": boolean
             # "message": string
@@ -551,7 +557,7 @@ class ZMKBuild(WestCommand):
             result["success"] = False
             if args.quiet:
                 with open(log_file_path, "r") as f:
-                    log.err(f.read())
+                    log.wrn(f.read())
         elif not Path(build_dir / "zephyr" / "zmk.uf2").exists():
             result["message"] = (
                 f"Succeeded but firmware artifact not found. See log in {log_file_path}"
@@ -582,15 +588,16 @@ class ZMKBuild(WestCommand):
         ]
         log.inf(f"[{id}] Flashing with command: " + " ".join(command))
         log_file_path = build_dir / "flash.log"
-        proc = TeePopen(
-            command,
-            output_prefix=f"[{id}] ",
-            stdin=sys.stdin,
-            stdout=sys.stdout if not args.quiet else None,
-            log_file=open(log_file_path, "w", buffering=1),
-        ).start()
-        log.inf(f"[{id}] Waiting for flashing to complete...")
-        proc.wait()
+        with tempfile.NamedTemporaryFile(mode="w+", delete=False) as log_file:
+            proc = TeePopen(
+                command,
+                output_prefix=f"[{id}] ",
+                stdin=sys.stdin,
+                stdout=sys.stdout if not args.quiet else None,
+                log_file=log_file,
+            ).start()
+            proc.wait()
+        shutil.move(log_file.name, log_file_path)
 
         if proc.returncode != 0:
             log.err(
@@ -598,7 +605,7 @@ class ZMKBuild(WestCommand):
             )
             if args.quiet:
                 with open(log_file_path, "r") as f:
-                    log.err(f.read())
+                    log.wrn(f.read())
         else:
             log.inf(f"[{id}] Flashing succeeded for build dir: {build_dir}")
         return proc.returncode
