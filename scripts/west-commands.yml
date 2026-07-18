@@ -14,3 +14,8 @@ west-commands:
       - name: zmk-renode-test
         class: ZMKRenodeTest
         help: Run ZMK Renode emulator tests against a pre-built ELF
+  - file: scripts/zmk_ble_test.py
+    commands:
+      - name: zmk-ble-test
+        class: ZMKBleTest
+        help: Run ZMK module BabbleSim (bsim) BLE tests
