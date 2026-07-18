@@ -281,8 +281,10 @@ sanitized module directory name) sets the bsim simulation id
   (`<sim id>_studio_host.exe` — only meaningful for cases with a
   `studio_requests.hex`).
 
-Custom module host apps (`tests/ble/*_central/`) are staged as both
-`<prefix>_<appname>.exe` and a plain `<appname>.exe` alias.
+Custom module host apps (`tests/ble/*_host/`, the documented convention; the
+legacy `tests/ble/*_central/` is still auto-discovered for backward compat)
+are staged as both `<prefix>_<appname>.exe` and a plain `<appname>.exe`
+alias.
 
 **BabbleSim setup.** bsim is Linux-only and comes from ZMK's manifest. Fetch
 and build it once, then point the command at it:
@@ -318,10 +320,11 @@ app with those payloads embedded and stages it per case; reference it from
 [`ble-studio-host/README.md`](ble-studio-host/README.md) for the full
 workflow and [`tests/ble/studio/core/`](tests/ble/studio/core/) for a
 complete sample case. **Escape hatch:** modules needing custom host-side
-logic can still ship their own Zephyr app as `tests/ble/<name>_central/`;
-the runner discovers and builds every such app automatically. Prefer the
-shared app whenever "send requests in order, snapshot the response
-hexdumps" is enough.
+logic can still ship their own Zephyr app as `tests/ble/<name>_host/`
+(the legacy `tests/ble/<name>_central/` is still auto-discovered for
+backward compat); the runner discovers and builds every such app
+automatically. Prefer the shared app whenever "send requests in order,
+snapshot the response hexdumps" is enough.
 
 #### GitHub Action
 

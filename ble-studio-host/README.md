@@ -62,11 +62,12 @@ automatically builds this app for that case (board `nrf52_bsim`, with
 
 If your test needs host-side logic this app cannot express (custom asserts,
 reacting to notification content, multi-connection scenarios, ...), ship your
-own Zephyr app as `tests/ble/<name>_central/` in your module — the runner
+own Zephyr app as `tests/ble/<name>_host/` in your module — the runner
 auto-discovers and builds every such app and stages it as
-`<prefix>_<name>_central.exe` (plus a plain `<name>_central.exe` alias).
-Prefer `studio_requests.hex` + this shared app whenever a fixed
-request-in-order / hexdump-responses flow is enough.
+`<prefix>_<name>_host.exe` (plus a plain `<name>_host.exe` alias). The legacy
+`tests/ble/<name>_central/` naming is still auto-discovered too, for backward
+compat with existing case data. Prefer `studio_requests.hex` + this shared
+app whenever a fixed request-in-order / hexdump-responses flow is enough.
 
 ## Gotchas (baked into `prj.conf`)
 

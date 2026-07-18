@@ -150,11 +150,13 @@ class BleRunner:
 
         - ZMK's generic BLE host (`<zmk>/app/tests/ble/central`) ->
           `ble_test_central.exe` (always, unprefixed -- the name is ZMK's).
-        - every custom module host app matching
-          `tests/ble/*_central/CMakeLists.txt` (plain board `nrf52_bsim`) ->
-          `<prefix>_<appname>.exe`, plus a plain `<appname>.exe` alias so
-          existing literal `siblings.txt` names keep working. (The shared
-          ble-studio-host app is built per case instead -- see run_case.)
+        - every custom module host app matching `tests/ble/*_host/CMakeLists.txt`
+          (the documented convention) -- plus, for backward compat, the legacy
+          `tests/ble/*_central/CMakeLists.txt` naming (plain board
+          `nrf52_bsim`) -> `<prefix>_<appname>.exe`, plus a plain
+          `<appname>.exe` alias so existing literal `siblings.txt` names keep
+          working. (The shared ble-studio-host app is built per case instead
+          -- see run_case.)
         """
         self.log.inf("[*] Building host apps")
         central_src = self.zmk_app / "tests" / "ble" / "central"
@@ -168,7 +170,18 @@ class BleRunner:
         else:
             self.log.wrn(f"ZMK generic BLE host app not found at {central_src}")
 
-        for cmake in sorted((self.module_dir / "tests" / "ble").glob("*_central/CMakeLists.txt")):
+        # `*_host/` is the documented convention for custom module host apps;
+        # `*_central/` is kept as an auto-discovered alias for backward
+        # compat with existing case data (e.g. the template's
+        # `studio_rpc_central/`).
+        tests_ble_dir = self.module_dir / "tests" / "ble"
+        custom_app_dirs = sorted(
+            {
+                *tests_ble_dir.glob("*_host/CMakeLists.txt"),
+                *tests_ble_dir.glob("*_central/CMakeLists.txt"),
+            }
+        )
+        for cmake in custom_app_dirs:
             app_dir = cmake.parent
             appname = app_dir.name
             build_dir = self.build_root / appname
