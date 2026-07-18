@@ -248,16 +248,20 @@ Generalizations over the template's script:
    `siblings.txt` supports a `{prefix}` placeholder expanded by the runner
    (literal names keep working), removing the script↔case-data name coupling.
 2. **Custom host apps**: instead of hard-coding `tests/ble/studio_rpc_central`, the
-   runner builds every `tests/ble/*_central/CMakeLists.txt` app it finds under the
+   runner builds every `tests/ble/*_host/CMakeLists.txt` app it finds under the
    module (board `nrf52_bsim`) and stages `<prefix>_<appname>.exe` into
-   `$BSIM_OUT_PATH/bin`. ZMK's generic `ble_test_central.exe` (from
-   `<zmk>/app/tests/ble/central`) is always built, as today.
+   `$BSIM_OUT_PATH/bin`. `*_host/` is the documented convention ("host" — see
+   3.5's naming note); the legacy `tests/ble/*_central/` naming is still
+   auto-discovered too, so existing case data (e.g. the template's
+   `studio_rpc_central/`) keeps working unchanged. ZMK's generic
+   `ble_test_central.exe` (from `<zmk>/app/tests/ble/central`) is always
+   built, as today.
 3. **DUT app**: `$(west list -f '{abspath}' zmk)/app` with
    `-DZMK_EXTRA_MODULES=<module>` — already the approach in PR #49; unchanged.
 
 **Module-side code for a split test: case data only** (keymap, conf, patterns,
 snapshot — no shell, no C). For Studio-RPC-over-BLE tests the module additionally
-ships a `tests/ble/<name>_central/` host app; see 3.5.
+ships a `tests/ble/<name>_host/` host app; see 3.5.
 
 ### 3.5 Studio-over-BLE host app: shared `ble-studio-host` (decided 2026-07-18)
 
@@ -286,7 +290,10 @@ Decided in review (originally sketched as an optional later phase, pulled into
 Phase 2): the skeleton ships as a **shared app owned by this repo** —
 `ble-studio-host/` — and modules copy **no C at all**. Naming note: "host", not
 "central" — central is the device-side BLE role term; user-facing naming (dir,
-staged exe names, docs) says host.
+staged exe names, docs) says host. Applies to the escape-hatch convention too:
+custom module host apps live under `tests/ble/<name>_host/`, not `_central/`
+(the latter stays auto-discovered only for backward compat with pre-existing
+case data).
 
 - Payloads are injected per-case from `studio_requests.hex` in the case dir (one
   hex-encoded framed Request per line, `#` comments allowed — diffable and
@@ -302,7 +309,9 @@ staged exe names, docs) says host.
 - A module's checked-in `generate_requests.py` stays the source of truth; the
   `scripts/lib/ble/studio_requests.py` helper keeps it to ~30 lines.
 - Escape hatch: modules needing custom host logic (arbitrary sequencing, custom
-  asserts) still ship their own `tests/ble/*_central/` app via auto-discovery.
+  asserts) still ship their own `tests/ble/*_host/` app via auto-discovery
+  (the legacy `tests/ble/*_central/` naming is auto-discovered too, for
+  backward compat).
 
 ### 3.6 GitHub Actions (thin wrappers)
 
@@ -382,8 +391,9 @@ Phased so each step is independently green:
   2. Template PR #49: replace `tests/ble/run-ble-test.sh` with the command, switch
      `siblings.txt` to `{prefix}`/`{studio_host}`, replace `studio_rpc_central`
      with a `generate_requests.py` + `studio_requests.hex` (or keep it under the
-     auto-discovered `*_central` escape hatch), `test.py`'s `test_ble` shells out
-     to `west zmk-ble-test`.
+     auto-discovered `*_host` escape hatch — `studio_rpc_central/`'s existing
+     `_central` naming is still auto-discovered too, so it can also stay
+     unchanged), `test.py`'s `test_ble` shells out to `west zmk-ble-test`.
 - **Phase 3 (optional)** — `--build` convenience for `zmk-renode-test`; parallel
   case execution by default; CI freshness check for generated
   `studio_requests.hex` (`generate_requests.py --check` needs protoc in the job).
