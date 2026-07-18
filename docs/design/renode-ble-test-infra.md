@@ -109,9 +109,10 @@ zmk-west-commands/
 │       │   ├── install_renode.sh
 │       │   └── platforms/          # single.resc, split_wired.resc, xiao_nrf52840.repl
 │       └── ble/
-│           └── runner.py           # NEW: ported orchestration core
-├── examples/
-│   └── ble-studio-central/         # NEW (moved from template): copyable host app
+│           ├── runner.py           # NEW: ported orchestration core
+│           └── studio_requests.py  # NEW: payload-generator helper for modules
+├── ble-studio-host/                # NEW: shared Studio-over-BLE host app
+│                                   #   (payloads injected per case; see 3.5)
 ├── .github/actions/
 │   ├── zmk-renode-test/action.yml  # NEW: thin wrapper
 │   └── zmk-ble-test/action.yml     # NEW: thin wrapper
@@ -258,7 +259,7 @@ Generalizations over the template's script:
 snapshot — no shell, no C). For Studio-RPC-over-BLE tests the module additionally
 ships a `tests/ble/<name>_central/` host app; see 3.5.
 
-### 3.5 Studio-over-BLE host app: example now, shared app later
+### 3.5 Studio-over-BLE host app: shared `ble-studio-host` (decided 2026-07-18)
 
 The 410-line `studio_rpc_central/main.c` splits into:
 
@@ -281,21 +282,27 @@ runs ahead of time to (re)generate the encoded artifact that the host app embeds
 - The generated artifact is checked in next to the script (regenerable,
   diff-reviewable); CI does not need to run the generator.
 
-Proposal: **phase the abstraction**.
+Decided in review (originally sketched as an optional later phase, pulled into
+Phase 2): the skeleton ships as a **shared app owned by this repo** —
+`ble-studio-host/` — and modules copy **no C at all**. Naming note: "host", not
+"central" — central is the device-side BLE role term; user-facing naming (dir,
+staged exe names, docs) says host.
 
-- *Now*: move the skeleton into `examples/ble-studio-central/` in this repo as a
-  documented, copyable app **plus its companion `generate_requests.py`**. The
-  generator emits a C payload table (a generated `.inc` included by `main.c`);
-  modules copy both, edit the Python (not C, not hex) to describe their request
-  sequence, and run it once. This keeps full flexibility (arbitrary request
-  sequencing, custom asserts) with the C file untouched in the common case.
-- *Later (optional)*: promote the skeleton to a shared app built by the runner,
-  with payloads injected per-case from a data file (e.g. `studio_requests.hex`,
-  one hex-encoded framed Request per line, embedded via
-  `generate_inc_file_for_target()`). The same generator-script workflow produces
-  that file — only the output format changes — so modules migrate by swapping the
-  emitter, and simple request/response flows then need zero C. Deferred because
-  the shared app's case-data format deserves its own review.
+- Payloads are injected per-case from `studio_requests.hex` in the case dir (one
+  hex-encoded framed Request per line, `#` comments allowed — diffable and
+  reviewable), converted to a generated `requests.inc` at build time
+  (`-DSTUDIO_REQUESTS_HEX_FILE=<file>` + `hex2inc.py`).
+- The runner auto-detects `studio_requests.hex` in a case, builds the shared app
+  with it embedded, and stages it as `<sim id>_studio_host.exe`; `siblings.txt`
+  references it via the `{studio_host}` placeholder (alongside `{prefix}`).
+- The app sends the requests in order (one per response), hexdumps every
+  de-framed response in the same log shape as the original template app (so
+  snapshot conventions carry over), then idles connected so split traffic keeps
+  flowing.
+- A module's checked-in `generate_requests.py` stays the source of truth; the
+  `scripts/lib/ble/studio_requests.py` helper keeps it to ~30 lines.
+- Escape hatch: modules needing custom host logic (arbitrary sequencing, custom
+  asserts) still ship their own `tests/ble/*_central/` app via auto-discovery.
 
 ### 3.6 GitHub Actions (thin wrappers)
 
@@ -349,9 +356,10 @@ A module repo that never saw the template needs:
    (+ `CONFIG_ZMK_STUDIO=y` for the RPC smoke) → CI: build + the renode action.
    Optional `tests/renode/my_test.py` for custom-RPC assertions.
 3. **BLE**: `tests/ble/<group>/<case>/` with the per-case files → CI: the ble action.
-   A Studio-over-BLE case additionally copies `examples/ble-studio-central/`
-   (host app + `generate_requests.py`) and edits/runs the generator script to
-   produce its payload table — no protobuf hand-encoding, no C edits.
+   A Studio-over-BLE case additionally checks in a `generate_requests.py`
+   (built on `studio_requests.py`, ~30 lines) and the `studio_requests.hex` it
+   generates, referencing the shared host app via `{studio_host}` in
+   `siblings.txt` — no protobuf hand-encoding, no C at all.
 
 No shell scripts, no harness code, no zmk-workspace anywhere.
 
@@ -369,14 +377,16 @@ Phased so each step is independently green:
   3. zmk-workspace: mark the action + skill scripts deprecated with a pointer here
      (the skill's rig-specific parts stay).
 - **Phase 2 — BLE into zmk-west-commands**
-  1. This repo: `west zmk-ble-test` + runner + ble action + `examples/ble-studio-central/`.
+  1. This repo: `west zmk-ble-test` + runner + ble action + the shared
+     `ble-studio-host/` app with per-case `studio_requests.hex` injection (3.5).
   2. Template PR #49: replace `tests/ble/run-ble-test.sh` with the command, switch
-     `siblings.txt` to `{prefix}`, move `studio_rpc_central` under the
-     auto-discovered `*_central` convention, `test.py`'s `test_ble` shells out to
-     `west zmk-ble-test`.
-- **Phase 3 (optional, separate design)** — shared Studio-BLE host app with per-case
-  payload files; `--build` convenience for `zmk-renode-test`; parallel case
-  execution by default.
+     `siblings.txt` to `{prefix}`/`{studio_host}`, replace `studio_rpc_central`
+     with a `generate_requests.py` + `studio_requests.hex` (or keep it under the
+     auto-discovered `*_central` escape hatch), `test.py`'s `test_ble` shells out
+     to `west zmk-ble-test`.
+- **Phase 3 (optional)** — `--build` convenience for `zmk-renode-test`; parallel
+  case execution by default; CI freshness check for generated
+  `studio_requests.hex` (`generate_requests.py --check` needs protoc in the job).
 
 ## 5. Risks & compatibility
 
@@ -413,4 +423,6 @@ Phased so each step is independently green:
 4. **Smoke-test default**: is boot-banner + `GetDeviceInfo` the right default smoke
    for `zmk-renode-test`, with `--no-rpc` for non-Studio modules — or should the RPC
    check be opt-in?
-5. **`examples/` vs `templates/`** naming for the copyable Studio-BLE central app.
+5. ~~**`examples/` vs `templates/`** naming~~ — **decided (2026-07-18)**: no
+   copyable app at all; shared `ble-studio-host/` owned by this repo ("host",
+   not "central" — central is the device-side BLE role term).
