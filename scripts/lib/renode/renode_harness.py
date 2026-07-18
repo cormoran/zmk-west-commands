@@ -64,7 +64,18 @@ __all__ = [
     "load_studio_pb2",
     "find_studio_proto_dir",
     "boot_single",
+    "boot_single_real",
+    "STORAGE_ADDR_DEFAULT",
+    "STORAGE_SIZE_DEFAULT",
 ]
+
+# xiao_ble storage_partition (from the board's zephyr.dts): the internal-flash
+# region NVS/settings uses. Renode's MappedMemory zero-fills, but NVS needs
+# erased sectors to read 0xFF, so real-binary mode preloads this range with
+# 0xFF before `start` (see boot_single_real). Defaults match xiao_ble; override
+# for other boards via the CLI flags.
+STORAGE_ADDR_DEFAULT = 0xEC000
+STORAGE_SIZE_DEFAULT = 0x8000
 
 
 # --------------------------------------------------------------------------
@@ -370,4 +381,94 @@ def boot_single(
     console = session.connect_uart(port_base + 1)
     rpc = session.connect_uart(port_base + 2)
     session.go()
+    return session, console, rpc
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot a REAL flashable image (USB CDC + QSPI + BLE) using
+# platforms/single_real.resc + xiao_nrf52840_real.repl (see README's
+# real-binary section for what the platform stubs do and why).
+# --------------------------------------------------------------------------
+
+
+def _materialize_real_repl() -> str:
+    """Write a temp copy of platforms/xiao_nrf52840_real.repl with the model
+    `filename:` paths rewritten to absolute. Renode resolves PythonPeripheral
+    filenames against neither the .repl dir nor its cwd, so the checked-in repl
+    keeps them repo-relative (readable) and we make them absolute here. Returns
+    the temp file path (caller deletes it once the platform has loaded)."""
+    template = (PLATFORMS_DIR / "xiao_nrf52840_real.repl").read_text()
+    abs_models = str((PLATFORMS_DIR / "models").resolve())
+    repl = template.replace('filename: "platforms/models/', f'filename: "{abs_models}/')
+    fd, path = tempfile.mkstemp(prefix="xiao_nrf52840_real-", suffix=".repl")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(repl)
+    return path
+
+
+def _write_ff_binary(size: int) -> str:
+    """Write a temp `size`-byte all-0xFF file to preload as erased NVS sectors
+    (Renode zero-fills flash; NVS needs 0xFF to see erased sectors)."""
+    fd, path = tempfile.mkstemp(prefix="zmk-nvs-ff-", suffix=".bin")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(b"\xff" * size)
+    return path
+
+
+def boot_single_real(
+    renode_path: str,
+    elf: Path,
+    storage_addr: int = STORAGE_ADDR_DEFAULT,
+    storage_size: int = STORAGE_SIZE_DEFAULT,
+    boot_wait: float = 3.0,
+    port_base: int | None = None,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
+    """Boot a real flashable `elf` under Renode using platforms/single_real.resc
+    (the USBD/QSPI/FICR-stub platform) with the storage partition preloaded as
+    erased 0xFF sectors. Returns (session, console_socket, rpc_socket); as with
+    boot_single the caller owns cleanup (session.stop() + closing sockets).
+
+    A real image has no UART Studio transport, so `rpc_socket` here is just the
+    (idle) uart1 terminal -- kept for symmetry and for a module's own tests.
+    uart0 (console_socket) carries a console only for observation builds; a pure
+    real image is silent, so liveness is judged by PC-symbol sampling, not UART
+    output -- see renode_smoke.run_liveness_smoke.
+    """
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    repl_path = _materialize_real_repl()
+    ff_path = _write_ff_binary(storage_size)
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "single_real.resc",
+        monitor_port=port_base,
+        variables={
+            "bin": f"@{elf}",
+            "console_port": port_base + 1,
+            "rpc_port": port_base + 2,
+            "platform": f"@{repl_path}",
+        },
+        cwd=SKILL_DIR,
+    )
+    try:
+        session.start(boot_wait=boot_wait)
+        # connect_uart blocks until the resc's CreateServerSocketTerminal lines
+        # run (which come after LoadPlatformDescription), so by here the temp
+        # repl has been consumed and the platform is loaded.
+        console = session.connect_uart(port_base + 1)
+        rpc = session.connect_uart(port_base + 2)
+        # Preload erased NVS sectors before the CPU runs (LoadBinary reads the
+        # file synchronously here, so it is safe to delete afterwards).
+        assert session.mon is not None
+        session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
+        session.go()
+    finally:
+        for tmp in (repl_path, ff_path):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return session, console, rpc

@@ -155,6 +155,8 @@ $ west zmk-renode-test --elf build/renode/zephyr/zmk.elf --no-rpc
 ```
 usage: west zmk-renode-test [-h] --elf ELF [--renode-version RENODE_VERSION]
                             [--boot-timeout BOOT_TIMEOUT] [--skip-smoke] [--no-rpc]
+                            [--real-binary] [--min-virtual MIN_VIRTUAL]
+                            [--storage-addr ADDR] [--storage-size SIZE]
                             [tests_dir]
 ```
 
@@ -198,6 +200,65 @@ $ west zmk-renode-test tests/renode --elf build/renode/zephyr/zmk.elf
 > overlay disables) only exist on newer ZMK; this repo's own CI pins ZMK
 > `main` for the Renode job (`scripts/west-test-renode.yml`) while the rest of
 > the tests stay on `v0.3-branch`.
+
+#### Real-binary mode (`--real-binary`)
+
+The default flow above boots an ELF built with the `renode-studio-uart` snippet
+(Studio RPC re-bound to a UART so Renode can drive it). `--real-binary` instead
+boots a **real flashable image** — the exact artifact you would flash to a
+board, built with ZMK's own `studio-rpc-usb-uart` snippet (USB CDC + QSPI NOR +
+BLE all enabled), with **zero firmware-side deviation**:
+
+```bash
+# Boot a real xiao_ble image and verify it stays alive (no Zephyr fatal)
+$ west zmk-renode-test --real-binary --elf build/zephyr/zmk.elf
+```
+
+Renode's nRF52840 has no USBD/QSPI/FICR models, so a real image would hang or
+oops on stock Renode. The `xiao_nrf52840_real.repl` platform adds four things
+(see that file and `scripts/lib/renode/platforms/models/`):
+
+1. **QSPI stub** (`0x40029000`) — completes the `nrfx_qspi` busy-wait on
+   `EVENTS_READY`; the JEDEC probe then mismatches so `nordic_qspi_nor` fails
+   gracefully (`-ENODEV`) instead of hanging. The external NOR is not the
+   settings backend, so this is harmless.
+2. **USBD stub** (`0x40027000`) — returns `EVENTCAUSE.READY` so
+   `nrf_usbd_common` enable completes, then reads 0 (no VBUS) so the driver
+   idles like an unplugged cable.
+3. **FICR model** (`0x10000000`) — serves real `CODEPAGESIZE`/`CODESIZE` (so
+   `settings_nvs` sizes its partition instead of failing `-EDOM`) and a BLE
+   identity address. Without it, settings never load, BT host init stalls, and
+   the HCI Read-BD_ADDR times out into a `BT_ASSERT` oops around 10 s.
+4. **NVS preload** — Renode zero-fills flash, but NVS needs erased sectors to
+   read `0xFF`, so the storage partition is preloaded with `0xFF` (else
+   `nvs_mount` fails `-EDEADLK`). Defaults to the **xiao_ble** `storage_partition`
+   (`0xec000`, size `0x8000`); override with `--storage-addr`/`--storage-size`
+   for other boards.
+
+A real image speaks Studio RPC only over USB/BLE, so there is no UART transport
+to drive. The smoke therefore becomes a **liveness check**: run `--min-virtual`
+virtual seconds (default 20), then sample the CPU `PC` a few times and resolve
+each symbol. It **fails** if any sample lands in a fatal frame
+(`arch_system_halt` / `z_fatal_error` / `k_sys_fatal_error_handler` — a Zephyr
+fatal parks the CPU spinning in `arch_system_halt`) and **passes** otherwise;
+if the image happens to have a console (observation builds), its output is
+captured and also checked for `FATAL ERROR` / `Halting system`, but console
+output is not required. Module `tests/renode/*_test.py` still run afterwards
+with `ZMK_RENODE_ELF` set plus `ZMK_RENODE_REAL=1` and
+`ZMK_RENODE_STORAGE_ADDR`/`ZMK_RENODE_STORAGE_SIZE`, so a test can build its own
+real machine via `renode_harness.boot_single_real(...)`.
+
+Limitations (real-binary mode today):
+
+- **No NVMC erase model.** Preloaded `0xFF` gets a clean NVS mount, but there is
+  no flash-erase peripheral, so a long session with many settings writes will
+  eventually fail NVS garbage collection.
+- **Studio RPC is not reachable.** The USB/BLE transports are stubbed to idle,
+  not driven — there is no Studio round trip in real mode yet (BLE-encryption /
+  CCM work to reach it is a separate, parallel effort).
+- **Radio TX is visible but not connectable.** BLE advertising is emitted (you
+  can see it on ch 37/38/39), but a connection test needs a wireless medium and
+  a peer, which this single-machine platform does not wire up.
 
 #### Requirements
 

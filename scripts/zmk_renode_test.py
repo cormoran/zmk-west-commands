@@ -76,6 +76,37 @@ class ZMKRenodeTest(WestCommand):
             action="store_true",
             help="Smoke test checks the boot banner only (for modules without Studio RPC).",
         )
+        parser.add_argument(
+            "--real-binary",
+            action="store_true",
+            help=(
+                "Boot a real flashable image (ZMK's studio-rpc-usb-uart snippet: USB CDC + "
+                "QSPI + BLE) on the real-binary platform. The generic smoke becomes a "
+                "liveness check (run >= --min-virtual virtual seconds, then PC-symbol "
+                "sampling -- no UART Studio transport exists in a real image). See README."
+            ),
+        )
+        parser.add_argument(
+            "--min-virtual",
+            type=float,
+            default=20.0,
+            help="Real-binary mode: virtual seconds to run before PC sampling (default: 20).",
+        )
+        parser.add_argument(
+            "--storage-addr",
+            type=lambda s: int(s, 0),
+            default=None,
+            help=(
+                "Real-binary mode: NVS storage_partition address preloaded as erased 0xFF "
+                "(default: 0xec000, xiao_ble)."
+            ),
+        )
+        parser.add_argument(
+            "--storage-size",
+            type=lambda s: int(s, 0),
+            default=None,
+            help="Real-binary mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
+        )
         return parser
 
     def do_run(self, args, unknown_args):
@@ -96,12 +127,37 @@ class ZMKRenodeTest(WestCommand):
         log.inf(f"[*] Renode: {renode_path}")
 
         if not args.skip_smoke:
-            self._run_smoke(args, elf, renode_path)
+            if args.real_binary:
+                self._run_liveness_smoke(args, elf, renode_path)
+            else:
+                self._run_smoke(args, elf, renode_path)
         else:
             log.inf("[*] Skipping generic smoke test (--skip-smoke)")
 
         if args.tests_dir:
             self._run_module_tests(args, elf)
+
+    def _run_liveness_smoke(self, args, elf: Path, renode_path: str) -> None:
+        import renode_harness  # noqa: E402
+        import renode_smoke  # noqa: E402
+
+        kwargs = {}
+        if args.storage_addr is not None:
+            kwargs["storage_addr"] = args.storage_addr
+        if args.storage_size is not None:
+            kwargs["storage_size"] = args.storage_size
+
+        log.inf("[*] Running real-binary liveness smoke test")
+        try:
+            renode_smoke.run_liveness_smoke(
+                elf=elf,
+                renode_path=renode_path,
+                min_virtual=args.min_virtual,
+                **kwargs,
+            )
+        except AssertionError as err:
+            log.die(f"liveness smoke test FAILED: {err}")
+        log.inf("[*] Liveness smoke test OK")
 
     def _run_smoke(self, args, elf: Path, renode_path: str) -> None:
         import renode_harness  # noqa: E402
@@ -173,6 +229,17 @@ class ZMKRenodeTest(WestCommand):
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(LIB_RENODE_DIR) + (os.pathsep + existing if existing else "")
         env["ZMK_RENODE_ELF"] = str(elf)
+        if args.real_binary:
+            # Tell the module's own tests to build real-binary machines
+            # (renode_harness.boot_single_real) rather than the UART-RPC one, and
+            # honor the same storage-partition overrides.
+            import renode_harness  # noqa: E402
+
+            env["ZMK_RENODE_REAL"] = "1"
+            addr = args.storage_addr if args.storage_addr is not None else renode_harness.STORAGE_ADDR_DEFAULT
+            size = args.storage_size if args.storage_size is not None else renode_harness.STORAGE_SIZE_DEFAULT
+            env["ZMK_RENODE_STORAGE_ADDR"] = hex(addr)
+            env["ZMK_RENODE_STORAGE_SIZE"] = hex(size)
 
         failures = []
         for test_file in test_files:
