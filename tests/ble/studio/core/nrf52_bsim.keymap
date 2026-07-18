@@ -1,0 +1,43 @@
+#include <behaviors.dtsi>
+#include <dt-bindings/zmk/bt.h>
+#include <dt-bindings/zmk/keys.h>
+#include <dt-bindings/zmk/matrix_transform.h>
+#include <physical_layouts.dtsi>
+
+&kscan {
+    /delete-property/ exit-after;
+    events = <>;
+};
+/ {
+    physical_layout: physical_layout {
+        compatible = "zmk,physical-layout";
+        display-name = "Test layout";
+        transform = <&test_transform>;
+        keys /* w h x y rot rx ry */
+            = <&key_physical_attrs 100 100   0 0 0 0 0>
+            , <&key_physical_attrs 100 100 100 0 0 0 0>
+            , <&key_physical_attrs 100 100   0 100 0 0 0>
+            , <&key_physical_attrs 100 100 100 100 0 0 0>
+            ;
+    };
+
+    test_transform: test_transform {
+        compatible = "zmk,matrix-transform";
+        columns = <2>;
+        rows = <2>;
+        map = <
+            RC(0,0) RC(0,1)
+            RC(1,0) RC(1,1)
+        >;
+    };
+
+    keymap {
+        compatible = "zmk,keymap";
+
+        default_layer {
+            bindings = <
+            &kp A &kp B
+            &bt BT_SEL 0 &bt BT_CLR>;
+        };
+    };
+};

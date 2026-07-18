@@ -8,8 +8,8 @@ split peripherals and host ("computer") apps, launch them under the bsim
 
 The orchestration lives in `scripts/lib/ble/runner.py`; this command only
 resolves the workspace paths (zmk app, west topdir, module, bsim tree) and
-drives it. See README.md's `west zmk-ble-test` section and
-`examples/ble-studio-central/` for the Studio-over-BLE host app.
+drives it. See README.md's `west zmk-ble-test` section and the shared
+`ble-studio-host/` app for Studio-over-BLE cases (`studio_requests.hex`).
 """
 
 import os

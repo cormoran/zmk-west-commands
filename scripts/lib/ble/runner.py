@@ -23,6 +23,8 @@ Per-case file conventions (a directory is a case iff it has
 | `peripheral.conf`     | role-specific extra conf for peripheral builds       |
 | `peripheral*.overlay` | one split-peripheral build each; presence => split   |
 | `siblings.txt`        | one command line per extra simulated device          |
+| `studio_requests.hex` | build the shared ble-studio-host app with these      |
+|                       | payloads embedded ({studio_host} in siblings.txt)    |
 | `events.patterns`     | sed -E -n filter for the combined output log         |
 | `events.snapshot`     | expected filtered output                             |
 | `pending`             | mismatch reported as PENDING instead of FAILED       |
@@ -45,6 +47,11 @@ from pathlib import Path
 class BleTestError(Exception):
     """Fatal, actionable error (missing bsim, build failure, ...)."""
 
+
+# The shared Studio-over-BLE host app this repo owns (ble-studio-host/ at the
+# repo root; see its README.md). Built automatically -- with the case's
+# payload file embedded -- for any case that contains `studio_requests.hex`.
+BLE_STUDIO_HOST_DIR = Path(__file__).resolve().parents[3] / "ble-studio-host"
 
 # Status constants for a single case.
 PASS = "PASS"
@@ -141,12 +148,13 @@ class BleRunner:
         """Build the host ("computer") binaries once per run and stage them
         into `$BSIM_OUT_PATH/bin`:
 
-        - ZMK's generic BLE central (`<zmk>/app/tests/ble/central`) ->
-          `ble_test_central.exe` (always, unprefixed).
-        - every module app matching `tests/ble/*_central/CMakeLists.txt`
-          (plain board `nrf52_bsim`) -> `<prefix>_<appname>.exe`, plus a
-          plain `<appname>.exe` alias so existing literal `siblings.txt`
-          names keep working.
+        - ZMK's generic BLE host (`<zmk>/app/tests/ble/central`) ->
+          `ble_test_central.exe` (always, unprefixed -- the name is ZMK's).
+        - every custom module host app matching
+          `tests/ble/*_central/CMakeLists.txt` (plain board `nrf52_bsim`) ->
+          `<prefix>_<appname>.exe`, plus a plain `<appname>.exe` alias so
+          existing literal `siblings.txt` names keep working. (The shared
+          ble-studio-host app is built per case instead -- see run_case.)
         """
         self.log.inf("[*] Building host apps")
         central_src = self.zmk_app / "tests" / "ble" / "central"
@@ -158,7 +166,7 @@ class BleRunner:
             self._stage(build_dir / "zephyr" / "zephyr.exe", "ble_test_central.exe")
             self.log.inf("[*]   staged ble_test_central.exe")
         else:
-            self.log.wrn(f"ZMK generic central app not found at {central_src}")
+            self.log.wrn(f"ZMK generic BLE host app not found at {central_src}")
 
         for cmake in sorted((self.module_dir / "tests" / "ble").glob("*_central/CMakeLists.txt")):
             app_dir = cmake.parent
@@ -243,8 +251,31 @@ class BleRunner:
             pn = overlay.name[: -len(".overlay")]
             self._stage(case_build / pn / "zephyr" / "zmk.exe", f"{sim_id}_{pn}.exe")
 
+        # --- Shared Studio-over-BLE host app (per-case payload file) ---
+        studio_host_exe = f"{sim_id}_studio_host.exe"
+        requests_hex = case_dir / "studio_requests.hex"
+        if requests_hex.is_file():
+            if not BLE_STUDIO_HOST_DIR.is_dir():
+                raise BleTestError(
+                    f"case {rel} has studio_requests.hex but the shared host app "
+                    f"was not found at {BLE_STUDIO_HOST_DIR}"
+                )
+            self.log.inf("Found studio_requests.hex, building the shared ble-studio-host")
+            host_build = case_build / "studio_host"
+            self._west_build(
+                host_build,
+                "nrf52_bsim",
+                BLE_STUDIO_HOST_DIR,
+                [f"-DSTUDIO_REQUESTS_HEX_FILE={requests_hex}"],
+                case_build / "studio_host.build.log",
+            )
+            self._stage(host_build / "zephyr" / "zephyr.exe", studio_host_exe)
+
         # --- Run the simulation ---
-        siblings = self._read_siblings(case_dir / "siblings.txt")
+        siblings = [
+            line.replace("{prefix}", self.prefix).replace("{studio_host}", studio_host_exe)
+            for line in self._read_siblings(case_dir / "siblings.txt")
+        ]
         output_log = case_build / "output.log"
         self._run_simulation(sim_id, siblings, output_log)
 
@@ -300,12 +331,12 @@ class BleRunner:
                 threads.append(t)
 
             # d=0 DUT, d=1 handbrake, d=2.. siblings; only DUT + siblings are
-            # tee'd into output.log (matching the bash script).
+            # tee'd into output.log (matching the bash script). Placeholder
+            # expansion ({prefix}, {studio_host}) already happened in run_case.
             spawn([f"./{sim_id}", "-d=0", f"-s={sim_id}"], tee=True)
             spawn(["./bs_device_handbrake", f"-s={sim_id}", "-d=1", "-r=10"], tee=False)
             for line in siblings:
-                expanded = line.replace("{prefix}", self.prefix)
-                argv = shlex.split(expanded) + [f"-s={sim_id}"]
+                argv = shlex.split(line) + [f"-s={sim_id}"]
                 spawn(argv, tee=True)
 
             # Phy runs in the foreground and ends the simulation.

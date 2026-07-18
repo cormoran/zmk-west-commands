@@ -263,6 +263,7 @@ recurses from `tests_path` (default: current directory). Per-case files:
 | `peripheral.conf` | extra Kconfig applied to peripheral builds only |
 | `peripheral*.overlay` | one split-peripheral build each; presence ⇒ DUT built as a split central (`-DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y`) |
 | `siblings.txt` | one command line per extra simulated device (`-d=2…`; `-d=0` is the DUT, `-d=1` the handbrake) |
+| `studio_requests.hex` | if present, the shared `ble-studio-host` app is built for this case with these payloads embedded (see below) |
 | `events.patterns` | `sed -E -n` script filtering the combined output log |
 | `events.snapshot` | expected filtered output |
 | `pending` | if present, a snapshot mismatch is PENDING instead of FAILED |
@@ -270,12 +271,18 @@ recurses from `tests_path` (default: current directory). Per-case files:
 Builds land under `<west topdir>/build/ble/`; each case's `output.log`,
 `filtered_output.log` and the aggregate `tests/pass-fail.log` are kept there.
 
-**`{prefix}` placeholder.** `--sim-prefix NAME` (default: the sanitized module
-directory name) sets the bsim simulation id (`<prefix>_<case>`) and the staged
-executable-name prefix. In `siblings.txt`, a literal `{prefix}` token is
-expanded to the active prefix; lines without it run unchanged, so existing
-case data keeps working. Module host apps (`tests/ble/*_central/`) are staged
-as both `<prefix>_<appname>.exe` and a plain `<appname>.exe` alias.
+**Placeholders in `siblings.txt`.** `--sim-prefix NAME` (default: the
+sanitized module directory name) sets the bsim simulation id
+(`<prefix>_<case>`) and the staged executable-name prefix. In `siblings.txt`:
+
+- `{prefix}` expands to the active prefix. Lines without placeholders run
+  unchanged, so existing case data keeps working.
+- `{studio_host}` expands to the case's staged shared-host executable name
+  (`<sim id>_studio_host.exe` — only meaningful for cases with a
+  `studio_requests.hex`).
+
+Custom module host apps (`tests/ble/*_central/`) are staged as both
+`<prefix>_<appname>.exe` and a plain `<appname>.exe` alias.
 
 **BabbleSim setup.** bsim is Linux-only and comes from ZMK's manifest. Fetch
 and build it once, then point the command at it:
@@ -300,12 +307,21 @@ land upstream, pin `cormoran/zmk@fffa339cf6f5c45366ab332d2b512f1c3c300753` in
 your test manifest (this repo's `scripts/west-test-ble.yml` does exactly that,
 with a TODO to unpin).
 
-**Studio-over-BLE host app.** To exercise Studio RPC over BLE (including while
-the split link is active), copy [`examples/ble-studio-central/`](examples/ble-studio-central/)
-into your module as `tests/ble/<name>_central/`, edit + run its
-`generate_requests.py` to describe the request sequence (no protobuf
-hand-encoding), and reference it from `siblings.txt`. The runner discovers and
-builds every `tests/ble/*_central/` app automatically.
+**Studio-over-BLE host app (no C in your module).** To exercise Studio RPC
+over BLE (including while the split link is active), your case ships **data
+only**: a checked-in `generate_requests.py` (built on the
+`scripts/lib/ble/studio_requests.py` helper — ~30 lines, no protobuf
+hand-encoding) plus the `studio_requests.hex` it generates. The runner then
+automatically builds this repo's shared [`ble-studio-host/`](ble-studio-host/)
+app with those payloads embedded and stages it per case; reference it from
+`siblings.txt` as `./{studio_host} -d=2`. See
+[`ble-studio-host/README.md`](ble-studio-host/README.md) for the full
+workflow and [`tests/ble/studio/core/`](tests/ble/studio/core/) for a
+complete sample case. **Escape hatch:** modules needing custom host-side
+logic can still ship their own Zephyr app as `tests/ble/<name>_central/`;
+the runner discovers and builds every such app automatically. Prefer the
+shared app whenever "send requests in order, snapshot the response
+hexdumps" is enough.
 
 #### GitHub Action
 
