@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""Reusable Renode + ZMK Studio RPC test harness.
+
+Extracted from renode_test.py (the test-zmk-renode skill's own suite) so any
+ZMK module repo's test code -- not just this skill's -- can import
+RenodeSession / wait_for_text / studio-proto loading without vendoring
+renode_test.py itself. This is what `.github/actions/zmk-renode-test/`
+exports on PYTHONPATH for a module repo's own `tests/renode/` to import.
+
+Nothing in here is specific to the "studio-rpc-perf" workspace or to any
+particular module -- every path is a parameter. See SKILL.md and
+references/renode-notes.md for the *why* behind these mechanics (silent
+boot hangs, one-client-only UART sockets, etc.); this module only carries
+the *how*.
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+# rpc_client.py lives next to this file regardless of caller's sys.path
+# setup (the `zmk-renode-test` command puts this dir on PYTHONPATH, but we
+# don't want to *require* that for rpc_client specifically).
+SCRIPTS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPTS_DIR))
+from rpc_client import RpcSocket, frame  # noqa: E402  (re-exported for callers)
+
+# This module lives at scripts/lib/renode/renode_harness.py inside
+# zmk-west-commands, with platforms/ (single.resc, split_wired.resc, the
+# .repl) and install_renode.sh as its direct siblings under that same dir.
+# Keeping them grouped in one directory means the path constants below don't
+# depend on where this file is imported from -- true whether it's imported
+# from inside this repo or, via PYTHONPATH, from a consuming module repo's
+# own test suite (the `west zmk-renode-test` command puts this dir on
+# PYTHONPATH). SKILL_DIR is retained as the public name for "the directory
+# Renode is launched from" (its cwd; platforms/ must be under it so the
+# `.resc` `@platforms/...` paths resolve -- see references/renode-notes.md).
+SKILL_DIR = SCRIPTS_DIR
+PLATFORMS_DIR = SKILL_DIR / "platforms"
+INSTALL_RENODE_SCRIPT = SCRIPTS_DIR / "install_renode.sh"
+
+RENODE_VERSION_DEFAULT = "1.16.1"
+
+__all__ = [
+    "RENODE_VERSION_DEFAULT",
+    "SKILL_DIR",
+    "PLATFORMS_DIR",
+    "INSTALL_RENODE_SCRIPT",
+    "RpcSocket",
+    "frame",
+    "renode_root",
+    "find_or_install_renode",
+    "MonitorConnection",
+    "RenodeSession",
+    "drain_text",
+    "wait_for_text",
+    "compile_protos",
+    "load_studio_pb2",
+    "find_studio_proto_dir",
+    "boot_single",
+]
+
+
+# --------------------------------------------------------------------------
+# Renode install discovery / bootstrap
+# --------------------------------------------------------------------------
+
+
+def renode_root() -> Path:
+    return Path(os.environ.get("RENODE_ROOT", Path.home() / ".renode"))
+
+
+def find_or_install_renode(
+    install_script: Path | None = None, version: str = RENODE_VERSION_DEFAULT
+) -> str | None:
+    """Return the path to the Renode launcher, installing it via
+    `install_script` (install_renode.sh, defaults to this skill's own copy)
+    if it's not already present under `renode_root()/<version>/renode`.
+    Returns None if neither is possible
+    (caller should skip/fail accordingly)."""
+    launcher = renode_root() / version / "renode"
+    if launcher.is_file() and os.access(launcher, os.X_OK):
+        return str(launcher)
+
+    if install_script is None:
+        install_script = INSTALL_RENODE_SCRIPT
+    if not install_script.is_file():
+        return None
+
+    try:
+        result = subprocess.run(
+            ["bash", str(install_script), version],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    last_line = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
+    if last_line and Path(last_line).is_file():
+        return last_line
+    return str(launcher) if launcher.is_file() else None
+
+
+# --------------------------------------------------------------------------
+# Minimal Renode session: monitor (-P) + one or more UART sockets.
+# --------------------------------------------------------------------------
+
+
+class MonitorConnection:
+    def __init__(self, port: int, timeout: float = 20.0):
+        self.sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        self.sock.settimeout(2.0)
+        self._drain()
+
+    def _drain(self) -> bytes:
+        data = b""
+        try:
+            while True:
+                chunk = self.sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        except socket.timeout:
+            pass
+        return data
+
+    def execute(self, command: str, settle: float = 0.3) -> str:
+        self._drain()
+        self.sock.sendall((command + "\n").encode())
+        time.sleep(settle)
+        return self._drain().decode(errors="replace")
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class RenodeSession:
+    """Launches one Renode process, exposes a monitor connection, and lets
+    the caller connect to whatever UART sockets the given .resc script sets
+    up. IMPORTANT: connect to each UART socket exactly once and keep it open
+    for the whole session -- Renode's CreateServerSocketTerminal only
+    reliably serves the first client connection for the life of the process
+    (see references/renode-notes.md).
+
+    `cwd` is the directory Renode is launched from; `resc_path` must be
+    inside it (or a subdirectory) since `.resc` `i @relative/path`
+    directives resolve against Renode's own cwd, not the script's location.
+    """
+
+    def __init__(
+        self,
+        renode_path: str,
+        resc_path: Path,
+        monitor_port: int,
+        variables: dict,
+        cwd: Path,
+    ):
+        self.renode_path = renode_path
+        self.resc_path = Path(resc_path)
+        self.monitor_port = monitor_port
+        self.variables = variables
+        self.cwd = Path(cwd)
+        self.proc: subprocess.Popen | None = None
+        self.mon: MonitorConnection | None = None
+
+    def start(self, boot_wait: float = 3.0) -> None:
+        resc_rel = self.resc_path.resolve().relative_to(self.cwd.resolve())
+        var_str = "; ".join(f"${k}={v}" for k, v in self.variables.items())
+        exec_cmd = f"{var_str}; i @{resc_rel}" if var_str else f"i @{resc_rel}"
+        cmd = [
+            self.renode_path,
+            "--disable-xwt",
+            "--hide-log",
+            "-P",
+            str(self.monitor_port),
+            "-e",
+            exec_cmd,
+        ]
+        self.proc = subprocess.Popen(
+            cmd,
+            cwd=str(self.cwd),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + boot_wait + 10
+        last_err = None
+        while time.monotonic() < deadline:
+            try:
+                self.mon = MonitorConnection(self.monitor_port, timeout=2.0)
+                return
+            except OSError as err:
+                last_err = err
+                time.sleep(0.3)
+        raise TimeoutError(f"Renode monitor never came up on port {self.monitor_port}: {last_err}")
+
+    def go(self) -> None:
+        """Issue `start` to begin emulation. Call only after connecting to
+        every UART socket you need, per the class docstring."""
+        assert self.mon is not None
+        self.mon.execute("start")
+
+    def connect_uart(self, port: int, connect_timeout: float = 20.0) -> RpcSocket:
+        return RpcSocket(host="127.0.0.1", port=port, connect_timeout=connect_timeout)
+
+    def stop(self) -> None:
+        if self.mon is not None:
+            self.mon.close()
+        if self.proc is not None:
+            self.proc.kill()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def drain_text(sock, timeout: float = 1.0) -> str:
+    """Read whatever is currently available on a raw console UART socket."""
+    sock.settimeout(timeout)
+    data = b""
+    try:
+        while True:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+    except socket.timeout:
+        pass
+    return data.decode(errors="replace")
+
+
+def wait_for_text(sock, needle: str, timeout: float) -> str:
+    """Poll a console socket until `needle` appears in the accumulated text,
+    or the timeout elapses. Returns everything read (for debugging)."""
+    deadline = time.monotonic() + timeout
+    buf = ""
+    while time.monotonic() < deadline:
+        buf += drain_text(sock, timeout=0.5)
+        if needle in buf:
+            return buf
+    return buf
+
+
+# --------------------------------------------------------------------------
+# Protobuf message helpers (compile protos on the fly with protoc)
+# --------------------------------------------------------------------------
+
+
+def compile_protos(proto_files, include_dirs, out_dir: Path | None = None) -> Path:
+    """Compile the given .proto files with protoc's Python plugin into
+    `out_dir` (a fresh temp dir if not given), add that dir to sys.path, and
+    return it. Caller then does e.g. `import studio_pb2`.
+
+    Raises RuntimeError on protoc failure (missing protoc, bad .proto,
+    etc.) -- callers that want unittest-style skip-on-missing-toolchain
+    behavior should catch this and re-raise as unittest.SkipTest.
+    """
+    if out_dir is None:
+        out_dir = Path(tempfile.mkdtemp(prefix="zmk-proto-"))
+    else:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = (
+        ["protoc"]
+        + [f"-I{d}" for d in include_dirs]
+        + [f"--python_out={out_dir}"]
+        + [str(p) for p in proto_files]
+    )
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"protoc failed: {result.stderr}")
+
+    # Old protoc (<3.19) generates descriptor code that only works with the
+    # protobuf runtime's pure-Python implementation.
+    os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+    sys.path.insert(0, str(out_dir))
+    return out_dir
+
+
+def find_studio_proto_dir(west_topdir: Path) -> Path:
+    """Auto-discover zmk-studio-messages' `proto/zmk` dir under a west
+    topdir. Works for both this skill's own workspace and any module repo
+    using the standard `dependencies/modules/msgs/zmk-studio-messages`
+    west-manifest layout (falls back to a recursive search if the layout
+    differs)."""
+    west_topdir = Path(west_topdir)
+    direct = (
+        west_topdir / "dependencies" / "modules" / "msgs" / "zmk-studio-messages" / "proto" / "zmk"
+    )
+    if direct.is_dir():
+        return direct
+
+    matches = sorted(west_topdir.glob("**/zmk-studio-messages/proto/zmk"))
+    if matches:
+        return matches[0]
+
+    raise FileNotFoundError(
+        f"could not find zmk-studio-messages proto dir under {west_topdir} "
+        "(expected dependencies/modules/msgs/zmk-studio-messages/proto/zmk)"
+    )
+
+
+def load_studio_pb2(proto_dir: Path):
+    """Compile all of zmk-studio-messages' proto/zmk/*.proto (core.proto,
+    custom.proto, studio.proto, ...) in one protoc invocation and import
+    the top-level studio_pb2 module (which imports the others as needed).
+    `proto_dir` is the `proto/zmk` dir itself (see find_studio_proto_dir)."""
+    proto_dir = Path(proto_dir)
+    if not proto_dir.is_dir():
+        raise FileNotFoundError(f"zmk-studio-messages proto dir not found: {proto_dir}")
+
+    proto_files = sorted(str(p) for p in proto_dir.glob("*.proto"))
+    compile_protos(proto_files, include_dirs=[proto_dir])
+    import studio_pb2  # type: ignore
+
+    return studio_pb2
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot a single-board ELF using platforms/single.resc.
+# --------------------------------------------------------------------------
+
+
+def boot_single(
+    renode_path: str,
+    elf: Path,
+    boot_wait: float = 3.0,
+    port_base: int | None = None,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
+    """Boot `elf` under Renode using this skill's platforms/single.resc
+    (console on uart0, Studio RPC on uart1 -- see overlays/studio-rpc-uart.overlay).
+    Returns (session, console_socket, rpc_socket); caller is responsible for
+    calling session.stop() (and closing the sockets) when done, e.g. via
+    unittest's addCleanup or a try/finally. Does NOT wait for the boot
+    banner or start the emulation running -- call session.go() is already
+    done here, but asserting on the banner/RPC round-trip is left to the
+    caller since expectations differ per test.
+    """
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "single.resc",
+        monitor_port=port_base,
+        variables={
+            "bin": f"@{elf}",
+            "console_port": port_base + 1,
+            "rpc_port": port_base + 2,
+        },
+        cwd=SKILL_DIR,
+    )
+    session.start(boot_wait=boot_wait)
+    console = session.connect_uart(port_base + 1)
+    rpc = session.connect_uart(port_base + 2)
+    session.go()
+    return session, console, rpc

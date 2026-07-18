@@ -9,3 +9,8 @@ west-commands:
       - name: zmk-build
         class: ZMKBuild
         help: Build ZMK firmware for given zmk-config
+  - file: scripts/zmk_renode_test.py
+    commands:
+      - name: zmk-renode-test
+        class: ZMKRenodeTest
+        help: Run ZMK Renode emulator tests against a pre-built ELF
