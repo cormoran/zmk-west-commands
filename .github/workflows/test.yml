@@ -91,3 +91,48 @@ jobs:
         uses: ./.github/actions/zmk-renode-test
         with:
           elf-path: build/renode/zephyr/zmk.elf
+
+  ble:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: zmkfirmware/zmk-build-arm:4.1
+    name: BLE
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache west modules
+        uses: actions/cache@v4
+        continue-on-error: true
+        env:
+          cache_name: cache-west-modules-ble
+        with:
+          path: dependencies/
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-ble.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache_name }}-
+      - name: Init
+        # The bsim BLE tests pin cormoran/zmk (two fixes not yet upstream --
+        # see scripts/west-test-ble.yml), so this uses its own manifest,
+        # separate from the build/renode jobs.
+        run: |
+          git config --global --add safe.directory ${{ github.workspace }}
+          west init -l . --mf scripts/west-test-ble-standalone.yml
+          west update --narrow
+          west zephyr-export
+      - name: Run BLE tests
+        # Exercises the runner (and the composite action) end-to-end on this
+        # repo's own tests/ble/split/basic case with -m pointing at this repo
+        # (whose Zephyr module is inert for a pure-ZMK split case).
+        uses: ./.github/actions/zmk-ble-test
+        with:
+          tests: tests/ble
+          module: .
+          extra-args: --sim-prefix ci_ble
+      - name: Upload logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ble-test-logs
+          path: build/ble/**/*.log
+          if-no-files-found: ignore

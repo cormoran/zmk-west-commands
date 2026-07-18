@@ -223,6 +223,107 @@ manifest:
 
 See `.github/actions/zmk-renode-test/README.md` for the full contract.
 
+### west zmk-ble-test
+
+Run a module's **BabbleSim (bsim) BLE tests** with no hardware: build the DUT
+from the workspace ZMK app with your module added via `ZMK_EXTRA_MODULES`,
+build any split peripherals and host ("computer") apps, launch them all under
+the bsim 2G4 phy, and diff the filtered device output against a checked-in
+snapshot. This is a Python port of the template repo's
+`tests/ble/run-ble-test.sh`, kept byte-compatible with its
+`sort | sed | diff` pass/fail pipeline.
+
+```bash
+# Run every case under tests/ble, with this module added via ZMK_EXTRA_MODULES
+$ west zmk-ble-test tests/ble -m .
+
+# A single case
+$ west zmk-ble-test tests/ble/split/basic -m .
+
+# Regenerate snapshots (also honors ZMK_TESTS_AUTO_ACCEPT=y)
+$ west zmk-ble-test tests/ble -m . --auto-accept
+
+# Run cases concurrently; each case's sim id isolates its phy
+$ west zmk-ble-test tests/ble -m . -j 4
+```
+
+```
+usage: west zmk-ble-test [-h] [-m MODULE] [--auto-accept] [--sim-prefix NAME]
+                         [--bsim PATH] [-j PARALLEL] [-v] [tests_path]
+```
+
+A directory is a **test case** iff it contains `nrf52_bsim.keymap`; discovery
+recurses from `tests_path` (default: current directory). Per-case files:
+
+| File | Meaning |
+|---|---|
+| `nrf52_bsim.keymap` | marks the case; DUT keymap (needs a keys'd physical layout for Studio) |
+| `nrf52_bsim.conf` | Kconfig shared by the DUT and peripherals (via `ZMK_CONFIG`) |
+| `central.conf` | extra Kconfig applied to the DUT (central) only (via `EXTRA_CONF_FILE`) |
+| `peripheral.conf` | extra Kconfig applied to peripheral builds only |
+| `peripheral*.overlay` | one split-peripheral build each; presence ⇒ DUT built as a split central (`-DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y`) |
+| `siblings.txt` | one command line per extra simulated device (`-d=2…`; `-d=0` is the DUT, `-d=1` the handbrake) |
+| `events.patterns` | `sed -E -n` script filtering the combined output log |
+| `events.snapshot` | expected filtered output |
+| `pending` | if present, a snapshot mismatch is PENDING instead of FAILED |
+
+Builds land under `<west topdir>/build/ble/`; each case's `output.log`,
+`filtered_output.log` and the aggregate `tests/pass-fail.log` are kept there.
+
+**`{prefix}` placeholder.** `--sim-prefix NAME` (default: the sanitized module
+directory name) sets the bsim simulation id (`<prefix>_<case>`) and the staged
+executable-name prefix. In `siblings.txt`, a literal `{prefix}` token is
+expanded to the active prefix; lines without it run unchanged, so existing
+case data keeps working. Module host apps (`tests/ble/*_central/`) are staged
+as both `<prefix>_<appname>.exe` and a plain `<appname>.exe` alias.
+
+**BabbleSim setup.** bsim is Linux-only and comes from ZMK's manifest. Fetch
+and build it once, then point the command at it:
+
+```bash
+$ west config manifest.group-filter -- +babblesim
+$ west update --narrow
+$ make -C "$(west topdir)/dependencies/tools/bsim" everything -j"$(nproc)"
+$ export BSIM_OUT_PATH="$(west topdir)/dependencies/tools/bsim"
+$ export BSIM_COMPONENTS_PATH="$BSIM_OUT_PATH/components"
+```
+
+`BSIM_OUT_PATH`/`BSIM_COMPONENTS_PATH` (or `--bsim PATH`) select the compiled
+tree; the command errors with these instructions if it is missing or
+uncompiled.
+
+**ZMK revision prerequisite.** The bsim BLE tests need two fixes not yet on
+`zmkfirmware/zmk` main — a writable behavior local-id map section, and
+`settings_subsys_init` before dynamic BLE handler registration (without them
+the split central segfaults or never starts BLE on `nrf52_bsim`). Until they
+land upstream, pin `cormoran/zmk@fffa339cf6f5c45366ab332d2b512f1c3c300753` in
+your test manifest (this repo's `scripts/west-test-ble.yml` does exactly that,
+with a TODO to unpin).
+
+**Studio-over-BLE host app.** To exercise Studio RPC over BLE (including while
+the split link is active), copy [`examples/ble-studio-central/`](examples/ble-studio-central/)
+into your module as `tests/ble/<name>_central/`, edit + run its
+`generate_requests.py` to describe the request sequence (no protobuf
+hand-encoding), and reference it from `siblings.txt`. The runner discovers and
+builds every `tests/ble/*_central/` app automatically.
+
+#### GitHub Action
+
+A thin composite action wraps the command for CI (enables the `+babblesim`
+group, builds and caches the bsim tree, exports `BSIM_OUT_PATH` /
+`BSIM_COMPONENTS_PATH`, and calls `west zmk-ble-test`). It assumes the caller
+already ran checkout + `west init`/`west update` with `zmk-west-commands` in
+the manifest, and runs in the `zmkfirmware/zmk-build-arm:4.1` container:
+
+```yaml
+- uses: cormoran/zmk-west-commands/.github/actions/zmk-ble-test@main
+  with:
+    tests: tests/ble
+    module: .
+```
+
+See `.github/actions/zmk-ble-test/README.md` for the full contract.
+
 ## Use case
 
 TODO
