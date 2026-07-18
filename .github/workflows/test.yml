@@ -52,3 +52,42 @@ jobs:
         run: west zmk-build tests/build_yaml -n
       - name: Run test
         run: python3 -m unittest -v
+
+  renode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    name: Renode
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache west modules
+        uses: actions/cache@v4
+        continue-on-error: true
+        env:
+          cache_name: cache-west-modules-renode
+        with:
+          path: dependencies/
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache_name }}-
+      - name: Init
+        # Renode targets ZMK's HWv2 xiao_ble//zmk board, which is only on newer
+        # ZMK -- so this uses a `main`-pinned manifest, separate from the
+        # v0.3-branch one the build/unittest job uses (see west-test-renode.yml).
+        run: |
+          git config --global --add safe.directory ${{ github.workspace }}
+          west init -l . --mf scripts/west-test-renode-standalone.yml
+          west update --narrow
+          west zephyr-export
+      - name: Build Renode-testable firmware
+        # -d keeps the ELF under $GITHUB_WORKSPACE (the standalone manifest
+        # puts `west topdir` at the checkout's parent, so the default build
+        # dir would land outside it). build-renode.yaml is a separate file so
+        # the v0.3 unittests never try to build the HWv2 board.
+        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-renode.yaml -af renode -d build
+      - name: Renode smoke test
+        uses: ./.github/actions/zmk-renode-test
+        with:
+          elf-path: build/renode/zephyr/zmk.elf

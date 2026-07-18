@@ -1,0 +1,5 @@
+file_format: "1"
+id: renode_tester
+name: Renode Tester
+type: shield
+requires: [seeed_xiao]

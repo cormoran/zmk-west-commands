@@ -1,0 +1,6 @@
+if SHIELD_RENODE_TESTER
+
+config ZMK_KEYBOARD_NAME
+    default "Renode"
+
+endif
