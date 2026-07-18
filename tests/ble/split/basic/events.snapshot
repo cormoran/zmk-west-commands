@@ -24,3 +24,12 @@ host <dbg> ble_central: notify_func: payload
 host                    00 00 05 00 00 00 00 00                          |........         
 host <dbg> ble_central: notify_func: payload
 host                    00 00 00 00 00 00 00 00                          |........         
+peripheral <inf> zmk: Welcome to ZMK!
+peripheral <dbg> zmk: security_changed: Security changed: FD:9E:B2:48:47:39 (random) level 2
+peripheral <dbg> zmk: split_svc_pos_state_ccc: value 1
+peripheral <dbg> zmk: split_svc_select_phys_layout_callback: Selecting physical layout after GATT write of 0
+peripheral <dbg> zmk: zmk_physical_layouts_kscan_process_msgq: Row: 0, col: 0, position: 0, pressed: false
+peripheral <dbg> zmk: zmk_physical_layouts_kscan_process_msgq: Row: 0, col: 0, position: 0, pressed: true
+peripheral <dbg> zmk: zmk_physical_layouts_kscan_process_msgq: Row: 0, col: 0, position: 0, pressed: false
+peripheral <dbg> zmk: zmk_physical_layouts_kscan_process_msgq: Row: 0, col: 1, position: 1, pressed: true
+peripheral <dbg> zmk: zmk_physical_layouts_kscan_process_msgq: Row: 0, col: 1, position: 1, pressed: false

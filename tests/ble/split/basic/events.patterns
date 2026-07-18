@@ -1,1 +1,2 @@
 s/^d_02: @[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}  .{19}/host /p
+/Welcome to ZMK!|security_changed: Security changed|split_svc_pos_state_ccc|split_svc_select_phys_layout_callback|kscan_process_msgq/s/^d_03: @[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}  .{19}/peripheral /p

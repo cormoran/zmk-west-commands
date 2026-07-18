@@ -287,6 +287,36 @@ legacy `tests/ble/*_central/` is still auto-discovered for backward compat)
 are staged as both `<prefix>_<appname>.exe` and a plain `<appname>.exe`
 alias.
 
+**Device numbering & asserting any device (incl. peripherals).** The runner
+assigns `-d=0` to the DUT and `-d=1` to the bsim handbrake; **every other
+device gets its id from its own `siblings.txt` line** (`-d=2`, `-d=3`, … as
+written there — split peripherals are ordinary siblings: the runner stages
+`<sim id>_<peripheral>.exe`, the case launches it). Each device prefixes its
+stdout with `d_NN: @<sim time>`; the combined `output.log` captures the DUT
+and all siblings (the handbrake is not captured). The evaluation pipeline's
+stable `sort -t: -k1,1` groups lines per device (ascending id: the `d_00`
+block, then `d_02`, `d_03`, …) while preserving each device's own
+chronological order — so a snapshot lists one deterministic block per
+asserted device, and **any device's lines can be asserted**, not just the
+DUT/host. Relabel with a keyword-guarded substitution so only the intended
+lines print (a substitution only prints when it matches, so the same keyword
+appearing on another device's line is harmless), e.g. `split/basic`'s
+peripheral rule:
+
+```sed
+/Welcome to ZMK!|security_changed: Security changed|kscan_process_msgq/s/^d_03: @[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}  .{19}/peripheral /p
+```
+
+Determinism guidance — bsim runs are deterministic per firmware build, but
+prefer lines that stay stable across dependency bumps and avoid:
+`*** Booting Zephyr OS build <hash> ***` (changes with every Zephyr/ZMK
+revision), raw kscan-mock event encodings (`ev <number> …` — prefer the
+decoded `…kscan_process_msgq: Row: …, pressed: …` lines), and HCI
+version/build banner lines. Semantic lines (connection/security changes,
+CCC subscriptions, position events) are stable and meaningful. When in
+doubt, run the case at least twice (ideally with different `--sim-prefix`)
+and confirm identical `filtered_output.log`.
+
 **BabbleSim setup.** bsim is Linux-only and comes from ZMK's manifest. Fetch
 and build it once, then point the command at it:
 
