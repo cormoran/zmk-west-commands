@@ -403,10 +403,8 @@ Phased so each step is independently green:
 
 ## 6. Open questions for review
 
-1. **BLE runner language**: Python orchestration + shelled `sort|sed|diff` pipeline
-   (recommended above) vs. keeping the bash script and wrapping it. Python costs a
-   careful port of 212 proven bash lines; bash costs parameterization pain and a
-   second manifest-resolution path.
+1. ~~**BLE runner language**~~ — **decided (2026-07-18): Python** orchestration +
+   shelled `sort|sed|diff` pipeline, as described in 3.4.
 2. **Release tagging**: start tagging `zmk-west-commands` (e.g. `v0.x`) when the
    Zephyr module lands, and recommend consumers pin tags instead of `main`?
 3. **Action repo**: are actions in `zmk-west-commands/.github/actions/*` acceptable,
