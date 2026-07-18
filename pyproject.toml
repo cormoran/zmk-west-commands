@@ -4,6 +4,9 @@ line-length = 99
 extend-exclude = [
   "build",
   "dependencies",
+  # Renode PythonPeripheral inline scripts: `request` is injected by Renode at
+  # runtime, they are not importable Python modules (see xiao_nrf52840_real.repl).
+  "scripts/lib/renode/platforms/models",
 ]
 select = ["E", "F"]
 extend-ignore = ["E501"]

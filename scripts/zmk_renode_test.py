@@ -138,7 +138,6 @@ class ZMKRenodeTest(WestCommand):
             self._run_module_tests(args, elf)
 
     def _run_liveness_smoke(self, args, elf: Path, renode_path: str) -> None:
-        import renode_harness  # noqa: E402
         import renode_smoke  # noqa: E402
 
         kwargs = {}
