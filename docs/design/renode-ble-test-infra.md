@@ -243,6 +243,17 @@ Per-case file conventions (unchanged from PR #49, which follows upstream ZMK):
 | `events.patterns` / `events.snapshot` | sed filter + expected output |
 | `pending` | mismatch ⇒ PENDING instead of FAILED |
 
+Note on device numbering / what can be asserted (added 2026-07-18, review):
+`-d=0` is the DUT and `-d=1` the handbrake (runner-assigned); every other
+device id comes from its own `siblings.txt` line — split peripherals are
+ordinary siblings launching the runner-staged peripheral exe. `output.log`
+captures the DUT and all siblings with a `d_NN: @<sim time>` prefix, and the
+stable per-device sort yields one deterministic chronological block per
+device — so cases can (and should) assert **any** device's lines, peripherals
+included, via keyword-guarded relabel rules (e.g. `d_03:` → `peripheral `).
+Snapshot-durability guidance (avoid Zephyr build-hash banner lines, raw
+kscan-mock event encodings, HCI banners) lives in the repo README.
+
 Generalizations over the template's script:
 
 1. **Exe prefix**: `tmpl_ble_` becomes `--sim-prefix` (default: module dir name).
