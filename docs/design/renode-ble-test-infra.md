@@ -270,18 +270,32 @@ The 410-line `studio_rpc_central/main.c` splits into:
 - **Module-specific** (~15%): the pre-encoded `zmk.studio.Request` payloads it writes
   and the snapshot lines asserting the responses.
 
+Request payloads are **never hand-encoded**. The module checks in a small Python
+generator script (the source of truth for the payloads), which the module author
+runs ahead of time to (re)generate the encoded artifact that the host app embeds:
+
+- The generator builds `zmk.studio.Request` messages in Python against the real
+  protos — reusing the harness helpers (`compile_protos()`, `load_studio_pb2()`,
+  the module's own proto) so encoding always matches the workspace's proto
+  revision — applies the SOF/ESC/EOF framing, and writes the output artifact.
+- The generated artifact is checked in next to the script (regenerable,
+  diff-reviewable); CI does not need to run the generator.
+
 Proposal: **phase the abstraction**.
 
 - *Now*: move the skeleton into `examples/ble-studio-central/` in this repo as a
-  documented, copyable app. Modules copy it and edit the payload table (one array).
-  This keeps full flexibility (arbitrary request sequencing, custom asserts) at the
-  cost of ~1 file per module.
-- *Later (optional)*: promote it to a shared app built by the runner, with payloads
-  injected per-case from a data file (e.g. `studio_requests.hex`, one hex-encoded
-  framed Request per line, embedded via `generate_inc_file_for_target()`). Modules
-  testing simple request/response flows then need zero C. Deferred because the
-  request payloads must currently be hand-encoded protobuf anyway — the C file is
-  not the real friction — and the case-data format deserves its own review.
+  documented, copyable app **plus its companion `generate_requests.py`**. The
+  generator emits a C payload table (a generated `.inc` included by `main.c`);
+  modules copy both, edit the Python (not C, not hex) to describe their request
+  sequence, and run it once. This keeps full flexibility (arbitrary request
+  sequencing, custom asserts) with the C file untouched in the common case.
+- *Later (optional)*: promote the skeleton to a shared app built by the runner,
+  with payloads injected per-case from a data file (e.g. `studio_requests.hex`,
+  one hex-encoded framed Request per line, embedded via
+  `generate_inc_file_for_target()`). The same generator-script workflow produces
+  that file — only the output format changes — so modules migrate by swapping the
+  emitter, and simple request/response flows then need zero C. Deferred because
+  the shared app's case-data format deserves its own review.
 
 ### 3.6 GitHub Actions (thin wrappers)
 
@@ -335,7 +349,9 @@ A module repo that never saw the template needs:
    (+ `CONFIG_ZMK_STUDIO=y` for the RPC smoke) → CI: build + the renode action.
    Optional `tests/renode/my_test.py` for custom-RPC assertions.
 3. **BLE**: `tests/ble/<group>/<case>/` with the per-case files → CI: the ble action.
-   A Studio-over-BLE case additionally copies `examples/ble-studio-central/`.
+   A Studio-over-BLE case additionally copies `examples/ble-studio-central/`
+   (host app + `generate_requests.py`) and edits/runs the generator script to
+   produce its payload table — no protobuf hand-encoding, no C edits.
 
 No shell scripts, no harness code, no zmk-workspace anywhere.
 
