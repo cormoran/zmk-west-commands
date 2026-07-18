@@ -1,0 +1,108 @@
+name: "ZMK Renode Test"
+description: >-
+  Boot an already-built ZMK firmware ELF in the Renode emulator, run a
+  generic boot + core Studio RPC smoke test, and (optionally) the module's
+  own Renode test suite -- all via `west zmk-renode-test`. This action only
+  wraps environment setup (Renode cache + install of the python protobuf /
+  protoc deps); it does NOT build firmware and does NOT ship the test logic
+  (that comes from the `zmk-west-commands` west command, which the caller
+  must already have in its manifest and `west update`d). See README.md in
+  this directory for the full contract.
+
+# Path inputs (`elf-path`, `tests`) may be relative; relative paths are
+# resolved against $GITHUB_WORKSPACE *inside the step* (NOT via the
+# ${{ github.workspace }} expression). This matters for container jobs: the
+# expression evaluates to the runner-host path (/home/runner/work/...) while
+# the checkout is mounted at /__w/... inside the container -- the env var is
+# path-translated by the runner, expressions are not (actions/runner#716).
+inputs:
+  elf-path:
+    description: >-
+      Path to the already-built firmware ELF to test (relative paths are
+      resolved against $GITHUB_WORKSPACE). The caller builds this -- typically
+      a `build.yaml` artifact built with the `renode-studio-uart` snippet.
+    required: true
+  tests:
+    description: >-
+      Path (relative to $GITHUB_WORKSPACE) to a directory of the module's own
+      Renode test files, e.g. `tests/renode`. Every `*_test.py` directly under
+      it is run (non-recursively). Leave empty to run only the smoke test.
+    required: false
+    default: ""
+  renode-version:
+    description: "Renode portable release version to install."
+    required: false
+    default: "1.16.1"
+  boot-timeout-seconds:
+    description: "Smoke test: seconds to wait for the ZMK boot banner."
+    required: false
+    default: "20"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Cache Renode install
+      uses: actions/cache@v4
+      with:
+        path: ~/.renode
+        key: renode-${{ inputs.renode-version }}-${{ runner.os }}
+
+    - name: Install Python + protoc dependencies
+      shell: bash
+      # The zmkfirmware/zmk-build-arm container has python3 but no
+      # `python3 -m pip` (west is preinstalled another way), and no sudo
+      # (steps already run as root), and no curl/wget -- try the least
+      # invasive route first and fall back progressively.
+      run: |
+        apt_get() {
+          if command -v sudo >/dev/null 2>&1; then sudo apt-get "$@"; else apt-get "$@"; fi
+        }
+        apt_updated=""
+        apt_install() {
+          if [ -z "$apt_updated" ]; then apt_get update -y; apt_updated=1; fi
+          apt_get install -y --no-install-recommends "$@"
+        }
+
+        if ! python3 -c "import google.protobuf" >/dev/null 2>&1; then
+          python3 -m pip install --quiet protobuf 2>/dev/null \
+            || pip3 install --quiet protobuf 2>/dev/null \
+            || apt_install python3-protobuf
+          python3 -c "import google.protobuf; print('python protobuf', google.protobuf.__version__)"
+        fi
+
+        if ! command -v protoc >/dev/null 2>&1; then
+          apt_install protobuf-compiler
+        fi
+        protoc --version
+
+    - name: Run Renode tests
+      shell: bash
+      # Runs from the default working directory ($GITHUB_WORKSPACE, the west
+      # topdir the caller already init/update'd). Resolve every (possibly
+      # relative) path input against $GITHUB_WORKSPACE -- the env var, which
+      # is container-path-translated, unlike the ${{ github.workspace }}
+      # expression (see the header note).
+      env:
+        IN_ELF_PATH: ${{ inputs.elf-path }}
+        IN_TESTS: ${{ inputs.tests }}
+        IN_RENODE_VERSION: ${{ inputs.renode-version }}
+        IN_BOOT_TIMEOUT: ${{ inputs.boot-timeout-seconds }}
+      run: |
+        abspath() {
+          case "$1" in
+            /*) echo "$1" ;;
+            *)  echo "$GITHUB_WORKSPACE/$1" ;;
+          esac
+        }
+        elf_path="$(abspath "$IN_ELF_PATH")"
+        if [ ! -f "$elf_path" ]; then
+          echo "::error::elf-path does not exist: $elf_path (this action does not build firmware -- build it in an earlier step; see README.md)"
+          exit 1
+        fi
+
+        args=(--elf "$elf_path" --renode-version "$IN_RENODE_VERSION" --boot-timeout "$IN_BOOT_TIMEOUT")
+        if [ -n "$IN_TESTS" ]; then
+          west zmk-renode-test "$(abspath "$IN_TESTS")" "${args[@]}"
+        else
+          west zmk-renode-test "${args[@]}"
+        fi
