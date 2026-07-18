@@ -1,0 +1,124 @@
+name: "ZMK BLE (BabbleSim) Test"
+description: >-
+  Fetch + build BabbleSim, then run a ZMK module's bsim BLE tests via
+  `west zmk-ble-test`. This action only wraps environment setup (enable the
+  +babblesim west group, build the bsim tree, cache it, and export
+  BSIM_OUT_PATH / BSIM_COMPONENTS_PATH); the test logic comes from the
+  `zmk-west-commands` west command, which the caller must already have in its
+  manifest and `west update`d. See README.md in this directory for the full
+  contract.
+
+# Path inputs (`tests`, `module`) may be relative; relative paths are resolved
+# against $GITHUB_WORKSPACE *inside the step* (NOT via the
+# ${{ github.workspace }} expression). This matters for container jobs: the
+# expression evaluates to the runner-host path (/home/runner/work/...) while
+# the checkout is mounted at /__w/... inside the container -- the env var is
+# path-translated by the runner, expressions are not (actions/runner#716).
+inputs:
+  tests:
+    description: "Path (relative to $GITHUB_WORKSPACE) to the BLE tests dir or a single case."
+    required: false
+    default: "tests/ble"
+  module:
+    description: "Module repo root added via ZMK_EXTRA_MODULES (relative to $GITHUB_WORKSPACE)."
+    required: false
+    default: "."
+  extra-args:
+    description: >-
+      Extra arguments passed through to `west zmk-ble-test`
+      (e.g. `--sim-prefix mymod -j 2 -v`).
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Fetch BabbleSim
+      shell: bash
+      run: |
+        west config manifest.group-filter -- +babblesim
+        west update --narrow
+
+    - name: Resolve bsim tree
+      id: bsim
+      shell: bash
+      # The bsim root is the `bsim` project (zephyrproject babblesim-manifest);
+      # fall back to the conventional dependencies/tools/bsim path. Its
+      # revision keys the cache. Emit a container path (computed in-container,
+      # so no host/container translation needed -- unlike workspace/action
+      # expressions).
+      run: |
+        bsim_dir="$(west list -f '{abspath}' bsim 2>/dev/null || true)"
+        if [ -z "$bsim_dir" ] || [ ! -d "$bsim_dir" ]; then
+          bsim_dir="$GITHUB_WORKSPACE/dependencies/tools/bsim"
+        fi
+        bsim_rev="$(west list -f '{revision}' bsim 2>/dev/null || echo unknown)"
+        echo "dir=$bsim_dir" >> "$GITHUB_OUTPUT"
+        echo "rev=$bsim_rev" >> "$GITHUB_OUTPUT"
+        echo "Resolved bsim: $bsim_dir @ $bsim_rev"
+
+    - name: Cache built BabbleSim
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.bsim.outputs.dir }}
+        key: bsim-${{ runner.os }}-${{ steps.bsim.outputs.rev }}
+
+    - name: Build BabbleSim
+      shell: bash
+      # No-op fast when restored from cache; otherwise builds the phy, the
+      # handbrake device and the 2G4 components.
+      env:
+        BSIM_DIR: ${{ steps.bsim.outputs.dir }}
+      run: make -C "$BSIM_DIR" everything -j "$(nproc)"
+
+    - name: Install Python + protoc dependencies
+      shell: bash
+      # Needed to convert per-case `studio_requests.json` request DSL files
+      # into the shared ble-studio-host app's payloads at test time. Same
+      # progressive fallbacks as the zmk-renode-test action: the
+      # zmkfirmware/zmk-build-arm container has python3 but no
+      # `python3 -m pip` (west is preinstalled another way), no sudo (steps
+      # already run as root), and no curl/wget.
+      run: |
+        apt_get() {
+          if command -v sudo >/dev/null 2>&1; then sudo apt-get "$@"; else apt-get "$@"; fi
+        }
+        apt_updated=""
+        apt_install() {
+          if [ -z "$apt_updated" ]; then apt_get update -y; apt_updated=1; fi
+          apt_get install -y --no-install-recommends "$@"
+        }
+
+        if ! python3 -c "import google.protobuf" >/dev/null 2>&1; then
+          python3 -m pip install --quiet protobuf 2>/dev/null \
+            || pip3 install --quiet protobuf 2>/dev/null \
+            || apt_install python3-protobuf
+          python3 -c "import google.protobuf; print('python protobuf', google.protobuf.__version__)"
+        fi
+
+        if ! command -v protoc >/dev/null 2>&1; then
+          apt_install protobuf-compiler
+        fi
+        protoc --version
+
+    - name: Run BLE tests
+      shell: bash
+      # Resolve (possibly relative) path inputs against $GITHUB_WORKSPACE (the
+      # env var is container-path-translated; the ${{ github.workspace }}
+      # expression is not -- see the header note).
+      env:
+        IN_TESTS: ${{ inputs.tests }}
+        IN_MODULE: ${{ inputs.module }}
+        IN_EXTRA_ARGS: ${{ inputs.extra-args }}
+        BSIM_DIR: ${{ steps.bsim.outputs.dir }}
+      run: |
+        abspath() {
+          case "$1" in
+            /*) echo "$1" ;;
+            *)  echo "$GITHUB_WORKSPACE/$1" ;;
+          esac
+        }
+        export BSIM_OUT_PATH="$BSIM_DIR"
+        export BSIM_COMPONENTS_PATH="$BSIM_DIR/components"
+        # shellcheck disable=SC2086  # extra-args is an intentional word list
+        west zmk-ble-test "$(abspath "$IN_TESTS")" -m "$(abspath "$IN_MODULE")" $IN_EXTRA_ARGS

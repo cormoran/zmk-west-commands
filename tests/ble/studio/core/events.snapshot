@@ -1,0 +1,21 @@
+host <wrn> bt_id: No static addresses stored in controller
+host <dbg> ble_studio_host: main: [Bluetooth initialized]
+host <dbg> ble_studio_host: start_scan: [Scanning successfully started]
+host <dbg> ble_studio_host: device_found: [DEVICE]: FD:9E:B2:48:47:39 (random), AD evt type 0, AD data len 15, RSSI -59
+host <dbg> ble_studio_host: eir_found: [AD]: 25 data_len 2
+host <dbg> ble_studio_host: eir_found: [AD]: 1 data_len 1
+host <dbg> ble_studio_host: eir_found: [AD]: 2 data_len 4
+host <dbg> ble_studio_host: connected: [Connected]: FD:9E:B2:48:47:39 (random)
+host <dbg> ble_studio_host: connected: [Setting the security for the connection]
+host <dbg> ble_studio_host: pairing_complete: Pairing complete
+host <dbg> ble_studio_host: mtu_exchanged: [MTU exchanged] (err 0) mtu 65
+host <dbg> ble_studio_host: discover_conn: [Discovery started for conn]
+host <dbg> ble_studio_host: discover_func: [ATTRIBUTE] handle 38
+host <dbg> ble_studio_host: discover_func: [ATTRIBUTE] handle 39
+host <dbg> ble_studio_host: discover_func: [ATTRIBUTE] handle 41
+host <dbg> ble_studio_host: discover_func: [SUBSCRIBED]
+host <dbg> ble_studio_host: write_func: [WROTE REQUEST]
+host <dbg> ble_studio_host: handle_frame: [RPC RESPONSE 1]
+host <dbg> ble_studio_host: handle_frame: payload
+host                        0a 07 08 01 a2 06 02 0a  00                      |........ .       
+host <dbg> ble_studio_host: handle_frame: [ALL RESPONSES RECEIVED]

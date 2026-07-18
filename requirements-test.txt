@@ -1,7 +1,9 @@
-# Runtime dependencies for `west zmk-renode-test`.
+# Runtime dependencies for `west zmk-renode-test` and `west zmk-ble-test`.
 #
 # The Renode smoke test compiles the workspace's zmk-studio-messages protos
-# with `protoc` and imports the generated Python modules, which need the
-# protobuf runtime. `protoc` itself is a system tool (install protobuf-compiler
-# / the protoc binary separately -- the CI action installs both).
+# with `protoc` and imports the generated Python modules; `west zmk-ble-test`
+# does the same when converting a case's `studio_requests.json` request DSL
+# into the shared ble-studio-host app's payloads. Both need the protobuf
+# runtime. `protoc` itself is a system tool (install protobuf-compiler / the
+# protoc binary separately -- the CI actions install both).
 protobuf

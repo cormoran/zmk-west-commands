@@ -1,0 +1,26 @@
+manifest:
+  remotes:
+    - name: zmkfirmware
+      url-base: https://github.com/zmkfirmware
+    - name: cormoran
+      url-base: https://github.com/cormoran
+  projects:
+    # The BLE (BabbleSim) tests need two fixes that are NOT yet on
+    # zmkfirmware/zmk main:
+    #   * writable behavior local-id map section (native/POSIX SIGSEGV on
+    #     the first settings commit otherwise), and
+    #   * settings_subsys_init before dynamic BLE handler registration
+    #     (without it the split central never advertises/scans on nrf52_bsim
+    #     builds that use the settings NONE backend, i.e. CONFIG_ZMK_STUDIO=y
+    #     without CONFIG_BT_SETTINGS).
+    # They live on cormoran/zmk; a search of zmkfirmware/zmk history found
+    # neither, so we pin cormoran/zmk here.
+    # TODO: switch to `remote: zmkfirmware` / `revision: main` once both
+    # fixes land upstream (drop this comment when you do).
+    - name: zmk
+      remote: cormoran
+      revision: fffa339cf6f5c45366ab332d2b512f1c3c300753
+      import:
+        file: app/west.yml
+  self:
+    import: west.yml
