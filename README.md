@@ -263,7 +263,8 @@ recurses from `tests_path` (default: current directory). Per-case files:
 | `peripheral.conf` | extra Kconfig applied to peripheral builds only |
 | `peripheral*.overlay` | one split-peripheral build each; presence ⇒ DUT built as a split central (`-DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y`) |
 | `siblings.txt` | one command line per extra simulated device (`-d=2…`; `-d=0` is the DUT, `-d=1` the handbrake) |
-| `studio_requests.hex` | if present, the shared `ble-studio-host` app is built for this case with these payloads embedded (see below) |
+| `studio_requests.json` | declarative `zmk.studio.Request` list (JSON DSL); if present, the shared `ble-studio-host` app is built for this case with these payloads embedded (see below) |
+| `studio_requests.hex` | byte-exact escape hatch for the same (one framed request per hex line); mutually exclusive with the `.json` |
 | `events.patterns` | `sed -E -n` script filtering the combined output log |
 | `events.snapshot` | expected filtered output |
 | `pending` | if present, a snapshot mismatch is PENDING instead of FAILED |
@@ -279,7 +280,7 @@ sanitized module directory name) sets the bsim simulation id
   unchanged, so existing case data keeps working.
 - `{studio_host}` expands to the case's staged shared-host executable name
   (`<sim id>_studio_host.exe` — only meaningful for cases with a
-  `studio_requests.hex`).
+  `studio_requests.json`/`.hex`).
 
 Custom module host apps (`tests/ble/*_host/`, the documented convention; the
 legacy `tests/ble/*_central/` is still auto-discovered for backward compat)
@@ -309,22 +310,39 @@ land upstream, pin `cormoran/zmk@fffa339cf6f5c45366ab332d2b512f1c3c300753` in
 your test manifest (this repo's `scripts/west-test-ble.yml` does exactly that,
 with a TODO to unpin).
 
-**Studio-over-BLE host app (no C in your module).** To exercise Studio RPC
-over BLE (including while the split link is active), your case ships **data
-only**: a checked-in `generate_requests.py` (built on the
-`scripts/lib/ble/studio_requests.py` helper — ~30 lines, no protobuf
-hand-encoding) plus the `studio_requests.hex` it generates. The runner then
-automatically builds this repo's shared [`ble-studio-host/`](ble-studio-host/)
-app with those payloads embedded and stages it per case; reference it from
-`siblings.txt` as `./{studio_host} -d=2`. See
-[`ble-studio-host/README.md`](ble-studio-host/README.md) for the full
-workflow and [`tests/ble/studio/core/`](tests/ble/studio/core/) for a
-complete sample case. **Escape hatch:** modules needing custom host-side
-logic can still ship their own Zephyr app as `tests/ble/<name>_host/`
-(the legacy `tests/ble/<name>_central/` is still auto-discovered for
-backward compat); the runner discovers and builds every such app
-automatically. Prefer the shared app whenever "send requests in order,
-snapshot the response hexdumps" is enough.
+**Studio-over-BLE host app (no C, no Python in your module).** To exercise
+Studio RPC over BLE (including while the split link is active), your case
+ships **one data file**: `studio_requests.json`, an ordered list of
+`zmk.studio.Request` messages in protobuf's canonical JSON mapping. A bytes
+field (e.g. a custom-subsystem `Call.payload`) may be written as
+`{"$type": "<full.message.name>", ...fields}` — the infrastructure resolves
+the name against the workspace's Studio protos plus your module's own
+`proto/` directory, encodes the message and substitutes the bytes
+(recursively); `request_id` is auto-assigned (1-based) when omitted:
+
+```json
+[
+  { "custom": { "listCustomSubsystems": {} } },
+  { "custom": { "call": {
+      "subsystemIndex": 0,
+      "payload": { "$type": "your_name.template.Request",
+                   "sample": { "value": 42 } } } } }
+]
+```
+
+The runner converts the JSON at test time (needs python `protobuf` + `protoc`
+— see `requirements-test.txt`; the CI action installs both), automatically
+builds this repo's shared [`ble-studio-host/`](ble-studio-host/) app with the
+payloads embedded, and stages it per case; reference it from `siblings.txt`
+as `./{studio_host} -d=2`. See
+[`ble-studio-host/README.md`](ble-studio-host/README.md) for the full DSL
+spec and [`tests/ble/studio/core/`](tests/ble/studio/core/) for a complete
+sample case. **Escape hatches:** a byte-exact `studio_requests.hex` (or the
+programmatic API in `scripts/lib/ble/studio_requests.py`) for payloads the
+JSON mapping cannot express, and a custom host app as
+`tests/ble/<name>_host/` (legacy `tests/ble/<name>_central/` still
+auto-discovered) for custom host-side logic. Prefer the shared app + JSON
+whenever "send requests in order, snapshot the response hexdumps" is enough.
 
 #### GitHub Action
 

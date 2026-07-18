@@ -71,6 +71,36 @@ runs:
         BSIM_DIR: ${{ steps.bsim.outputs.dir }}
       run: make -C "$BSIM_DIR" everything -j "$(nproc)"
 
+    - name: Install Python + protoc dependencies
+      shell: bash
+      # Needed to convert per-case `studio_requests.json` request DSL files
+      # into the shared ble-studio-host app's payloads at test time. Same
+      # progressive fallbacks as the zmk-renode-test action: the
+      # zmkfirmware/zmk-build-arm container has python3 but no
+      # `python3 -m pip` (west is preinstalled another way), no sudo (steps
+      # already run as root), and no curl/wget.
+      run: |
+        apt_get() {
+          if command -v sudo >/dev/null 2>&1; then sudo apt-get "$@"; else apt-get "$@"; fi
+        }
+        apt_updated=""
+        apt_install() {
+          if [ -z "$apt_updated" ]; then apt_get update -y; apt_updated=1; fi
+          apt_get install -y --no-install-recommends "$@"
+        }
+
+        if ! python3 -c "import google.protobuf" >/dev/null 2>&1; then
+          python3 -m pip install --quiet protobuf 2>/dev/null \
+            || pip3 install --quiet protobuf 2>/dev/null \
+            || apt_install python3-protobuf
+          python3 -c "import google.protobuf; print('python protobuf', google.protobuf.__version__)"
+        fi
+
+        if ! command -v protoc >/dev/null 2>&1; then
+          apt_install protobuf-compiler
+        fi
+        protoc --version
+
     - name: Run BLE tests
       shell: bash
       # Resolve (possibly relative) path inputs against $GITHUB_WORKSPACE (the

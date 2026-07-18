@@ -1,35 +1,41 @@
-"""Helpers for generating `studio_requests.hex` payload files.
+"""Shared infrastructure for the `ble-studio-host` request payloads.
 
-`studio_requests.hex` is the case-data file the shared `ble-studio-host` app
-(this repo's top-level `ble-studio-host/`) embeds at build time: one
-hex-encoded, framed (SOF/ESC/EOF) `zmk.studio.Request` per line, `#` comments
-allowed. A module's checked-in `generate_requests.py` builds the Request
-protos (against the workspace's real `zmk-studio-messages` protos -- never
-hand-encoded bytes), and this module does the rest: framing, rendering,
-writing, and an optional `--check` mode for CI.
+The primary, declarative form is a per-case **`studio_requests.json`**: an
+ordered JSON array of `zmk.studio.Request` messages in protobuf's canonical
+JSON mapping (validated against the real compiled descriptors via
+`google.protobuf.json_format.ParseDict`), with one DSL extension -- a bytes
+field may be written as an object `{"$type": "<full.message.name>", ...}`
+whose fields are encoded as that message and substituted as the bytes value
+(recursively). `west zmk-ble-test` converts the JSON to the framed payload
+list at test time via `load_requests_json()`; modules check in *only* the
+JSON -- no Python, no hex.
 
-A module-side generator reduces to ~20 lines:
+The lower-level pieces stay available for exotic cases:
 
-    from studio_requests import generator_main
-
-    def build_requests(studio_pb2):
-        req = studio_pb2.Request()
-        req.request_id = 1
-        req.custom.list_custom_subsystems.SetInParent()
-        return [("list_custom_subsystems", req)]
-
-    if __name__ == "__main__":
-        generator_main(build_requests, __file__)
-
-(plus the small sys.path bootstrap that locates this file -- see
-`tests/ble/studio/core/generate_requests.py` for a complete sample.)
+- `studio_requests.hex` (one hex-encoded framed Request per line, `#`
+  comments allowed) is the escape-hatch case file for byte-exact payloads
+  the JSON mapping cannot express;
+- the programmatic API (`generator_main()` / `render_hex()` /
+  `load_workspace_studio_pb2()` / `compile_protos` / `frame`) lets a script
+  build Request protos in Python and emit that hex file.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
+import importlib
+import json
+import os
 import sys
 from pathlib import Path
+
+# Old protoc (<3.19) generates descriptor code that only works with the
+# pure-Python protobuf runtime. The switch is read when google.protobuf is
+# first imported, so set it here -- before any json_format/descriptor_pool
+# import below runs -- mirroring renode_harness.compile_protos (which sets it
+# too, but only after this module may already have imported google.protobuf).
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 
 # The Renode harness (proto compilation + Studio framing) is a sibling lib.
 _RENODE_LIB = Path(__file__).resolve().parent.parent / "renode"
@@ -45,6 +51,8 @@ __all__ = [
     "compile_protos",
     "frame",
     "load_workspace_studio_pb2",
+    "compile_module_protos",
+    "load_requests_json",
     "render_hex",
     "generator_main",
 ]
@@ -70,6 +78,103 @@ def load_workspace_studio_pb2():
     return load_studio_pb2(find_studio_proto_dir(topdir))
 
 
+def compile_module_protos(module_dir: Path) -> None:
+    """Compile every .proto under `<module_dir>/proto` and import the
+    generated `*_pb2` modules so their messages register in protobuf's
+    default descriptor pool (where `$type` names are resolved).
+
+    Each proto file's own directory is used as its include root ("flat"
+    generation, mirroring how the template's Renode test compiles its module
+    proto), so sibling imports by bare filename work.
+    """
+    proto_root = Path(module_dir) / "proto"
+    if not proto_root.is_dir():
+        return
+    proto_files = sorted(proto_root.rglob("*.proto"))
+    if not proto_files:
+        return
+    include_dirs = sorted({str(p.parent) for p in proto_files})
+    out_dir = compile_protos(proto_files, include_dirs=include_dirs)
+    for gen in sorted(Path(out_dir).glob("*_pb2.py")):
+        importlib.import_module(gen.stem)
+
+
+def _message_class(type_name: str):
+    """Resolve a full protobuf message name (e.g. `your_name.template.
+    SampleRequest`) against the default descriptor pool. Compatible with
+    both old and new python-protobuf message_factory APIs."""
+    from google.protobuf import descriptor_pool, message_factory
+
+    try:
+        desc = descriptor_pool.Default().FindMessageTypeByName(type_name)
+    except KeyError:
+        raise ValueError(
+            f'unknown $type "{type_name}" -- not found among the compiled protos '
+            "(workspace zmk-studio-messages + the module's proto/ directory)"
+        )
+    if hasattr(message_factory, "GetMessageClass"):
+        return message_factory.GetMessageClass(desc)
+    return message_factory.MessageFactory().GetPrototype(desc)
+
+
+def _expand_dollar_types(node):
+    """Recursively replace `{"$type": name, ...fields}` objects with the
+    base64 encoding of the serialized message -- protobuf's canonical JSON
+    form for bytes fields, so the result feeds straight into ParseDict.
+    Nested `$type` objects (a `$type` inside another's fields) work
+    naturally because children are expanded first."""
+    from google.protobuf import json_format
+
+    if isinstance(node, dict):
+        if "$type" in node:
+            type_name = node["$type"]
+            if not isinstance(type_name, str):
+                raise ValueError(f"$type must be a string, got: {type_name!r}")
+            fields = {k: _expand_dollar_types(v) for k, v in node.items() if k != "$type"}
+            msg = json_format.ParseDict(fields, _message_class(type_name)())
+            return base64.b64encode(msg.SerializeToString()).decode("ascii")
+        return {k: _expand_dollar_types(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_expand_dollar_types(v) for v in node]
+    return node
+
+
+def load_requests_json(path: Path, module_dir: Path | None = None):
+    """Parse a `studio_requests.json` case file into the ordered list of
+    (name, zmk.studio.Request) tuples the hex renderer / host app expect.
+
+    File format: a JSON array; each element is one `zmk.studio.Request` in
+    protobuf's canonical JSON mapping (camelCase or original field names),
+    plus the `$type` extension for bytes fields (see `_expand_dollar_types`).
+    If an element omits `request_id`/`requestId` (or sets it to 0), it is
+    auto-assigned the element's 1-based position in the array.
+    """
+    from google.protobuf import json_format
+
+    studio_pb2 = load_workspace_studio_pb2()
+    if module_dir is not None:
+        compile_module_protos(Path(module_dir))
+
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, list):
+        raise ValueError(f"{path}: top level must be a JSON array of zmk.studio.Request objects")
+
+    named = []
+    for idx, entry in enumerate(data):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: element {idx} is not a JSON object")
+        expanded = _expand_dollar_types(entry)
+        try:
+            req = json_format.ParseDict(expanded, studio_pb2.Request())
+        except json_format.ParseError as err:
+            raise ValueError(f"{path}: element {idx}: {err}") from err
+        if req.request_id == 0:
+            req.request_id = idx + 1
+        which = req.WhichOneof("subsystem") or "empty"
+        named.append((f"request_id={req.request_id} ({which})", req))
+    return named
+
+
 def _normalize(requests) -> list[tuple[str, object]]:
     """Accept a list of Request messages or (name, Request) tuples."""
     named = []
@@ -84,8 +189,9 @@ def _normalize(requests) -> list[tuple[str, object]]:
 def render_hex(requests) -> str:
     """Render framed requests as a `studio_requests.hex` file body."""
     lines = [
-        "# GENERATED by generate_requests.py -- DO NOT EDIT.",
-        "# Edit the generator and re-run it to change the request sequence.",
+        "# GENERATED studio_requests payload file -- DO NOT EDIT.",
+        "# Edit the source (studio_requests.json, or your generator script)",
+        "# and regenerate instead.",
         "#",
         "# One hex-encoded, framed (SOF/ESC/EOF) zmk.studio.Request per line;",
         "# the ble-studio-host app sends them in order, one per response.",

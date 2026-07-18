@@ -23,8 +23,11 @@ Per-case file conventions (a directory is a case iff it has
 | `peripheral.conf`     | role-specific extra conf for peripheral builds       |
 | `peripheral*.overlay` | one split-peripheral build each; presence => split   |
 | `siblings.txt`        | one command line per extra simulated device          |
-| `studio_requests.hex` | build the shared ble-studio-host app with these      |
-|                       | payloads embedded ({studio_host} in siblings.txt)    |
+| `studio_requests.json`| declarative zmk.studio.Request list (JSON DSL);      |
+|                       | converted at test time and embedded into the shared  |
+|                       | ble-studio-host app ({studio_host} in siblings.txt)  |
+| `studio_requests.hex` | byte-exact escape hatch for the same (one framed     |
+|                       | request per hex line); mutually exclusive with .json |
 | `events.patterns`     | sed -E -n filter for the combined output log         |
 | `events.snapshot`     | expected filtered output                             |
 | `pending`             | mismatch reported as PENDING instead of FAILED       |
@@ -50,7 +53,8 @@ class BleTestError(Exception):
 
 # The shared Studio-over-BLE host app this repo owns (ble-studio-host/ at the
 # repo root; see its README.md). Built automatically -- with the case's
-# payload file embedded -- for any case that contains `studio_requests.hex`.
+# payload data embedded -- for any case that contains `studio_requests.json`
+# (or the low-level `studio_requests.hex`).
 BLE_STUDIO_HOST_DIR = Path(__file__).resolve().parents[3] / "ble-studio-host"
 
 # Status constants for a single case.
@@ -264,16 +268,16 @@ class BleRunner:
             pn = overlay.name[: -len(".overlay")]
             self._stage(case_build / pn / "zephyr" / "zmk.exe", f"{sim_id}_{pn}.exe")
 
-        # --- Shared Studio-over-BLE host app (per-case payload file) ---
+        # --- Shared Studio-over-BLE host app (per-case payload data) ---
         studio_host_exe = f"{sim_id}_studio_host.exe"
-        requests_hex = case_dir / "studio_requests.hex"
-        if requests_hex.is_file():
+        requests_hex = self._resolve_studio_requests(case_dir, case_build, rel)
+        if requests_hex is not None:
             if not BLE_STUDIO_HOST_DIR.is_dir():
                 raise BleTestError(
-                    f"case {rel} has studio_requests.hex but the shared host app "
+                    f"case {rel} has studio_requests data but the shared host app "
                     f"was not found at {BLE_STUDIO_HOST_DIR}"
                 )
-            self.log.inf("Found studio_requests.hex, building the shared ble-studio-host")
+            self.log.inf("Building the shared ble-studio-host app for this case")
             host_build = case_build / "studio_host"
             self._west_build(
                 host_build,
@@ -304,6 +308,50 @@ class BleRunner:
             if line:
                 lines.append(line)
         return lines
+
+    def _resolve_studio_requests(self, case_dir: Path, case_build: Path, rel: str) -> Path | None:
+        """Return the studio_requests.hex path to embed into the shared host
+        app, or None when the case does not use it.
+
+        The primary form is `studio_requests.json` (declarative request DSL,
+        see scripts/lib/ble/studio_requests.py), converted here at test time
+        into a derived hex under the case build dir -- no checked-in
+        artifact. A `studio_requests.hex` in the case dir is the byte-exact
+        escape hatch. Having both in one case is an error.
+        """
+        json_file = case_dir / "studio_requests.json"
+        hex_file = case_dir / "studio_requests.hex"
+        if json_file.is_file() and hex_file.is_file():
+            raise BleTestError(
+                f"case {rel}: both studio_requests.json and studio_requests.hex exist -- "
+                "keep exactly one (JSON is the primary form; .hex is the byte-exact "
+                "escape hatch)"
+            )
+        if hex_file.is_file():
+            return hex_file
+        if not json_file.is_file():
+            return None
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        try:
+            import studio_requests
+
+            named = studio_requests.load_requests_json(json_file, module_dir=self.module_dir)
+            hex_content = studio_requests.render_hex(named)
+        except ImportError as err:
+            raise BleTestError(
+                f"case {rel}: converting studio_requests.json requires the python "
+                f"`protobuf` package and `protoc` -- install requirements-test.txt "
+                f"(pip install protobuf; apt install protobuf-compiler) [{err}]"
+            )
+        except (RuntimeError, ValueError, OSError) as err:
+            raise BleTestError(f"case {rel}: studio_requests.json conversion failed: {err}")
+
+        case_build.mkdir(parents=True, exist_ok=True)
+        derived = case_build / "studio_requests.hex"
+        derived.write_text(hex_content)
+        self.log.inf(f"Converted studio_requests.json ({len(named)} request(s)) -> {derived}")
+        return derived
 
     def _run_simulation(self, sim_id: str, siblings: list[str], output_log: Path) -> None:
         output_log.parent.mkdir(parents=True, exist_ok=True)

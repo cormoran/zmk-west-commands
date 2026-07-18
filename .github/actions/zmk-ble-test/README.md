@@ -16,8 +16,11 @@ caches the built tree, and runs a ZMK module's bsim BLE tests.
   Linux-only; the `4.1` tag matches the Zephyr the bsim board targets).
 - It enables the `+babblesim` west group, `west update --narrow`s to fetch the
   bsim sources, `make everything` in the resolved bsim tree, caches that tree
-  keyed on the `bsim` project revision, exports `BSIM_OUT_PATH` /
-  `BSIM_COMPONENTS_PATH`, and runs `west zmk-ble-test`.
+  keyed on the `bsim` project revision, installs the python `protobuf` runtime
+  and `protoc` (progressive apt/pip fallbacks, same as the zmk-renode-test
+  action — needed to convert per-case `studio_requests.json` request DSL
+  files at test time), exports `BSIM_OUT_PATH` / `BSIM_COMPONENTS_PATH`, and
+  runs `west zmk-ble-test`.
 - **ZMK revision prerequisite**: the bsim BLE tests need two fixes not yet on
   `zmkfirmware/zmk` main (writable behavior local-id map section;
   `settings_subsys_init` before dynamic BLE handler registration). Until they
