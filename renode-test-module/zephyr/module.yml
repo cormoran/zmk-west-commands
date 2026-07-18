@@ -1,0 +1,7 @@
+# Tiny Zephyr/ZMK module, used only by the test-zmk-renode skill's builds.
+# It registers an alternate ZMK Studio RPC UART transport for use under
+# Renode emulation; see Kconfig / src/renode_uart_transport.c for why.
+name: zmk-renode-test-transport
+build:
+  cmake: .
+  kconfig: Kconfig

@@ -1,0 +1,48 @@
+# Copyright (c) 2026 The ZMK Contributors
+# SPDX-License-Identifier: MIT
+
+config ZMK_RENODE_STUDIO_UART_TRANSPORT
+    bool "Studio RPC UART transport for Renode emulation testing (bypasses the USB/BLE endpoint gate)"
+    depends on ZMK_STUDIO_RPC
+    select SERIAL
+    select RING_BUFFER
+    select UART_INTERRUPT_DRIVEN
+    help
+      ZMK's built-in Studio RPC UART transport
+      (dependencies/zmk/app/src/studio/uart_rpc_transport.c) registers itself
+      tagged ZMK_TRANSPORT_USB. zmk_rpc's refresh_selected_transport() only
+      calls that transport's rx_start() once zmk_endpoint_get_selected()
+      picks the USB transport, which requires zmk_usb_is_hid_ready() to be
+      true — i.e. a real, host-negotiated USB HID connection.
+
+      Under Renode, the nRF52840 USBD peripheral has no working C# model (it
+      is an SVD-register stub only): usb_enable() calls
+      nrf_usbd_common's usbd_enable(), which busy-waits forever on
+      USBD->EVENTCAUSE.READY, a bit real silicon sets automatically a few us
+      after ENABLE but that Renode's stub never sets. Firmware hangs before
+      main() even if you never plug in a "host". There is no Kconfig- or
+      devicetree-only way around this: USB is fundamentally non-functional
+      under this Renode nRF52840 platform, so zmk_usb_is_hid_ready() can
+      never become true, so the built-in UART transport's rx_start() is
+      never called, so the emulated device is deaf on the wire — even though
+      the UART peripheral itself, and the byte-level RPC framing, work fine.
+
+      This option adds a second, functionally-identical Studio RPC UART
+      transport (src/renode_uart_transport.c, using only the same public
+      zmk_rpc_get_rx_buf()/zmk_rpc_get_tx_buf()/zmk_rpc_rx_notify() APIs and
+      the same `zmk,studio-rpc-uart` chosen node as the real one) but tagged
+      ZMK_TRANSPORT_NONE instead of ZMK_TRANSPORT_USB. ZMK_TRANSPORT_NONE is
+      exactly the transport zmk_endpoint_get_selected() reports when no
+      output endpoint preference is set — the natural state of a freshly
+      booted emulated board with CONFIG_ZMK_USB=n and CONFIG_ZMK_BLE=n, no
+      settings persisted, no faking required. No vendored ZMK file is
+      modified to make this work.
+
+      Enable CONFIG_ZMK_STUDIO_TRANSPORT_UART=n alongside this so the two
+      transports don't both attach an interrupt callback to the same UART
+      device.
+
+      Do not enable this for a real hardware build — it exists purely so
+      the Renode T1 test (Studio RPC over UART, see
+      skills/test-zmk-renode/) has a way to reach the Studio RPC subsystem
+      without a working USB or BLE stack.

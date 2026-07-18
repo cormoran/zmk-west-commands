@@ -1,0 +1,35 @@
+:name: XIAO nRF52840 wired split (T2)
+:description: Two machines (central + peripheral), split-wired UARTs cross-connected via a hub.
+
+# Console (banner, split-connect logs) is on each machine's uart0, exposed on
+# its own TCP socket. The wired-split link is on each machine's uart1 (see
+# overlays/split-wired-uart.overlay); both machines' uart1 are wired to the
+# SAME Renode UART hub, making it a point-to-point link between the two
+# emulated boards (see references/renode-notes.md for why a hub — not a
+# server-socket terminal — is used here). This script only loads both ELFs
+# and wires everything up; the harness calls `start` explicitly (over the
+# monitor `-P` port) only after it has connected the console sockets, so no
+# early boot-banner bytes are lost.
+
+using sysbus
+
+$central_bin?=@central.elf
+$peripheral_bin?=@peripheral.elf
+$central_console_port?=3465
+$peripheral_console_port?=3466
+
+emulation CreateUARTHub "split_link"
+
+mach create "central"
+machine LoadPlatformDescription @platforms/xiao_nrf52840.repl
+emulation CreateServerSocketTerminal $central_console_port "central_console_term" false
+connector Connect sysbus.uart0 central_console_term
+connector Connect sysbus.uart1 split_link
+sysbus LoadELF $central_bin
+
+mach create "peripheral"
+machine LoadPlatformDescription @platforms/xiao_nrf52840.repl
+emulation CreateServerSocketTerminal $peripheral_console_port "peripheral_console_term" false
+connector Connect sysbus.uart0 peripheral_console_term
+connector Connect sysbus.uart1 split_link
+sysbus LoadELF $peripheral_bin
