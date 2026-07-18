@@ -7,11 +7,11 @@ manifest:
     # labels the renode-studio-uart overlay references: &p25q16h,
     # &board_cdc_acm_uart, ...), which only exist on newer ZMK -- the
     # v0.3-branch used by scripts/west-test.yml still has HWv1
-    # `seeeduino_xiao_ble` instead. Pin an official `main` commit that has the
+    # `seeeduino_xiao_ble` instead. Track official `main`, which has the
     # HWv2 board; no fork needed (the smoke test uses only core Studio RPC).
     - name: zmk
       remote: zmkfirmware
-      revision: 83bc82dbfdcda4ef392461202534a7cc337ca055
+      revision: main
       import: app/west.yml
   self:
     import: west.yml
