@@ -138,6 +138,8 @@ def run_liveness_smoke(
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     boot_wait: float = 3.0,
     wall_budget: float | None = None,
+    rtt: bool = False,
+    device_addr: int | None = None,
 ) -> None:
     """Real-binary liveness smoke: boot a real flashable image (no UART Studio
     transport) and prove it is still running -- not parked in a Zephyr fatal --
@@ -146,9 +148,15 @@ def run_liveness_smoke(
     Runs the emulation until virtual time reaches `min_virtual`, then samples
     `sysbus.cpu PC` `sample_count` times over a few more virtual seconds and
     resolves each via the monitor. FAILS if any sample lands in a fatal frame
-    (see FATAL_SYMBOLS) or if console output (observation builds only) shows a
-    fatal marker; PASSES otherwise. Sampled symbols and any console output are
-    printed for diagnosis. Does not require console output.
+    (see FATAL_SYMBOLS) or if console/RTT output shows a fatal marker; PASSES
+    otherwise. Sampled symbols and any console/RTT output are printed for
+    diagnosis. Does not require console output.
+
+    `rtt=True` additionally captures Zephyr's SEGGER RTT log output during the
+    run (the recommended observation path for real-binary mode -- an RTT build
+    is real-hardware-flashable, Kconfig-only: CONFIG_LOG + CONFIG_USE_SEGGER_RTT
+    + CONFIG_LOG_BACKEND_RTT). RTT output is printed and also scanned for the
+    same fatal markers. `device_addr` overrides the FICR BLE identity.
     """
     if wall_budget is None:
         # nRF52840 under Renode runs a few x faster than real time; give ample
@@ -161,10 +169,14 @@ def run_liveness_smoke(
         storage_addr=storage_addr,
         storage_size=storage_size,
         boot_wait=boot_wait,
+        rtt=rtt,
+        device_addr=device_addr,
     )
     assert session.mon is not None
     mon = session.mon
+    rtt_sock = getattr(session, "rtt_socket", None)
     console_buf = ""
+    rtt_buf = ""
     try:
         # 1. Let it run until it has clocked `min_virtual` virtual seconds.
         print(f"running to >= {min_virtual:.0f}s virtual time...", file=sys.stderr)
@@ -172,6 +184,8 @@ def run_liveness_smoke(
         vt = 0.0
         while time.monotonic() < deadline:
             console_buf += renode_harness.drain_text(console._sock, timeout=1.0)
+            if rtt_sock is not None:
+                rtt_buf += renode_harness.drain_text(rtt_sock._sock, timeout=0.2)
             vt = _parse_virtual_seconds(mon.execute("machine GetTimeSourceInfo", settle=0.3)) or vt
             if vt >= min_virtual:
                 break
@@ -191,12 +205,17 @@ def run_liveness_smoke(
             sym = _clean_symbol(mon.execute(f"sysbus FindSymbolAt {pc}", settle=0.3))
             samples.append((pc, sym))
             console_buf += renode_harness.drain_text(console._sock, timeout=0.5)
+            if rtt_sock is not None:
+                rtt_buf += renode_harness.drain_text(rtt_sock._sock, timeout=0.2)
 
         for pc, sym in samples:
             print(f"  PC {pc} -> {sym or '<no symbol>'}", file=sys.stderr)
         if console_buf.strip():
             print("--- console output ---", file=sys.stderr)
             print(console_buf, file=sys.stderr)
+        if rtt_buf.strip():
+            print("--- RTT output ---", file=sys.stderr)
+            print(rtt_buf, file=sys.stderr)
 
         # 3. Verdict.
         halted = [(pc, sym) for pc, sym in samples if sym in FATAL_SYMBOLS]
@@ -205,11 +224,15 @@ def run_liveness_smoke(
                 "CPU parked in a fatal frame -- image faulted: "
                 + ", ".join(f"{pc}={sym}" for pc, sym in halted)
             )
-        marker = next((m for m in FATAL_CONSOLE_MARKERS if m in console_buf), None)
+        marker = next(
+            (m for m in FATAL_CONSOLE_MARKERS if m in console_buf or m in rtt_buf), None
+        )
         if marker:
-            raise AssertionError(f"console reported a fatal error ({marker!r})")
+            raise AssertionError(f"console/RTT reported a fatal error ({marker!r})")
         print("liveness OK (CPU running, no fatal frame)", file=sys.stderr)
     finally:
+        if rtt_sock is not None:
+            rtt_sock.close()
         rpc.close()
         console.close()
         session.stop()
@@ -248,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
         help="real-binary mode: virtual seconds to run before sampling (default: 20).",
     )
     ap.add_argument(
+        "--rtt",
+        action="store_true",
+        help="real-binary mode: capture Zephyr SEGGER RTT log output during the "
+        "liveness run (RTT-logging builds); printed and scanned for fatal markers.",
+    )
+    ap.add_argument(
         "--storage-addr",
         type=lambda s: int(s, 0),
         default=renode_harness.STORAGE_ADDR_DEFAULT,
@@ -279,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
                 min_virtual=args.min_virtual,
                 storage_addr=args.storage_addr,
                 storage_size=args.storage_size,
+                rtt=args.rtt,
             )
         except AssertionError as err:
             print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)

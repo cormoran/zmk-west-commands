@@ -93,6 +93,15 @@ class ZMKRenodeTest(WestCommand):
             help="Real-binary mode: virtual seconds to run before PC sampling (default: 20).",
         )
         parser.add_argument(
+            "--rtt",
+            action="store_true",
+            help=(
+                "Real-binary mode: capture Zephyr SEGGER RTT log output during the "
+                "liveness run and fail on RTT fatal lines (for RTT-logging builds: "
+                "CONFIG_LOG + CONFIG_USE_SEGGER_RTT + CONFIG_LOG_BACKEND_RTT). See README."
+            ),
+        )
+        parser.add_argument(
             "--storage-addr",
             type=lambda s: int(s, 0),
             default=None,
@@ -152,6 +161,7 @@ class ZMKRenodeTest(WestCommand):
                 elf=elf,
                 renode_path=renode_path,
                 min_virtual=args.min_virtual,
+                rtt=args.rtt,
                 **kwargs,
             )
         except AssertionError as err:

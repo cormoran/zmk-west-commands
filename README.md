@@ -155,7 +155,7 @@ $ west zmk-renode-test --elf build/renode/zephyr/zmk.elf --no-rpc
 ```
 usage: west zmk-renode-test [-h] --elf ELF [--renode-version RENODE_VERSION]
                             [--boot-timeout BOOT_TIMEOUT] [--skip-smoke] [--no-rpc]
-                            [--real-binary] [--min-virtual MIN_VIRTUAL]
+                            [--real-binary] [--min-virtual MIN_VIRTUAL] [--rtt]
                             [--storage-addr ADDR] [--storage-size SIZE]
                             [tests_dir]
 ```
@@ -214,8 +214,8 @@ BLE all enabled), with **zero firmware-side deviation**:
 $ west zmk-renode-test --real-binary --elf build/zephyr/zmk.elf
 ```
 
-Renode's nRF52840 has no USBD/QSPI/FICR models, so a real image would hang or
-oops on stock Renode. The `xiao_nrf52840_real.repl` platform adds four things
+Renode's nRF52840 has no USBD/QSPI/FICR/NVMC models, so a real image would hang
+or oops on stock Renode. The `xiao_nrf52840_real.repl` platform adds five things
 (see that file and `scripts/lib/renode/platforms/models/`):
 
 1. **QSPI stub** (`0x40029000`) — completes the `nrfx_qspi` busy-wait on
@@ -229,7 +229,13 @@ oops on stock Renode. The `xiao_nrf52840_real.repl` platform adds four things
    `settings_nvs` sizes its partition instead of failing `-EDOM`) and a BLE
    identity address. Without it, settings never load, BT host init stalls, and
    the HCI Read-BD_ADDR times out into a `BT_ASSERT` oops around 10 s.
-4. **NVS preload** — Renode zero-fills flash, but NVS needs erased sectors to
+4. **NVMC model** (`0x4001E000`) — the flash controller. With no model the
+   region reads 0, so a BLE-enabled image can spin-poll `NVMC.READY` forever the
+   first time it touches flash (an observed *silent* hang in two-machine runs).
+   The model serves `READY`/`READYNEXT`=1 and implements real page erase
+   (`ERASEPAGE`/`ERASEPCR0` fill the 4 KiB page with `0xFF`), so NVS garbage
+   collection works once a settings sector fills.
+5. **NVS preload** — Renode zero-fills flash, but NVS needs erased sectors to
    read `0xFF`, so the storage partition is preloaded with `0xFF` (else
    `nvs_mount` fails `-EDEADLK`). Defaults to the **xiao_ble** `storage_partition`
    (`0xec000`, size `0x8000`); override with `--storage-addr`/`--storage-size`
@@ -248,11 +254,45 @@ with `ZMK_RENODE_ELF` set plus `ZMK_RENODE_REAL=1` and
 `ZMK_RENODE_STORAGE_ADDR`/`ZMK_RENODE_STORAGE_SIZE`, so a test can build its own
 real machine via `renode_harness.boot_single_real(...)`.
 
+##### Observing a real image over SEGGER RTT (`--rtt`)
+
+PC-symbol sampling proves the image is *alive*, but a silent real image gives no
+log output. The **recommended observation path** is to build with Zephyr's
+SEGGER RTT log backend and pass `--rtt`:
+
+```bash
+$ west zmk-renode-test --real-binary --rtt --elf build/zephyr/zmk.elf
+```
+
+An RTT-logging build is still **real-hardware-flashable** — it is Kconfig-only,
+no firmware source changes:
+
+```
+CONFIG_LOG=y
+CONFIG_USE_SEGGER_RTT=y
+CONFIG_LOG_BACKEND_RTT=y
+```
+
+`--rtt` hooks `SEGGER_RTT_WriteSkipNoLock` (the function Zephyr's `log_backend_rtt`
+actually calls — Renode's stock `segger-rtt.py` hooks `SEGGER_RTT_WriteNoLock`,
+which Zephyr never calls, so it captures nothing; see
+`scripts/lib/renode/segger_rtt_writeskip.py`). The captured log is printed and
+also scanned for the same `FATAL ERROR` / `Halting system` markers, so a real
+image's boot banner (`Welcome to ZMK!`) and BT identity line become visible. On
+a non-RTT build the hook install is a graceful no-op (the capture is just empty).
+
+##### Per-machine BLE identity (multi-machine)
+
+The FICR model's `DEVICEADDR` is parameterized so two machines in one emulation
+can advertise **distinct** BLE addresses (sharing one breaks BLE tests).
+`boot_single_real(..., device_addr=<48-bit int>)` injects a per-machine copy of
+the FICR model; `renode_harness.device_addr_for_machine(n)` returns a
+deterministic static-random address per machine (machine 0 =
+`C0:E7:E7:E7:E7:E7`, machine 1 = `…:E8`, …), ready for a future two-machine BLE
+harness to call per machine.
+
 Limitations (real-binary mode today):
 
-- **No NVMC erase model.** Preloaded `0xFF` gets a clean NVS mount, but there is
-  no flash-erase peripheral, so a long session with many settings writes will
-  eventually fail NVS garbage collection.
 - **Studio RPC is not reachable.** The USB/BLE transports are stubbed to idle,
   not driven — there is no Studio round trip in real mode yet (BLE-encryption /
   CCM work to reach it is a separate, parallel effort).
