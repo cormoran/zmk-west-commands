@@ -1,18 +1,22 @@
 # Renode internals: booting a real ZMK image under emulation
 
 This page explains **how a real, flashable ZMK hardware image boots under
-Renode at all** — the platform stubs, the NVS preload, the fake CCM, and the
-two on-air constraints that make `--mode ble` work. You do not need any of this
+Renode at all** — the platform stubs, the NVS preload, the fake CCM, the
+two on-air constraints that make `--mode ble` work, and the USB model fork +
+host bridge behind `--mode usb`. You do not need any of this
 to *use* `west zmk-renode-test`; it is here for the curious and for anyone
 extending the harness. For usage, flags, and troubleshooting see
-[renode-testing.md](renode-testing.md); for the two-mode overview see the
+[renode-testing.md](renode-testing.md); for the mode overview see the
 repo [README](../README.md).
 
 The default **ble mode** boots the *exact* `studio-rpc-usb-uart` hardware
 artifact (USB CDC + QSPI NOR + BLE all enabled), with **zero firmware-side
 deviation** — that is its whole appeal (no extra module build config), and it
 means the emulator has to stand in for the peripherals that image expects (this
-page). The alternative **uart mode** sidesteps all of this: it boots an ELF
+page). **usb mode** boots that same artifact but swaps the USBD stub for a real
+USB device model so Studio RPC runs over the image's USB CDC (see the
+[usb-mode section](#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)
+below). The alternative **uart mode** sidesteps all of this: it boots an ELF
 built with the `renode-studio-uart` snippet, which re-binds Studio RPC + the
 console to real UART peripherals Renode drives directly.
 
@@ -29,7 +33,9 @@ platform adds five things (see that file and
    settings backend, so this is harmless.
 2. **USBD stub** (`0x40027000`) — returns `EVENTCAUSE.READY` so
    `nrf_usbd_common` enable completes, then reads 0 (no VBUS) so the driver
-   idles like an unplugged cable.
+   idles like an unplugged cable. (usb mode replaces this stub with the
+   `NRF_USBD_Full` C# model — see the
+   [usb-mode section](#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge).)
 3. **FICR model** (`0x10000000`) — serves real `CODEPAGESIZE`/`CODESIZE` (so
    `settings_nvs` sizes its partition instead of failing `-EDOM`) and a BLE
    identity address. Without it, settings never load, BT host init stalls, and
@@ -112,6 +118,83 @@ a real failure mode):
   In **ble-split** the same 10 µs quantum is load-bearing through **both**
   pairings (`three_machine_ble.resc`), and with three CPUs re-syncing it is the
   heaviest run here (~0.1× realtime; both pairings settle by ~18 s virtual).
+
+## usb mode: the NRF_USBD_Full fork + the DualCdcAcmBridge
+
+`--mode usb` boots the same real image on `xiao_nrf52840_usb.repl`, which
+differs from the real platform in exactly one entry: the python `usbd` stub is
+replaced by **`NRF_USBD_Full`**
+([`platforms/models/NRF_USBD_Full.cs`](../scripts/lib/renode/platforms/models/NRF_USBD_Full.cs)),
+a fork of Renode 1.16.1's stock `USB.NRF_USBD` model, compiled **at load time**
+via `preinit: include` (the ad-hoc C# compiler — no Renode rebuild, exactly
+like the python stubs). The full design study + phase log lives in
+[renode-usb-design.md](renode-usb-design.md); the short version:
+
+**Why fork.** The stock model cannot get a guest to `USB_DC_CONFIGURED`: it
+answers SET_ADDRESS/SET_CONFIGURATION *in-model* (an explicit "simplification")
+so the guest never sees enumeration, it has **no host→device data path at all**,
+and every member is private/non-virtual, so it must be forked rather than
+subclassed. The fork is pinned to the exact upstream commit of the 1.16.1 tag
+(re-diff on a Renode version bump; upstream NRF_USBD is near-dormant).
+
+**What the fork fixes** (each was a real blocker, verified against
+`nrf_usbd_common`'s register usage):
+
+- **EP0 forwarding** — SETUP packets (including SET_CONFIGURATION and class
+  requests, with their host→device data payloads) are latched and surfaced to
+  the guest via `EVENTS_EP0SETUP`; SET_ADDRESS alone stays self-acked *and now
+  latches `USBADDR`* (real hardware handles it autonomously and the Zephyr
+  driver asserts `addr == USBD->USBADDR`).
+- **Status stage** — `TASKS_EP0STATUS` (a no-op upstream) invokes the pending
+  host completion callback; without it a forwarded SET_CONFIGURATION hangs the
+  host's enumeration forever.
+- **EP0 OUT data stage** — `TASKS_EP0RCVOUT` / `SIZE.EPOUT[0]` /
+  `TASKS_STARTEPOUT[0]` DMA the latched payload to the guest.
+- **Register fidelity** — `BMREQUESTTYPE.TYPE`/`RECIPIENT` read from the real
+  packet (class requests read as *Standard* upstream!), `WINDEXH`/`WLENGTHH`
+  defined, `EVENTCAUSE.READY` with real W1C semantics, `INTENSET`/`INTENCLR`
+  implemented.
+- **Bulk OUT (host→guest)** — the previously-discarded HostToDevice endpoints
+  are kept and their `DataWritten` subscribed; per-endpoint byte queues,
+  `EPDATASTATUS` OUT bits as real W1C flags (the IN-bit W1C write-back bug is
+  fixed too), `SIZE.EPOUT[n]` / `EPOUT[n].PTR/MAXCNT/AMOUNT` /
+  `TASKS_STARTEPOUT[n]` → `EVENTS_ENDEPOUT[n]`.
+- **Per-endpoint IN routing** — upstream funnels all non-EP0 IN data to one
+  hardcoded framework endpoint (id 2); the fork registers framework endpoints
+  whose ids match the nRF endpoint numbers and routes accordingly.
+
+**The DualCdcAcmBridge**
+([`platforms/models/DualCdcAcmBridge.cs`](../scripts/lib/renode/platforms/models/DualCdcAcmBridge.cs))
+is the USB *host*: a `USBHost` external that enumerates the device once and
+exposes up to **two IUART channels** — one per CDC-ACM function of the
+composite, in configuration-descriptor interface order. It discovers the CDC
+data endpoints by forwarding a real `GET_DESCRIPTOR(Configuration)` to the
+guest and parsing the answer (no hardcoded endpoint numbers; HID interfaces are
+skipped), then asserts DTR per control interface for host fidelity. The
+channels are **machine-registered peripherals** (`sysbus.bridge_cdc0/1`,
+`NullRegistrationPoint` — the VirtualConsole pattern), *not* externals, because
+`connector Connect <uart> <terminal>` needs a machine to resolve. Setup is
+**two-step** (`CreateDualCdcAcmBridge` → wire + connect both socket terminals →
+`AttachDualCdcAcmBridge`, all while paused; see
+`renode_harness.attach_dual_cdc_bridge`) so the first post-enumeration device
+output — e.g. a console CDC's boot banner, buffered since boot — cannot race
+the terminal hookup.
+
+**CDC interface order** (empirical, from the real descriptors): a standard
+`studio-rpc-usb-uart` image is 1×CDC (Studio) + HID; with
+`CONFIG_ZMK_USB_LOGGING` the board console CDC becomes the composite's FIRST
+CDC function and the Studio snippet CDC the SECOND. The smoke auto-detects via
+the channels' `IsWired` properties.
+
+> **The ble-mode landmine: never enumerate USB in ble mode.** ZMK's endpoint
+> selection prefers USB whenever `zmk_usb_is_hid_ready()` — if a USB host
+> enumerated the DUT in ble mode, the firmware would switch its Studio
+> transport to USB and the BLE smoke would break. So ble mode keeps USB idle:
+> its platform carries the python usbd stub (unplugged-cable behavior), and
+> the `NRF_USBD_Full` platform with **no host attached** behaves identically
+> (enable + pullup, then silence — the Phase-0/2 boot-parity gate). Keeping
+> the python stub in ble mode is deliberate; consolidating ble mode onto the
+> C# model is a possible future cleanup, noted in the design doc.
 
 ## Wired split: the UART hub (no platform stubs needed)
 

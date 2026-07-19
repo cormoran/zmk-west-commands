@@ -1,11 +1,22 @@
 # Design: Studio-over-USB on the unchanged firmware image (Renode "usb mode")
 
-Status: design study, 2026-07-19. Phases 0-2 implemented (gaps (a)-(d)
-closed); Phase 2 gate green 2026-07-19 -- a real `studio-rpc-usb-uart`
+Status: **implemented through Phase 3**, 2026-07-19. Phases 0-2 closed gaps
+(a)-(d); Phase 2 gate green 2026-07-19 -- a real `studio-rpc-usb-uart`
 flashable image answers a Studio RPC `GetDeviceInfo` round trip over the
 emulated USB CDC via `DualCdcAcmBridge` + two TCP socket terminals
-(`renode_harness.attach_dual_cdc_bridge`). Phase-2 findings that amend the
-text below:
+(`renode_harness.attach_dual_cdc_bridge`). Phase 3 (same day) productized it:
+`west zmk-renode-test --mode usb` dispatches to `renode_smoke.run_usb_smoke`
+(RPC assert always; console-banner assert auto-detected when a second CDC is
+wired; bounded one-retry, the ble-split pattern), the `ZMK_RENODE_MODE=usb`
+module-test env contract, the `mode: usb` action input, a CI smoke step
+reusing the ble job's real-image artifact, and user/internals docs
+(README, renode-testing.md, renode-internals.md). Not done (future
+consolidation): ble mode intentionally keeps the python `usbd_stub` -- the
+no-host C# fork boots identically (parity-checked), but switching ble mode
+onto it buys nothing today and would couple the modes; revisit when the fork
+next changes. Phase 4 (wired-split central Studio-over-USB, HID report
+capture, upstreaming the NRF_USBD fixes) remains open. Phase-2 findings that
+amend the text below:
 
 - **Bridge channels are machine peripherals, not externals.** `connector
   Connect <uart> <terminal>` runs `BackendTerminal.AttachTo`, which resolves

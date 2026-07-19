@@ -7,7 +7,7 @@ and limitations. For how a real hardware image boots under emulation at all
 (platform stubs, fake CCM, on-air constraints) see
 [renode-internals.md](renode-internals.md).
 
-`west zmk-renode-test` has **four modes** (`--mode`, default `ble` — it boots
+`west zmk-renode-test` has **five modes** (`--mode`, default `ble` — it boots
 the exact hardware-flashable image with no extra module config); `--elf` is the
 DUT (the central half in `split` / `ble-split`). The generic smoke (boot + Studio) is what
 `.github/actions/zmk-renode-test/action.yml` always runs before any
@@ -17,7 +17,7 @@ module-specific test. A module's own `tests/renode/*_test.py` run afterwards and
 ## Command reference
 
 ```
-usage: west zmk-renode-test [-h] --elf ELF [--mode {uart,ble,split,ble-split}]
+usage: west zmk-renode-test [-h] --elf ELF [--mode {uart,usb,ble,split,ble-split}]
                             [--peripheral-elf PERIPHERAL_ELF] [--host-elf HOST_ELF]
                             [--no-rpc] [--boot-timeout BOOT_TIMEOUT] [--skip-smoke]
                             [--rtt] [--min-virtual MIN_VIRTUAL]
@@ -32,11 +32,11 @@ Common:
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--elf` (required) | all | the DUT firmware ELF (built by the caller); the split **central** half in `split` / `ble-split`. |
-| `--mode {uart,ble,split,ble-split}` | — | `ble` (default), `uart`, `split` (wired split), or `ble-split` (wireless split). |
+| `--mode {uart,usb,ble,split,ble-split}` | — | `ble` (default), `usb` (real image, Studio over the emulated USB CDC), `uart`, `split` (wired split), or `ble-split` (wireless split). |
 | `--peripheral-elf` | split, ble-split | the split **peripheral** half's firmware ELF (`--elf` is the central). Required for `--mode split` / `ble-split`. |
 | `--host-elf` | ble, ble-split | the `renode-ble-host` app ELF. ble: given → full S4/S5 smoke, omitted → boot-liveness. **Required** for `ble-split`. |
-| `--no-rpc` | uart | check only the boot banner (modules without Studio RPC). |
-| `--boot-timeout` | uart, split | seconds to wait for the ZMK boot banner (default 20). |
+| `--no-rpc` | uart | check only the boot banner (modules without Studio RPC; usb mode always asserts the RPC). |
+| `--boot-timeout` | uart, split, usb | seconds to wait for the boot banner (default 20). |
 | `--skip-smoke` | all | skip the smoke test; run only `tests_dir`. |
 
 Advanced (rarely needed):
@@ -47,7 +47,7 @@ Advanced (rarely needed):
 | `--min-virtual` | ble (liveness) | virtual seconds to run before PC sampling (default 20). |
 | `--virtual-budget` | ble / ble-split (with host) | virtual seconds to reach the encrypted read before failing (ble default 20, ~3.3 s typical; ble-split floors this to ≥120 s **per attempt**, ~18 s typical, and retries the whole emulation once). |
 | `--steady-quantum` | ble (with host) | after S4, raise the global time-sync quantum (e.g. `0.001`) for the steady-state phase. See [ble-mode performance](#ble-mode-performance). |
-| `--storage-addr` / `--storage-size` | ble | NVS `storage_partition` address/size preloaded as erased `0xFF` (default `0xec000`/`0x8000`, xiao_ble). |
+| `--storage-addr` / `--storage-size` | ble, usb | NVS `storage_partition` address/size preloaded as erased `0xFF` (default `0xec000`/`0x8000`, xiao_ble). |
 | `--renode-version` | both | Renode portable release to install/use (default `1.16.1`; must match the checked-in `.repl`). |
 
 ## uart mode: building a Renode-testable ELF
@@ -93,6 +93,46 @@ fatal frame (`arch_system_halt` / `z_fatal_error` / `k_sys_fatal_error_handler`
 otherwise; if the image happens to have a console (observation builds), its
 output is captured and also checked for `FATAL ERROR` / `Halting system`, but
 console output is not required.
+
+## usb mode: what it proves (and when to pick it)
+
+usb mode boots the **same real flashable image ble mode runs** — no extra build
+— on the `xiao_nrf52840_usb.repl` platform, where the python USBD stub is
+replaced by the forked `NRF_USBD_Full` C# model. The `DualCdcAcmBridge` USB
+host external then performs **real register-level enumeration** of the image's
+USB composite (SETUP/EP0, SET_CONFIGURATION, descriptor parsing, DTR) and
+exposes its CDC-ACM function(s) as TCP sockets, over which the smoke asserts a
+core Studio `GetDeviceInfo` round trip — the image's **real USB Studio
+transport**, bidirectionally. See
+[renode-internals.md](renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)
+for the model internals.
+
+The smoke adapts to the composite it finds (auto-detected from the real
+descriptors via the bridge — no flag):
+
+- a standard `studio-rpc-usb-uart` image = **one** CDC (Studio) + HID → Studio
+  RPC asserted on it;
+- an image that also enables `CONFIG_ZMK_USB_LOGGING` = **two** CDCs, board
+  console first, Studio second → the Zephyr boot banner (`*** Booting Zephyr
+  …`) is *also* asserted on the console CDC. (The `Welcome to ZMK` line is a
+  *log* message that may be routed to another backend, so it is not asserted.)
+
+As a safety net the smoke retries the **whole emulation once** (the ble-split
+pattern): a usb run is fast and deterministic on an idle host, but the
+wall-clock-paced attach can lose races when another heavyweight emulation is
+sharing the machine.
+
+**Choosing between usb / ble / uart** for a module's Studio-RPC test:
+
+| Pick | When | Why |
+|---|---|---|
+| **usb** | module RPC tests against the real artifact (the common case) | real flashable image **and** a fast bidirectional Studio round trip — single machine, no BLE pairing or 10 µs quantum cost (~45 s vs ble's ~35–90 s, with far more of it doing useful RPC work) |
+| **ble** | you specifically need the BLE transport path (pairing, encrypted GATT read) | it is the only mode exercising the BLE Studio transport |
+| **uart** | legacy setups that already carry the `renode-studio-uart` snippet artifact | predates usb mode; needs the snippet build. **Candidate for deprecation** once usb mode is proven across consumer repos — prefer usb for new work. |
+
+```bash
+$ west zmk-renode-test tests/renode --mode usb --elf build/<artifact>/zephyr/zmk.elf
+```
 
 ## split mode: what it proves
 
@@ -200,16 +240,29 @@ After the smoke test, every `*_test.py` directly under `tests_dir` runs as
 
 | Variable | When | Meaning |
 |---|---|---|
-| `ZMK_RENODE_MODE` | always | `uart`, `ble`, `split`, or `ble-split` — which harness the test should build. |
+| `ZMK_RENODE_MODE` | always | `uart`, `usb`, `ble`, `split`, or `ble-split` — which harness the test should build. |
 | `ZMK_RENODE_ELF` | always | absolute path to the DUT ELF (the split **central** half in `split` / `ble-split`). |
 | `ZMK_RENODE_PERIPHERAL_ELF` | split, ble-split | absolute path to the split **peripheral** half's ELF, for `boot_split_wired` / `boot_ble_split`. |
-| `ZMK_RENODE_STORAGE_ADDR` / `ZMK_RENODE_STORAGE_SIZE` | ble, ble-split | NVS `storage_partition` overrides (hex), for `boot_single_real` / `boot_ble_pair` / `boot_ble_split`. |
+| `ZMK_RENODE_STORAGE_ADDR` / `ZMK_RENODE_STORAGE_SIZE` | ble, ble-split, usb | NVS `storage_partition` overrides (hex), for `boot_single_real` / `boot_ble_pair` / `boot_ble_split`. |
 | `ZMK_RENODE_HOST_ELF` | ble (with `--host-elf`), ble-split | absolute path to the `renode-ble-host` app ELF, for `boot_ble_pair` / `boot_ble_split`. |
 
 A `uart`-mode test builds a single UART-RPC machine via
 `renode_harness.boot_single(...)`. A `ble`-mode test builds a real machine via
 `renode_harness.boot_single_real(...)` (liveness) or a two-machine pair via
-`renode_harness.boot_ble_pair(dut_elf, host_elf)`. A `split`-mode test builds a
+`renode_harness.boot_ble_pair(dut_elf, host_elf)`. A `usb`-mode test builds the
+real machine on the usb platform and attaches the USB host bridge:
+
+```python
+session, console, _ = renode_harness.boot_single_real(
+    renode_path, elf, repl_template="xiao_nrf52840_usb.repl", port_base=pb
+)
+time.sleep(8)  # let the guest's USB init settle (enable + pullup)
+cdc0, cdc1 = renode_harness.attach_dual_cdc_bridge(session, pb + 4, pb + 5)
+# cdc0/cdc1 in descriptor interface order; poll `sysbus.bridge_cdcN IsWired`
+# over session.mon to see which channels the composite actually wired.
+```
+
+A `split`-mode test builds a
 wired pair via `renode_harness.boot_split_wired(central_elf, peripheral_elf)`. A
 `ble-split`-mode test builds the three-machine split via
 `renode_harness.boot_ble_split(central_elf, peripheral_elf, host_elf)`.
@@ -300,6 +353,8 @@ the encrypted-link Studio read reaches the DUT. They are complementary.
 |---|---|
 | uart: `never saw ZMK boot banner on console UART` | ELF not built with the `renode-studio-uart` snippet, wrong board (needs an nRF52840 with the checked-in `.repl`), or the `CONFIG_ZMK_STUDIO` physical-layout build-assert changed the image. |
 | uart: `no Studio RPC response frame received (timeout)` | module doesn't enable `CONFIG_ZMK_STUDIO` — pass `--no-rpc` — or the protos/`protoc` aren't installed (see the README Requirements). |
+| usb: `USB enumeration never wired the first CDC channel` | the ELF is not a USB-CDC (`studio-rpc-usb-uart`) image, or the guest's USB init lost the race on a heavily-loaded host (the smoke already retried a whole fresh emulation once — re-run when the host is quieter). |
+| usb: `no Studio RPC response frame received` | the composite's CDC mapping surprised the auto-detect (check the smoke's `N CDC functions found` line: with two CDCs the console is FIRST, Studio SECOND) or the image doesn't enable `CONFIG_ZMK_STUDIO`. |
 | ble liveness: `CPU parked in a fatal frame -- image faulted` | Zephyr fatal (often FICR/NVS). For a non-xiao_ble board, set `--storage-addr`/`--storage-size` to that board's `storage_partition`. Use `--rtt` to see the real fatal reason. |
 | ble liveness: `only reached Ns virtual ... emulation stalled?` | image spin-hung (e.g. NVMC poll) or the host is very slow — raise the implicit wall budget by lowering `--min-virtual`, or investigate with `--rtt`. |
 | ble host: `virtual-time budget exhausted ... before the encrypted read` | pairing never completed — check the printed DUT/host console tails; usually a DLE / quantum regression (see [renode-internals.md](renode-internals.md#the-two-on-air-constraints-both-load-bearing)). |
@@ -310,11 +365,18 @@ the encrypted-link Studio read reaches the DUT. They are complementary.
 
 - **uart mode** cannot exercise USB-CDC or BLE transports — Studio RPC is
   re-bound to a UART, so it is a functional check of the RPC subsystem and boot,
-  not of the real hardware transport.
+  not of the real hardware transport (usb mode now covers the real USB
+  transport; uart mode is a deprecation candidate once usb proves out in
+  consumer repos).
 - **ble mode is functional, not cryptographic** — the shared fake CCM is an
   identity transform (see [renode-internals.md](renode-internals.md)).
-- **Studio-over-USB is not reachable** — the USB transport is stubbed to idle
-  (unplugged cable), so there is no USB Studio round trip in ble mode.
+- **In ble mode, USB stays intentionally idle** (unplugged cable) — never
+  enumerate USB there, or ZMK switches its preferred transport to USB and the
+  BLE Studio smoke breaks (see
+  [renode-internals.md](renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)).
+  Use usb mode for the USB Studio round trip.
+- **usb mode does not (yet) assert HID keystrokes** — the bridge only exposes
+  the CDC functions; HID IN report capture is a possible follow-up.
 - **Only LE SC Just Works** is exercised; identity addresses come from the FICR
   model (static-random, `device_addr_for_machine(n)`); the radio's 31-byte
   payload cap forces the host-side DLE cap. Steady-state test-time is addressed

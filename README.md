@@ -141,19 +141,23 @@ emulator, run a boot + Studio smoke test, then (optionally) the module's own
 `tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
 This command never builds firmware; the caller builds the ELF.
 
-There are **four modes** (`--mode`, default `ble`). `--elf` is the DUT (the
+There are **five modes** (`--mode`, default `ble`). `--elf` is the DUT (the
 central half in `split` / `ble-split`):
 
 | Mode | DUT you build | What the smoke proves | Runtime |
 |---|---|---|---|
 | **`ble`** (default) | the exact `studio-rpc-usb-uart` **hardware** image you would flash — **no extra config** | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
+| **`usb`** | the **same** real hardware image as ble mode (one build serves both) | The image enumerates over emulated USB and answers a core Studio `GetDeviceInfo` over its **real USB CDC** transport (+ boot banner when the image also has a console CDC) | ~45 s |
 | **`ble-split`** | both halves of a wireless split: `--elf` = split CENTRAL (Studio), `--peripheral-elf` = split PERIPHERAL, `--host-elf` = host | The encrypted split link comes up (peripheral↔central L2) **then** the host does an encrypted Studio read **through** the central (peripheral → central → host) | ~3–6 min |
 | **`uart`** | ELF built with this repo's `renode-studio-uart` snippet | Boots (ZMK banner) and answers a core Studio `GetDeviceInfo` over an emulated UART | ~15 s |
 | **`split`** | a **wired-split** pair: `--elf` central + `--peripheral-elf` peripheral (this repo's `renode_wired_split` shield) | BOTH halves boot (ZMK banner) **and** a keypress injected on the peripheral is relayed over the wired split UART and processed by the central | ~20 s |
 
 ble is the default because it boots the **exact image you flash** — a module
-needs no Renode-specific build artifact. uart mode is faster and does a direct
-UART Studio round trip, but requires you to add a `renode-studio-uart` snippet
+needs no Renode-specific build artifact. usb mode runs that **same** image but
+drives Studio RPC bidirectionally over the emulated USB CDC — real image *and*
+a fast direct RPC round trip (no BLE pairing / time-sync-quantum cost), making
+it the natural choice for module RPC tests against the real artifact. uart mode
+is the legacy direct-UART path; it needs an extra `renode-studio-uart` snippet
 build (see below).
 
 Renode is downloaded automatically on first use (a portable tarball, cached
@@ -195,6 +199,30 @@ $ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
 > identity-transform CCM. Do not use it to validate crypto. Details, and how a
 > real image boots at all under Renode, are in
 > [docs/renode-internals.md](docs/renode-internals.md).
+
+#### usb mode
+
+The DUT is the **same real flashable image** as ble mode — nothing extra to
+build — but the smoke drives Studio RPC over the image's **real USB transport**:
+a forked `NRF_USBD_Full` C# model performs real register-level USB enumeration
+and a `DualCdcAcmBridge` USB-host external exposes the composite's CDC-ACM
+function(s) as TCP sockets (see
+[docs/renode-internals.md](docs/renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)):
+
+```bash
+# the exact hardware image you already built for ble mode:
+$ west zmk-renode-test --mode usb --elf build/<artifact>/zephyr/zmk.elf
+# smoke + the module's own tests:
+$ west zmk-renode-test tests/renode --mode usb --elf build/<artifact>/zephyr/zmk.elf
+```
+
+The smoke always asserts a core Studio `GetDeviceInfo` round trip over the
+Studio CDC. A standard `studio-rpc-usb-uart` image has one CDC function
+(Studio) + HID; if the image *also* enables `CONFIG_ZMK_USB_LOGGING`, the board
+console CDC enumerates first and the smoke additionally asserts the Zephyr boot
+banner on it (auto-detected from the image's real USB descriptors — no flag
+needed). Single machine, no BLE time-sync quantum: real-image coverage at
+near-uart-mode speed.
 
 #### ble-split mode
 
@@ -238,11 +266,12 @@ for a worked example (central = `renode_split_left`, peripheral =
 #### uart mode
 
 The DUT is built with the `renode-studio-uart` snippet this repo ships as a
-Zephyr module: real hardware carries Studio RPC over USB-CDC, which Renode's
-nRF52840 USBD model cannot present, so the snippet re-binds Studio RPC + the
-console to real UART peripherals Renode can drive. This is extra build config
-(vs. ble mode's flashable image), but gives a fast direct UART Studio round
-trip. Add a `build.yaml` artifact:
+Zephyr module: the snippet re-binds Studio RPC + the console to real UART
+peripherals Renode can drive directly, dodging USB entirely. This predates usb
+mode (which now drives Studio over the emulated USB CDC of the unmodified
+image); it remains the zero-USB fallback, and a **candidate for deprecation**
+once usb mode has proven out across consumer repos. Add a `build.yaml`
+artifact:
 
 ```yaml
 include:
@@ -305,11 +334,12 @@ $ west zmk-renode-test --mode split \
 
 #### Requirements
 
-uart mode's Studio RPC check compiles the workspace's `zmk-studio-messages`
-protos, so it needs the python `protobuf` runtime and the `protoc` compiler:
-`pip install -r requirements-test.txt` (`protoc` is a system package, e.g.
-`apt-get install protobuf-compiler`). Pass `--no-rpc` to check only the boot
-banner.
+The uart / usb mode Studio RPC check compiles the workspace's
+`zmk-studio-messages` protos, so it needs the python `protobuf` runtime and the
+`protoc` compiler: `pip install -r requirements-test.txt` (`protoc` is a system
+package, e.g. `apt-get install protobuf-compiler`). In uart mode, pass
+`--no-rpc` to check only the boot banner (usb mode always asserts the RPC —
+that is its point).
 
 #### GitHub Action
 
@@ -324,6 +354,7 @@ manifest:
     # default mode is `ble`: elf-path is the real studio-rpc-usb-uart image.
     elf-path: build/ble/zephyr/zmk.elf
     host-elf: build/zephyr/zephyr.elf   # optional; ble full S4/S5 (else liveness)
+    # mode: usb                          # same elf-path image, Studio over USB CDC
     # mode: uart                         # opt in to the snippet-built UART DUT
     tests: tests/renode                  # optional
 ```
@@ -340,7 +371,8 @@ See `.github/actions/zmk-renode-test/README.md` for the full contract.
 - **[docs/renode-internals.md](docs/renode-internals.md)** — how a real
   hardware image boots under Renode at all: the QSPI/USBD/FICR/NVMC stubs, the
   NVS preload, the fake-CCM identity transform (with the two load-bearing
-  gotchas and the crypto disclaimer), and the DLE-27 / 10 µs quantum constraints.
+  gotchas and the crypto disclaimer), the DLE-27 / 10 µs quantum constraints,
+  and usb mode's `NRF_USBD_Full` fork + `DualCdcAcmBridge` USB host.
 
 ### west zmk-ble-test
 
