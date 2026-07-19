@@ -7,8 +7,9 @@ and limitations. For how a real hardware image boots under emulation at all
 (platform stubs, fake CCM, on-air constraints) see
 [renode-internals.md](renode-internals.md).
 
-`west zmk-renode-test` has **two modes** (`--mode`, default `uart`); `--elf` is
-the DUT in both. The generic smoke (boot + Studio) is what
+`west zmk-renode-test` has **two modes** (`--mode`, default `ble` — it boots the
+exact hardware-flashable image with no extra module config); `--elf` is the DUT
+in both. The generic smoke (boot + Studio) is what
 `.github/actions/zmk-renode-test/action.yml` always runs before any
 module-specific test. A module's own `tests/renode/*_test.py` run afterwards and
 `import renode_harness` directly for anything more specific.
@@ -30,7 +31,7 @@ Common:
 | Flag | Applies to | Meaning |
 |---|---|---|
 | `--elf` (required) | both | the DUT firmware ELF (built by the caller). |
-| `--mode {uart,ble}` | — | `uart` (default) or `ble`. |
+| `--mode {uart,ble}` | — | `ble` (default) or `uart`. |
 | `--host-elf` | ble | the `renode-ble-host` app ELF. Given → full S4/S5 smoke; omitted → boot-liveness only. |
 | `--no-rpc` | uart | check only the boot banner (modules without Studio RPC). |
 | `--boot-timeout` | uart | seconds to wait for the ZMK boot banner (default 20). |
@@ -52,7 +53,7 @@ Advanced (rarely needed):
 uart mode boots an ELF built with this repo's `renode-studio-uart` snippet (this
 repo is also a Zephyr module — the snippet and a Renode-only Studio RPC UART
 transport are both inert unless the snippet is used; see
-`renode-test-module/Kconfig`). See the [README](../README.md#uart-mode-default)
+`renode-test-module/Kconfig`). See the [README](../README.md#uart-mode)
 for the `build.yaml` artifact and the `CONFIG_ZMK_STUDIO` physical-layout
 requirement.
 

@@ -8,12 +8,13 @@ extending the harness. For usage, flags, and troubleshooting see
 [renode-testing.md](renode-testing.md); for the two-mode overview see the
 repo [README](../README.md).
 
-The default **uart mode** sidesteps all of this: it boots an ELF built with the
-`renode-studio-uart` snippet, which re-binds Studio RPC + the console to real
-UART peripherals Renode drives directly. **ble mode** instead boots the *exact*
-`studio-rpc-usb-uart` hardware artifact (USB CDC + QSPI NOR + BLE all enabled),
-with **zero firmware-side deviation** — so the emulator has to stand in for the
-peripherals that image expects.
+The default **ble mode** boots the *exact* `studio-rpc-usb-uart` hardware
+artifact (USB CDC + QSPI NOR + BLE all enabled), with **zero firmware-side
+deviation** — that is its whole appeal (no extra module build config), and it
+means the emulator has to stand in for the peripherals that image expects (this
+page). The alternative **uart mode** sidesteps all of this: it boots an ELF
+built with the `renode-studio-uart` snippet, which re-binds Studio RPC + the
+console to real UART peripherals Renode drives directly.
 
 ## Why a real image needs platform help
 

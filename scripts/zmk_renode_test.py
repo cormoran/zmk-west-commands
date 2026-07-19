@@ -1,15 +1,16 @@
 """`west zmk-renode-test` -- boot a built ZMK ELF in the Renode emulator, run a
 boot + Studio smoke test, then a module's own `tests/renode/*_test.py` files.
 
-Two modes (`--mode`, default `uart`):
+Two modes (`--mode`, default `ble`):
 
+  * **ble** (default) -- the DUT is the exact `studio-rpc-usb-uart` *hardware*
+    image, with no extra module config; platform stubs make it boot. With
+    `--host-elf`, the `renode-ble-host` app pairs over an emulated BLE medium and
+    does an encrypted Studio GATT read (S4/S5). Without `--host-elf`, it degrades
+    to a boot-liveness check.
   * **uart** -- the DUT is built with this repo's `renode-studio-uart` snippet;
     console + Studio RPC ride emulated UARTs. Smoke = boot banner + a core
     Studio GetDeviceInfo round trip.
-  * **ble** -- the DUT is the exact `studio-rpc-usb-uart` *hardware* image;
-    platform stubs make it boot. With `--host-elf`, the `renode-ble-host` app
-    pairs over an emulated BLE medium and does an encrypted Studio GATT read
-    (S4/S5). Without `--host-elf`, it degrades to a boot-liveness check.
 
 This never builds firmware: the ELF is always built by the caller. See
 README.md, docs/renode-testing.md, and the harness under `scripts/lib/renode/`
@@ -42,9 +43,9 @@ class ZMKRenodeTest(WestCommand):
             description=(
                 "Boot a caller-built ZMK firmware ELF in the Renode emulator, run a "
                 "boot + Studio smoke test, then the module's own tests/renode/*_test.py "
-                "files. Two modes: --mode uart (default, snippet-built DUT over emulated "
-                "UARTs) and --mode ble (real hardware image, Studio over emulated BLE). "
-                "Does not build firmware."
+                "files. Two modes: --mode ble (default, the real hardware image with no "
+                "extra config, Studio over emulated BLE) and --mode uart (snippet-built "
+                "DUT over emulated UARTs). Does not build firmware."
             ),
         )
 
@@ -67,13 +68,13 @@ class ZMKRenodeTest(WestCommand):
         parser.add_argument(
             "--mode",
             choices=("uart", "ble"),
-            default="uart",
+            default="ble",
             help=(
-                "uart (default): snippet-built DUT, console + Studio RPC over emulated "
-                "UARTs; smoke = boot banner + GetDeviceInfo. "
-                "ble: real hardware image; with --host-elf the renode-ble-host app pairs "
-                "and does an encrypted Studio GATT read (S4/S5), without it a boot-liveness "
-                "check. See docs/renode-testing.md."
+                "ble (default): the real hardware image with no extra config; with "
+                "--host-elf the renode-ble-host app pairs and does an encrypted Studio "
+                "GATT read (S4/S5), without it a boot-liveness check. "
+                "uart: snippet-built DUT, console + Studio RPC over emulated UARTs; smoke = "
+                "boot banner + GetDeviceInfo. See docs/renode-testing.md."
             ),
         )
         parser.add_argument(

@@ -17,21 +17,22 @@ module's own tests (e.g. this template's tests/renode/test_renode.py)
 import renode_harness directly for anything more specific (their own custom
 RPC subsystem, etc.).
 
-Two modes (`--mode`, default `uart`); `--elf` is the DUT in both. ble mode
-boots a real hardware image instead and (with `--host-elf`) drives an encrypted
-Studio-over-BLE read, or without a host a boot-liveness check. See
+Two modes (`--mode`, default `ble`); `--elf` is the DUT in both. ble mode boots
+a real hardware image and (with `--host-elf`) drives an encrypted Studio-over-BLE
+read, or without a host a boot-liveness check. uart mode boots a snippet-built
+DUT and checks the boot banner + a core Studio GetDeviceInfo. See
 docs/renode-testing.md and docs/renode-internals.md.
 
 Usage:
-    # uart mode (default):
+    # ble mode (default -- real image + host app):
     python renode_smoke.py --elf /path/to/zmk.elf \\
+        --host-elf /path/to/renode-ble-host/zephyr.elf
+
+    # uart mode:
+    python renode_smoke.py --mode uart --elf /path/to/zmk.elf \\
         --studio-proto-dir /path/to/zmk-studio-messages/proto/zmk
     # or let it auto-discover the proto dir under a west topdir:
-    python renode_smoke.py --elf /path/to/zmk.elf --west-topdir /path/to/module
-
-    # ble mode (real image + host app):
-    python renode_smoke.py --mode ble --elf /path/to/zmk.elf \\
-        --host-elf /path/to/renode-ble-host/zephyr.elf
+    python renode_smoke.py --mode uart --elf /path/to/zmk.elf --west-topdir /path/to/module
 
 Exits non-zero (with a message on stderr) on any failure.
 """
@@ -410,10 +411,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--mode",
         choices=("uart", "ble"),
-        default="uart",
-        help="uart (default): snippet-built DUT, boot banner + Studio GetDeviceInfo over "
-        "emulated UARTs. ble: real hardware image; with --host-elf a full encrypted "
-        "Studio-over-BLE read (S4/S5), without it a boot-liveness check.",
+        default="ble",
+        help="ble (default): real hardware image; with --host-elf a full encrypted "
+        "Studio-over-BLE read (S4/S5), without it a boot-liveness check. uart: "
+        "snippet-built DUT, boot banner + Studio GetDeviceInfo over emulated UARTs.",
     )
     ap.add_argument(
         "--host-elf",
