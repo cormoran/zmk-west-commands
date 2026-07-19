@@ -159,3 +159,14 @@ ficr: Python.PythonPeripheral @ sysbus 0x10000000
     size: 0x1000
     initable: true
     filename: "platforms/models/ficr.py"
+
+// NVMC @0x4001E000: flash controller. Renode has no NVMC model, so the region
+// reads 0 and a BLE-enabled image can spin-poll NVMC.READY forever the first
+// time it touches flash (observed silent hang in two-machine runs). This model
+// serves READY/READYNEXT=1 and implements real page erase (ERASEPAGE fills the
+// 4 KiB page with 0xFF) so NVS garbage collection works once a settings sector
+// fills. See platforms/models/nvmc.py for the register-level rationale.
+nvmc: Python.PythonPeripheral @ sysbus 0x4001E000
+    size: 0x1000
+    initable: true
+    filename: "platforms/models/nvmc.py"
