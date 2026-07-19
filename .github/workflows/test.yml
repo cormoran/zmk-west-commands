@@ -108,6 +108,52 @@ jobs:
           mode: uart
           elf-path: build/renode/zephyr/zmk.elf
 
+  renode-split:
+    runs-on: ubuntu-latest
+    # HEAVY: three emulated nRF52840s on one BLE medium at a 10us quantum runs
+    # ~0.1x realtime; both pairings (split L2 then host S4/S5) complete by
+    # ~18s virtual (~3 min wall observed locally). Give a generous ceiling for a
+    # slow shared runner + the two extra firmware builds.
+    timeout-minutes: 60
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    name: Renode BLE-split
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache west modules
+        uses: actions/cache@v4
+        continue-on-error: true
+        env:
+          cache_name: cache-west-modules-renode-split
+        with:
+          path: dependencies/
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache_name }}-
+      - name: Init
+        # Same main-pinned manifest as the renode job (HWv2 xiao_ble//zmk board).
+        run: |
+          git config --global --add safe.directory ${{ github.workspace }}
+          west init -l . --mf scripts/west-test-renode-standalone.yml
+          west update --narrow
+          west zephyr-export
+      - name: Build split CENTRAL half (renode_split_left; Studio + name "Renode")
+        # The split central is the DUT the host reads: Studio + the exact
+        # studio-rpc-usb-uart image, split-central role, advertises "Renode".
+        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble-split.yaml -af ble-split-central -d build
+      - name: Build split PERIPHERAL half (renode_split_right; RTT-observed)
+        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble-split.yaml -af ble-split-peripheral -d build
+      - name: Build renode-ble-host app
+        run: west build -b nrf52840dk/nrf52840 -d build/ble-host -s renode-ble-host -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"Renode"'
+      - name: Renode ble-split smoke test (peripheral -> central -> host)
+        uses: ./.github/actions/zmk-renode-test
+        with:
+          mode: ble-split
+          elf-path: build/ble-split-central/zephyr/zmk.elf
+          peripheral-elf: build/ble-split-peripheral/zephyr/zmk.elf
+          host-elf: build/ble-host/zephyr/zephyr.elf
+
   ble:
     runs-on: ubuntu-latest
     timeout-minutes: 45

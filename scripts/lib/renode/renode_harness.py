@@ -265,6 +265,13 @@ class RenodeSession:
             except OSError as err:
                 last_err = err
                 time.sleep(0.3)
+        # Don't leak the Renode process: if its monitor never came up the caller
+        # will not get a session to stop(), so kill it here before raising (a
+        # leaked multi-machine Renode is memory-heavy and slows later runs).
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
         raise TimeoutError(f"Renode monitor never came up on port {self.monitor_port}: {last_err}")
 
     def go(self) -> None:

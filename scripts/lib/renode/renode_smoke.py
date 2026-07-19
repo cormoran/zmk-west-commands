@@ -517,7 +517,11 @@ def run_ble_split_smoke(
                     file=sys.stderr,
                 )
 
-            if BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf and split_l2_at is not None:
+            if (
+                BLE_GATT_READ_OK in host_buf
+                and BLE_SECURITY_OK in host_buf
+                and split_l2_at is not None
+            ):
                 break
 
             # NOTE: transient failure markers are NOT fatal here. Under the
@@ -563,9 +567,7 @@ def run_ble_split_smoke(
         retry_note = ""
         if split_fail_seen or host_fail_seen:
             which = ", ".join(
-                w
-                for w, seen in (("split", split_fail_seen), ("host", host_fail_seen))
-                if seen
+                w for w, seen in (("split", split_fail_seen), ("host", host_fail_seen)) if seen
             )
             retry_note = f" (recovered after transient pairing retry on: {which})"
 

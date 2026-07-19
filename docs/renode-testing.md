@@ -17,7 +17,8 @@ module-specific test. A module's own `tests/renode/*_test.py` run afterwards and
 ## Command reference
 
 ```
-usage: west zmk-renode-test [-h] --elf ELF [--mode {uart,ble}] [--host-elf HOST_ELF]
+usage: west zmk-renode-test [-h] --elf ELF [--mode {uart,ble,ble-split}]
+                            [--host-elf HOST_ELF] [--peripheral-elf PERIPHERAL_ELF]
                             [--no-rpc] [--boot-timeout BOOT_TIMEOUT] [--skip-smoke]
                             [--rtt] [--min-virtual MIN_VIRTUAL]
                             [--virtual-budget VIRTUAL_BUDGET] [--steady-quantum Q]
@@ -30,12 +31,13 @@ Common:
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--elf` (required) | both | the DUT firmware ELF (built by the caller). |
-| `--mode {uart,ble}` | — | `ble` (default) or `uart`. |
-| `--host-elf` | ble | the `renode-ble-host` app ELF. Given → full S4/S5 smoke; omitted → boot-liveness only. |
+| `--elf` (required) | all | the DUT firmware ELF (built by the caller). In `ble-split` this is the split **central** half. |
+| `--mode {uart,ble,ble-split}` | — | `ble` (default), `ble-split`, or `uart`. |
+| `--host-elf` | ble, ble-split | the `renode-ble-host` app ELF. ble: given → full S4/S5 smoke, omitted → boot-liveness. **Required** for `ble-split`. |
+| `--peripheral-elf` | ble-split | the split **peripheral** half's ELF (`--elf` is the central half). |
 | `--no-rpc` | uart | check only the boot banner (modules without Studio RPC). |
 | `--boot-timeout` | uart | seconds to wait for the ZMK boot banner (default 20). |
-| `--skip-smoke` | both | skip the smoke test; run only `tests_dir`. |
+| `--skip-smoke` | all | skip the smoke test; run only `tests_dir`. |
 
 Advanced (rarely needed):
 
@@ -43,7 +45,7 @@ Advanced (rarely needed):
 |---|---|---|
 | `--rtt` | ble (liveness) | capture Zephyr SEGGER RTT log output during the run and fail on RTT fatal lines. See [Observing a real image over SEGGER RTT](#observing-a-real-image-over-segger-rtt). |
 | `--min-virtual` | ble (liveness) | virtual seconds to run before PC sampling (default 20). |
-| `--virtual-budget` | ble (with host) | virtual seconds to reach the encrypted read before failing (default 20; ~3.3 s is typical). |
+| `--virtual-budget` | ble / ble-split (with host) | virtual seconds to reach the encrypted read before failing (ble default 20, ~3.3 s typical; ble-split raises this to ≥40, ~18 s typical). |
 | `--steady-quantum` | ble (with host) | after S4, raise the global time-sync quantum (e.g. `0.001`) for the steady-state phase. See [ble-mode performance](#ble-mode-performance). |
 | `--storage-addr` / `--storage-size` | ble | NVS `storage_partition` address/size preloaded as erased `0xFF` (default `0xec000`/`0x8000`, xiao_ble). |
 | `--renode-version` | both | Renode portable release to install/use (default `1.16.1`; must match the checked-in `.repl`). |
@@ -92,6 +94,61 @@ otherwise; if the image happens to have a console (observation builds), its
 output is captured and also checked for `FATAL ERROR` / `Halting system`, but
 console output is not required.
 
+## ble-split mode: what it proves
+
+ble-split mode boots **three real ARM images** on one emulated Renode BLE medium
+and proves a whole **wireless split** works end to end:
+
+```
+split PERIPHERAL half  ──BLE (split, encrypted)──▶  split CENTRAL half  ──BLE (Studio, encrypted)──▶  host
+```
+
+The split **central** half (`--elf`) is BOTH a GAP central — it scans, connects
+and pairs to the split **peripheral** half (`--peripheral-elf`) — **and** a GAP
+peripheral: it advertises ZMK Studio and the `--host-elf` app connects and pairs
+to *it*, then does the encrypted Studio GATT read. The smoke asserts, **in
+order**:
+
+1. **the split link secures** — the peripheral half's SEGGER-RTT log shows
+   `Security changed: … level 2` (BT security L2 between peripheral and central).
+   The peripheral half is built with RTT + `CONFIG_ZMK_LOG_LEVEL_DBG` precisely
+   so this is observable (its USB-CDC console is silent under Renode); the
+   harness captures that RTT stream.
+2. **then the host reads Studio through the central** — the host reaches
+   `STAGE:S4-SECURITY-CHANGED OK` and `STAGE:S5-GATT-READ OK` against the central.
+
+Reaching S5 **through the split central** proves the whole
+peripheral → central → host encrypted chain: the same central that holds the
+encrypted split link is serving the host's encrypted Studio read. The smoke also
+asserts **0** radio `trimming` warnings — every on-air PDU on **both** links
+stayed within Renode's 31-byte cap (see the DLE-27 note in
+[renode-internals.md](renode-internals.md#the-two-on-air-constraints-both-load-bearing)).
+Both the split link and the Studio link are encrypted, so **all three** machines
+carry the fake CCM.
+
+Under the 3-machine load a first pairing attempt on either link can lose an SMP
+packet; ZMK (and the host app) simply disconnect, rescan and retry, and a later
+attempt succeeds — so transient `Security failed` / host-fail markers are
+**tolerated**, and the smoke only fails on the time budgets. Both pairings
+settle by ~18 s virtual; at ~0.1× realtime that is ~**3 min wall** on a
+lightly-loaded host (longer on a shared CI runner — the job budgets 60 min).
+See [ble-mode performance](#ble-mode-performance) for the quantum cost; three
+CPUs at the load-bearing 10 µs quantum is the heaviest configuration here.
+
+Building the two halves + host — the split shield caps
+`CONFIG_BT_CTLR_DATA_LENGTH_MAX=27` on **both** halves (see
+`tests/zmk-config/boards/shields/renode_split/`):
+
+```bash
+$ west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble-split.yaml -af ble-split-central -d build
+$ west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble-split.yaml -af ble-split-peripheral -d build
+$ west build -b nrf52840dk/nrf52840 -d build/ble-host -s renode-ble-host -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"Renode"'
+$ west zmk-renode-test --mode ble-split \
+      --elf build/ble-split-central/zephyr/zmk.elf \
+      --peripheral-elf build/ble-split-peripheral/zephyr/zmk.elf \
+      --host-elf build/ble-host/zephyr/zephyr.elf
+```
+
 ## Module-test env contract
 
 After the smoke test, every `*_test.py` directly under `tests_dir` runs as
@@ -99,15 +156,18 @@ After the smoke test, every `*_test.py` directly under `tests_dir` runs as
 
 | Variable | When | Meaning |
 |---|---|---|
-| `ZMK_RENODE_MODE` | always | `uart` or `ble` — which harness the test should build. |
-| `ZMK_RENODE_ELF` | always | absolute path to the DUT ELF. |
-| `ZMK_RENODE_STORAGE_ADDR` / `ZMK_RENODE_STORAGE_SIZE` | ble | NVS `storage_partition` overrides (hex), for `boot_single_real` / `boot_ble_pair`. |
-| `ZMK_RENODE_HOST_ELF` | ble, with `--host-elf` | absolute path to the `renode-ble-host` app ELF, for `boot_ble_pair`. |
+| `ZMK_RENODE_MODE` | always | `uart`, `ble` or `ble-split` — which harness the test should build. |
+| `ZMK_RENODE_ELF` | always | absolute path to the DUT ELF (the split **central** half in `ble-split`). |
+| `ZMK_RENODE_STORAGE_ADDR` / `ZMK_RENODE_STORAGE_SIZE` | ble, ble-split | NVS `storage_partition` overrides (hex). |
+| `ZMK_RENODE_HOST_ELF` | ble (with `--host-elf`), ble-split | absolute path to the `renode-ble-host` app ELF. |
+| `ZMK_RENODE_PERIPHERAL_ELF` | ble-split | absolute path to the split **peripheral** half's ELF. |
 
 A `uart`-mode test builds a single UART-RPC machine via
 `renode_harness.boot_single(...)`. A `ble`-mode test builds a real machine via
 `renode_harness.boot_single_real(...)` (liveness) or a two-machine pair via
-`renode_harness.boot_ble_pair(dut_elf, host_elf)`.
+`renode_harness.boot_ble_pair(dut_elf, host_elf)`. A `ble-split`-mode test builds
+the three-machine split via
+`renode_harness.boot_ble_split(central_elf, peripheral_elf, host_elf)`.
 
 ## Observing a real image over SEGGER RTT
 
