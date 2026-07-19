@@ -1,0 +1,11 @@
+file_format: "1"
+id: renode_split
+name: Renode Split
+type: shield
+requires: [seeed_xiao]
+features:
+  - keys
+  - studio
+siblings:
+  - renode_split_left
+  - renode_split_right

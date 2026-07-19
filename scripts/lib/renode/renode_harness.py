@@ -67,6 +67,7 @@ __all__ = [
     "boot_single",
     "boot_single_real",
     "boot_ble_pair",
+    "boot_ble_split",
     "STORAGE_ADDR_DEFAULT",
     "STORAGE_SIZE_DEFAULT",
     "DEFAULT_DEVICE_ADDR",
@@ -683,3 +684,147 @@ def boot_ble_pair(
             except OSError:
                 pass
     return session, dut_console, dut_rpc, host_console
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot THREE real images on one BLE medium for a WIRELESS split
+# Studio-over-BLE test (platforms/three_machine_ble.resc + the fake CCM).
+# Topology: split PERIPHERAL half --BLE(split)--> split CENTRAL half
+# --BLE(Studio)--> host. The central is BOTH a GAP central (to the peripheral)
+# and a GAP peripheral (to the host). See renode_smoke.run_ble_split_smoke and
+# docs/renode-internals.md for what this proves and the fake-CCM disclaimer.
+# --------------------------------------------------------------------------
+
+
+def boot_ble_split(
+    renode_path: str,
+    central_elf: Path,
+    peripheral_elf: Path,
+    host_elf: Path,
+    storage_addr: int = STORAGE_ADDR_DEFAULT,
+    storage_size: int = STORAGE_SIZE_DEFAULT,
+    boot_wait: float = 5.0,
+    port_base: int | None = None,
+    renode_log: Path | None = None,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket", "RpcSocket"]:
+    """Boot three real flashable images on ONE BLE medium under Renode using
+    platforms/three_machine_ble.resc, so a WIRELESS split keyboard (peripheral
+    half + central half) can pair with each other AND the host can pair with and
+    do an encrypted Studio-RPC GATT read against the central half.
+
+    `central_elf` is the real ZMK split-CENTRAL image (runs Studio, advertises
+    the name the host scans for, AND scans/connects to the peripheral half);
+    `peripheral_elf` is the real ZMK split-PERIPHERAL image (advertises the split
+    service); `host_elf` is the renode-ble-host app. All three boot on the
+    USBD/QSPI/FICR/NVMC-stub real platform, each with a distinct FICR BLE
+    identity (device_addr_for_machine(0)/(1)/(2) -- three machines must not share
+    a BLE address), plus the fake AES-CCM peripheral injected into ALL THREE
+    machines so BOTH encrypted links (split + Studio) can come up (Renode has no
+    CCM model -- see platforms/models/ccm.py; this is an identity transform, NOT
+    real crypto).
+
+    The peripheral half is built with SEGGER RTT logging (see the renode_split
+    shield's right.conf), so its ZMK log stream -- carrying the split
+    "Security changed: ... level 2" line that proves the encrypted split link --
+    is captured. This function sets up that RTT capture on the peripheral machine
+    before `start` and stashes the connected socket on `session.peripheral_rtt`.
+
+    Returns (session, central_console, peripheral_rtt, host_console); the caller
+    owns cleanup (session.stop() + closing the sockets). Note the second element
+    is the peripheral's RTT socket, not its (USB-CDC-silent) console. Both ZMK
+    halves' NVS storage partitions are preloaded with erased 0xFF sectors before
+    `start`; the host keeps keys in RAM (no NVS). If `renode_log` is given,
+    Renode's log is written there (so a caller can scan it for radio "trimming"
+    warnings on either link).
+    """
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    central_ficr = _materialize_ficr(device_addr_for_machine(0))
+    peripheral_ficr = _materialize_ficr(device_addr_for_machine(1))
+    host_ficr = _materialize_ficr(device_addr_for_machine(2))
+    central_repl = _materialize_real_repl(central_ficr)
+    peripheral_repl = _materialize_real_repl(peripheral_ficr)
+    host_repl = _materialize_real_repl(host_ficr)
+    ccm_repl = _materialize_ccm_repl()
+    ff_path = _write_ff_binary(storage_size)
+    tmps = [
+        central_ficr,
+        peripheral_ficr,
+        host_ficr,
+        central_repl,
+        peripheral_repl,
+        host_repl,
+        ccm_repl,
+        ff_path,
+    ]
+
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "three_machine_ble.resc",
+        monitor_port=port_base,
+        variables={
+            "central_bin": f"@{central_elf}",
+            "peripheral_bin": f"@{peripheral_elf}",
+            "host_bin": f"@{host_elf}",
+            "central_platform": f"@{central_repl}",
+            "peripheral_platform": f"@{peripheral_repl}",
+            "host_platform": f"@{host_repl}",
+            "ccm": f"@{ccm_repl}",
+            "c_console": port_base + 1,
+            "c_rpc": port_base + 2,
+            "p_console": port_base + 3,
+            "h_console": port_base + 4,
+        },
+        cwd=SKILL_DIR,
+    )
+    session.peripheral_rtt = None
+    try:
+        session.start(boot_wait=boot_wait)
+        assert session.mon is not None
+        if renode_log is not None:
+            session.mon.execute(f"logFile @{renode_log}")
+        # connect_uart blocks until the resc's CreateServerSocketTerminal lines
+        # have run, so the temp platforms have been consumed by here. Connect
+        # every socket the resc created and keep references so none is GC-closed
+        # (Renode serves each socket to only its first client). central uart1 and
+        # the peripheral's USB-CDC-silent console are opened for symmetry /
+        # diagnosis and stashed on the session.
+        central_console = session.connect_uart(port_base + 1)
+        host_console = session.connect_uart(port_base + 4)
+        session._idle_sockets = [
+            session.connect_uart(port_base + 2),  # central uart1 (idle)
+            session.connect_uart(port_base + 3),  # peripheral console (silent)
+        ]
+
+        # Set up SEGGER RTT capture on the PERIPHERAL machine (its console is
+        # USB-CDC-silent under Renode). The resc has already LoadELF'd all three
+        # machines, so the peripheral's _SEGGER_RTT symbol resolves; do this
+        # before `start` so no early RTT bytes are lost. Mirrors boot_single_real
+        # but machine-scoped to "peripheral". setup_segger_rtt_wskip is a no-op
+        # if the symbol is absent (non-RTT build).
+        rtt_port = port_base + 5
+        session.mon.execute('mach set "peripheral"')
+        session.mon.execute(f"include @{SEGGER_RTT_HELPER}")
+        session.mon.execute('machine CreateVirtualConsole "segger_rtt"')
+        session.mon.execute("setup_segger_rtt_wskip sysbus.segger_rtt")
+        session.mon.execute(f'emulation CreateServerSocketTerminal {rtt_port} "prtt_term" false')
+        session.mon.execute("connector Connect sysbus.segger_rtt prtt_term")
+        session.peripheral_rtt = session.connect_uart(rtt_port)
+
+        # Preload BOTH ZMK halves' erased NVS sectors before the CPUs run.
+        # LoadBinary is machine-scoped, so select each half first (the host app
+        # keeps keys in RAM -- no NVS backend -- so it needs no preload).
+        for mach in ("central", "peripheral"):
+            session.mon.execute(f'mach set "{mach}"')
+            session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
+        session.go()
+    finally:
+        for tmp in tmps:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return session, central_console, session.peripheral_rtt, host_console

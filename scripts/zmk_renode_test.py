@@ -67,12 +67,16 @@ class ZMKRenodeTest(WestCommand):
         )
         parser.add_argument(
             "--mode",
-            choices=("uart", "ble"),
+            choices=("uart", "ble", "ble-split"),
             default="ble",
             help=(
                 "ble (default): the real hardware image with no extra config; with "
                 "--host-elf the renode-ble-host app pairs and does an encrypted Studio "
                 "GATT read (S4/S5), without it a boot-liveness check. "
+                "ble-split: a WIRELESS split -- --elf is the split CENTRAL half, "
+                "--peripheral-elf the split PERIPHERAL half, --host-elf the host; the "
+                "smoke asserts the encrypted split link comes up THEN the host reads "
+                "Studio through the central (peripheral -> central -> host). "
                 "uart: snippet-built DUT, console + Studio RPC over emulated UARTs; smoke = "
                 "boot banner + GetDeviceInfo. See docs/renode-testing.md."
             ),
@@ -80,9 +84,17 @@ class ZMKRenodeTest(WestCommand):
         parser.add_argument(
             "--host-elf",
             help=(
-                "ble mode only: the renode-ble-host app ELF (build it with `west build -b "
-                "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`). Given -> full "
-                "S4/S5 Studio-over-BLE smoke; omitted -> boot-liveness only."
+                "ble / ble-split mode: the renode-ble-host app ELF (build it with `west "
+                "build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`). In ble "
+                "mode: given -> full S4/S5 Studio-over-BLE smoke, omitted -> boot-liveness "
+                "only. Required for ble-split mode."
+            ),
+        )
+        parser.add_argument(
+            "--peripheral-elf",
+            help=(
+                "ble-split mode only: the split PERIPHERAL half's real ZMK ELF. --elf is "
+                "the split CENTRAL half (the Studio-advertising half the host reads)."
             ),
         )
         parser.add_argument(
@@ -166,7 +178,9 @@ class ZMKRenodeTest(WestCommand):
             )
 
         if args.mode == "uart" and args.host_elf:
-            log.die("--host-elf is only valid with --mode ble.")
+            log.die("--host-elf is only valid with --mode ble / ble-split.")
+        if args.mode != "ble-split" and getattr(args, "peripheral_elf", None):
+            log.die("--peripheral-elf is only valid with --mode ble-split.")
 
         # Make the harness (and the module's own tests) importable.
         sys.path.insert(0, str(LIB_RENODE_DIR))
@@ -178,13 +192,25 @@ class ZMKRenodeTest(WestCommand):
         log.inf(f"[*] Renode: {renode_path}")
 
         host_elf = None
-        if args.mode == "ble" and args.host_elf:
+        if args.mode in ("ble", "ble-split") and args.host_elf:
             host_elf = Path(args.host_elf).absolute()
             if not host_elf.is_file():
                 log.die(f"host ELF not found: {host_elf}")
 
+        peripheral_elf = None
+        if args.mode == "ble-split":
+            if not args.peripheral_elf:
+                log.die("--peripheral-elf is required for --mode ble-split.")
+            peripheral_elf = Path(args.peripheral_elf).absolute()
+            if not peripheral_elf.is_file():
+                log.die(f"peripheral ELF not found: {peripheral_elf}")
+            if host_elf is None:
+                log.die("--host-elf is required for --mode ble-split.")
+
         if not args.skip_smoke:
-            if args.mode == "ble":
+            if args.mode == "ble-split":
+                self._run_ble_split_smoke(args, elf, peripheral_elf, host_elf, renode_path)
+            elif args.mode == "ble":
                 if host_elf is not None:
                     self._run_ble_studio_smoke(args, elf, host_elf, renode_path)
                 else:
@@ -224,6 +250,36 @@ class ZMKRenodeTest(WestCommand):
         except AssertionError as err:
             log.die(f"BLE smoke test FAILED: {err}")
         log.inf("[*] BLE smoke test OK")
+
+    def _run_ble_split_smoke(
+        self, args, central_elf: Path, peripheral_elf: Path, host_elf: Path, renode_path: str
+    ) -> None:
+        import renode_smoke  # noqa: E402
+
+        kwargs = {}
+        if args.storage_addr is not None:
+            kwargs["storage_addr"] = args.storage_addr
+        if args.storage_size is not None:
+            kwargs["storage_size"] = args.storage_size
+        if getattr(args, "steady_quantum", None):
+            kwargs["steady_quantum"] = args.steady_quantum
+
+        log.inf(
+            "[*] Running BLE-split smoke test (split central + peripheral + renode-ble-host; "
+            "asserts split link L2 then host Studio read)"
+        )
+        try:
+            renode_smoke.run_ble_split_smoke(
+                central_elf=central_elf,
+                peripheral_elf=peripheral_elf,
+                host_elf=host_elf,
+                renode_path=renode_path,
+                virtual_budget=max(args.virtual_budget, 40.0),
+                **kwargs,
+            )
+        except AssertionError as err:
+            log.die(f"BLE-split smoke test FAILED: {err}")
+        log.inf("[*] BLE-split smoke test OK")
 
     def _run_ble_liveness_smoke(self, args, elf: Path, renode_path: str) -> None:
         import renode_smoke  # noqa: E402
@@ -323,9 +379,10 @@ class ZMKRenodeTest(WestCommand):
         # was given, ZMK_RENODE_HOST_ELF for renode_harness.boot_ble_pair().
         env["ZMK_RENODE_MODE"] = args.mode
         env["ZMK_RENODE_ELF"] = str(elf)
-        if args.mode == "ble":
+        if args.mode in ("ble", "ble-split"):
             # ble-mode tests build a real image via renode_harness.boot_single_real
-            # (liveness) or boot_ble_pair (two-machine), honoring these overrides.
+            # (liveness), boot_ble_pair (two-machine) or boot_ble_split (three-
+            # machine), honoring these overrides.
             import renode_harness  # noqa: E402
 
             addr = (
@@ -342,6 +399,10 @@ class ZMKRenodeTest(WestCommand):
             env["ZMK_RENODE_STORAGE_SIZE"] = hex(size)
             if args.host_elf:
                 env["ZMK_RENODE_HOST_ELF"] = str(Path(args.host_elf).absolute())
+            # ble-split: --elf is the split CENTRAL; ZMK_RENODE_PERIPHERAL_ELF is
+            # the split PERIPHERAL half (see renode_harness.boot_ble_split).
+            if args.mode == "ble-split" and getattr(args, "peripheral_elf", None):
+                env["ZMK_RENODE_PERIPHERAL_ELF"] = str(Path(args.peripheral_elf).absolute())
 
         failures = []
         for test_file in test_files:

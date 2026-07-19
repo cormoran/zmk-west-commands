@@ -1,0 +1,33 @@
+# Real-hardware DUT images for `west zmk-renode-test --mode ble-split` (see the
+# repo README's `west zmk-renode-test` section + docs/renode-testing.md). Builds
+# BOTH halves of a wireless BLE split keyboard, exactly as you would flash them:
+#
+#   * ble-split-central  = renode_split_left  = split CENTRAL half. Runs ZMK
+#     Studio (CONFIG_ZMK_STUDIO=y + the studio-rpc-usb-uart snippet, same as
+#     build-ble.yaml) and advertises the name "Renode" for the renode-ble-host
+#     to find. It is BOTH a GAP central (to the peripheral half) and a GAP
+#     peripheral (to the host).
+#   * ble-split-peripheral = renode_split_right = split PERIPHERAL half. No
+#     Studio; just advertises the split service for the central to connect to.
+#
+# Build both with:
+#   west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble-split.yaml \
+#       -af ble-split-central
+#   west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble-split.yaml \
+#       -af ble-split-peripheral
+#
+# Both halves cap CONFIG_BT_CTLR_DATA_LENGTH_MAX=27 (in the shield .conf files)
+# so every encrypted on-air PDU fits Renode's 31-byte radio cap. Targets ZMK's
+# HWv2 `xiao_ble//zmk` board (only on newer ZMK; see scripts/west-test-renode.yml).
+include:
+  - artifact: ble-split-central
+    board: xiao_ble//zmk
+    shield: renode_split_left
+    cmake-args: -DCONFIG_ZMK_STUDIO=y
+    snippets:
+      - studio-rpc-usb-uart
+  - artifact: ble-split-peripheral
+    board: xiao_ble//zmk
+    shield: renode_split_right
+    snippets:
+      - studio-rpc-usb-uart

@@ -1,0 +1,84 @@
+:name: Three nRF52840 machines on one BLE medium -- BLE-SPLIT REAL-BINARY mode
+:description: central = real ZMK split-central image (runs Studio + advertises to the
+:description: host, AND scans/connects to the peripheral); peripheral = real ZMK
+:description: split-peripheral image (advertises the split service); host =
+:description: renode-ble-host app (pairs with the central + encrypted Studio read).
+
+# Three-machine counterpart of two_machine_ble.resc, for a WIRELESS split:
+#
+#   peripheral half  --BLE(split, encrypted)-->  central half  --BLE(Studio,
+#   encrypted)-->  host
+#
+# The central half is BOTH a GAP central (to the peripheral half) and a GAP
+# peripheral (to the host). All three machines boot a *real* flashable image on
+# the USBD/QSPI/FICR/NVMC-stub platform (xiao_nrf52840_real.repl, materialized
+# per machine with a distinct FICR BLE identity by renode_harness.boot_ble_split)
+# plus the fake AES-CCM peripheral (ccm.repl) so BOTH encrypted links can come
+# up. See renode_harness.boot_ble_split and docs/renode-internals.md.
+
+using sysbus
+
+# --- Variables materialized by renode_harness.boot_ble_split ----------------
+# $*_platform: per-machine real repls with absolute model paths and a distinct
+#   FICR DEVICEADDR each (machine 0/1/2 -- three machines must not share a BLE
+#   address). $ccm: the fake-CCM repl with an absolute models/ccm.py path.
+$central_bin?=@central.elf
+$peripheral_bin?=@peripheral.elf
+$host_bin?=@zephyr.elf
+$central_platform?=@platforms/xiao_nrf52840_real.repl
+$peripheral_platform?=@platforms/xiao_nrf52840_real.repl
+$host_platform?=@platforms/xiao_nrf52840_real.repl
+$ccm?=@platforms/ccm.repl
+$c_console?=3471
+$c_rpc?=3472
+$p_console?=3473
+$h_console?=3474
+
+# Shared BLE radio medium.
+emulation CreateBLEMedium "wireless"
+
+# BLE inter-machine timing sync. 0.00001 (10us) is LOAD-BEARING: coarser
+# quantum breaks the soft link-layer (advertising/connection never complete).
+# With THREE CPUs re-syncing every 10us of virtual time the emulation is even
+# slower than the two-machine case (~0.07x realtime), which is why ble-split
+# mode is heavy/opt-in. Do not coarsen through pairing.
+emulation SetGlobalQuantum "0.00001"
+
+# ---- central (real ZMK split-central image: Studio + split GAP-central) -----
+mach create "central"
+machine LoadPlatformDescription $central_platform
+machine LoadPlatformDescription $ccm
+connector Connect sysbus.radio wireless
+
+emulation CreateServerSocketTerminal $c_console "central_console" false
+connector Connect sysbus.uart0 central_console
+emulation CreateServerSocketTerminal $c_rpc "central_rpc" false
+connector Connect sysbus.uart1 central_rpc
+
+sysbus LoadELF $central_bin
+
+# ---- peripheral (real ZMK split-peripheral image) ---------------------------
+mach create "peripheral"
+machine LoadPlatformDescription $peripheral_platform
+machine LoadPlatformDescription $ccm
+connector Connect sysbus.radio wireless
+
+emulation CreateServerSocketTerminal $p_console "peripheral_console" false
+connector Connect sysbus.uart0 peripheral_console
+
+sysbus LoadELF $peripheral_bin
+
+# ---- host (renode-ble-host: simulated computer / Studio BLE central) --------
+mach create "host"
+machine LoadPlatformDescription $host_platform
+machine LoadPlatformDescription $ccm
+connector Connect sysbus.radio wireless
+
+emulation CreateServerSocketTerminal $h_console "host_console" false
+connector Connect sysbus.uart0 host_console
+
+sysbus LoadELF $host_bin
+
+# The harness sets up SEGGER RTT capture on the peripheral, preloads the two
+# ZMK halves' NVS storage partitions (erased 0xFF) and issues `start` over the
+# monitor after connecting the sockets -- see renode_harness.boot_ble_split.
