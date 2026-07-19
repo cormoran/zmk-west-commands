@@ -30,6 +30,7 @@ Exits non-zero (with a message on stderr) on any failure.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -238,6 +239,138 @@ def run_liveness_smoke(
         session.stop()
 
 
+# Host-console STAGE markers emitted by the renode-ble-host app.
+BLE_SECURITY_OK = "STAGE:S4-SECURITY-CHANGED OK"
+BLE_GATT_READ_OK = "STAGE:S5-GATT-READ OK"
+BLE_FAIL_MARKERS = (
+    "STAGE:S5-GATT-READ FAIL",
+    "STAGE:S3-SECURITY-CHANGED FAIL",
+)
+
+
+def run_ble_smoke(
+    dut_elf: Path,
+    host_elf: Path,
+    renode_path: str,
+    virtual_budget: float = 20.0,
+    wall_budget: float = 780.0,
+    storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
+    storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
+) -> None:
+    """Studio-over-BLE smoke: boot a real ZMK DUT and the renode-ble-host app on
+    one Renode BLE medium (fake CCM in both machines), then assert the host
+    reaches an encrypted GATT read of the ZMK Studio RPC characteristic.
+
+    PASSES when the host console shows both `STAGE:S4-SECURITY-CHANGED OK`
+    (encrypted link up) and `STAGE:S5-GATT-READ OK` (encrypted read) before the
+    DUT clocks `virtual_budget` virtual seconds (default 20s -- generous vs the
+    ~1.3s observed). FAILS on any host FAIL marker, on the virtual-time budget,
+    or on the `wall_budget` wall-clock safety net (default 780s ~= 13 min --
+    BLE mode runs ~0.004x realtime, ~6-7 min wall to the read). On failure the
+    tails of both consoles are printed. NOT a cryptographic assertion -- the CCM
+    is a shared identity transform (see README.md's Studio-over-BLE section).
+    """
+    import tempfile
+
+    log_fd, log_path = tempfile.mkstemp(prefix="zmk-ble-renode-", suffix=".log")
+    os.close(log_fd)
+
+    print(
+        f"booting DUT + renode-ble-host on one BLE medium "
+        f"(virtual budget {virtual_budget:.0f}s, wall safety {wall_budget:.0f}s)...",
+        file=sys.stderr,
+    )
+    session, dut_console, dut_rpc, host_console = renode_harness.boot_ble_pair(
+        renode_path,
+        dut_elf=dut_elf,
+        host_elf=host_elf,
+        storage_addr=storage_addr,
+        storage_size=storage_size,
+        renode_log=Path(log_path),
+    )
+    assert session.mon is not None
+    mon = session.mon
+    dut_buf = ""
+    host_buf = ""
+    reason = None
+    try:
+        deadline = time.monotonic() + wall_budget
+        vt = 0.0
+        while time.monotonic() < deadline:
+            host_buf += renode_harness.drain_text(host_console._sock, timeout=0.5)
+            dut_buf += renode_harness.drain_text(dut_console._sock, timeout=0.5)
+
+            if BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf:
+                break
+            bad = next((m for m in BLE_FAIL_MARKERS if m in host_buf), None)
+            if bad:
+                reason = f"host reported a failure marker ({bad!r})"
+                break
+
+            mon.execute('mach set "dut"', settle=0.2)
+            vt = _parse_virtual_seconds(mon.execute("machine GetTimeSourceInfo", settle=0.3)) or vt
+            if vt >= virtual_budget:
+                reason = (
+                    f"virtual-time budget exhausted ({vt:.1f}s >= {virtual_budget:.0f}s) "
+                    "before the encrypted read"
+                )
+                break
+        else:
+            reason = f"wall-clock safety budget exhausted ({wall_budget:.0f}s)"
+
+        # Final drain so late markers/log lines are captured.
+        host_buf += renode_harness.drain_text(host_console._sock, timeout=1.0)
+        dut_buf += renode_harness.drain_text(dut_console._sock, timeout=0.5)
+
+        renode_log = ""
+        try:
+            renode_log = Path(log_path).read_text(errors="replace")
+        except OSError:
+            pass
+        trimming = renode_log.count("trimming")
+
+        stages = [ln.strip() for ln in host_buf.splitlines() if "STAGE:" in ln]
+        if reason is None and BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf:
+            for ln in stages:
+                print(f"  host| {ln}", file=sys.stderr)
+            print(
+                f"BLE smoke OK (encrypted Studio RPC read reached at vt~{vt:.1f}s; "
+                f"radio 'trimming' warnings: {trimming})",
+                file=sys.stderr,
+            )
+            if trimming:
+                print(
+                    f"WARNING: {trimming} radio 'trimming' line(s) in the Renode log "
+                    "(expected 0 for a clean fake-CCM run)",
+                    file=sys.stderr,
+                )
+            return
+
+        # Failure: dump both consoles' tails for diagnosis.
+        print("--- host console STAGE markers ---", file=sys.stderr)
+        for ln in stages:
+            print(f"  host| {ln}", file=sys.stderr)
+        print("--- host console tail ---", file=sys.stderr)
+        print("\n".join(host_buf.splitlines()[-25:]), file=sys.stderr)
+        print("--- DUT console tail ---", file=sys.stderr)
+        print("\n".join(dut_buf.splitlines()[-25:]), file=sys.stderr)
+        if trimming:
+            print(
+                f"(also: {trimming} radio 'trimming' line(s) in the Renode log)",
+                file=sys.stderr,
+            )
+        raise AssertionError(reason or "encrypted Studio RPC read not reached")
+    finally:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
+        host_console.close()
+        dut_rpc.close()
+        dut_console.close()
+        session.stop()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -277,17 +410,37 @@ def main(argv: list[str] | None = None) -> int:
         "liveness run (RTT-logging builds); printed and scanned for fatal markers.",
     )
     ap.add_argument(
+        "--ble",
+        action="store_true",
+        help="Studio-over-BLE smoke: boot the real DUT (--elf) and the "
+        "renode-ble-host app (--host-elf) on one BLE medium and assert an "
+        "encrypted Studio RPC read (S4+S5). Runs ~6-7 min wall. See README.",
+    )
+    ap.add_argument(
+        "--host-elf",
+        type=Path,
+        help="BLE mode: the renode-ble-host app ELF (built with `west build -b "
+        "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`).",
+    )
+    ap.add_argument(
+        "--ble-virtual-budget",
+        type=float,
+        default=20.0,
+        help="BLE mode: virtual seconds to reach the encrypted read before "
+        "failing (default: 20; ~1.3s is typical).",
+    )
+    ap.add_argument(
         "--storage-addr",
         type=lambda s: int(s, 0),
         default=renode_harness.STORAGE_ADDR_DEFAULT,
-        help="real-binary mode: NVS storage_partition address to preload as erased "
+        help="real-binary/BLE mode: NVS storage_partition address to preload as erased "
         "0xFF (default: 0xec000, xiao_ble).",
     )
     ap.add_argument(
         "--storage-size",
         type=lambda s: int(s, 0),
         default=renode_harness.STORAGE_SIZE_DEFAULT,
-        help="real-binary mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
+        help="real-binary/BLE mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
     )
     args = ap.parse_args(argv)
 
@@ -299,6 +452,25 @@ def main(argv: list[str] | None = None) -> int:
     if renode_path is None:
         print("Renode is not installed and could not be auto-installed", file=sys.stderr)
         return 2
+
+    if args.ble:
+        if args.host_elf is None or not args.host_elf.is_file():
+            print("BLE mode requires --host-elf <renode-ble-host ELF>", file=sys.stderr)
+            return 2
+        try:
+            run_ble_smoke(
+                dut_elf=args.elf,
+                host_elf=args.host_elf,
+                renode_path=renode_path,
+                virtual_budget=args.ble_virtual_budget,
+                storage_addr=args.storage_addr,
+                storage_size=args.storage_size,
+            )
+        except AssertionError as err:
+            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
+            return 1
+        print("SMOKE TEST OK", file=sys.stderr)
+        return 0
 
     if args.real_binary:
         try:

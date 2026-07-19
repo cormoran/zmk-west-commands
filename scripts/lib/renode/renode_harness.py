@@ -66,6 +66,7 @@ __all__ = [
     "find_studio_proto_dir",
     "boot_single",
     "boot_single_real",
+    "boot_ble_pair",
     "STORAGE_ADDR_DEFAULT",
     "STORAGE_SIZE_DEFAULT",
     "DEFAULT_DEVICE_ADDR",
@@ -461,6 +462,20 @@ def _materialize_real_repl(ficr_path: str | None = None) -> str:
     return path
 
 
+def _materialize_ccm_repl() -> str:
+    """Write a temp copy of platforms/ccm.repl with the models/ccm.py
+    `filename:` rewritten to absolute (same reason as _materialize_real_repl --
+    Renode does not resolve a PythonPeripheral filename against the .repl dir or
+    its cwd). Returns the temp file path (caller deletes it once loaded)."""
+    template = (PLATFORMS_DIR / "ccm.repl").read_text()
+    abs_ccm = str((PLATFORMS_DIR / "models" / "ccm.py").resolve())
+    repl = template.replace('filename: "platforms/models/ccm.py"', f'filename: "{abs_ccm}"')
+    fd, path = tempfile.mkstemp(prefix="zmk-ccm-", suffix=".repl")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(repl)
+    return path
+
+
 def _write_ff_binary(size: int) -> str:
     """Write a temp `size`-byte all-0xFF file to preload as erased NVS sectors
     (Renode zero-fills flash; NVS needs 0xFF to see erased sectors)."""
@@ -559,3 +574,95 @@ def boot_single_real(
             except OSError:
                 pass
     return session, console, rpc
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot TWO real images on one BLE medium for Studio-over-BLE
+# tests (platforms/two_machine_ble.resc + the fake CCM). DUT = unmodified real
+# ZMK BLE image (advertiser); host = the renode-ble-host app (scan/connect/
+# pair/encrypted read). See README.md's Studio-over-BLE section for what this
+# proves and the (non-cryptographic) fake-CCM disclaimer.
+# --------------------------------------------------------------------------
+
+
+def boot_ble_pair(
+    renode_path: str,
+    dut_elf: Path,
+    host_elf: Path,
+    storage_addr: int = STORAGE_ADDR_DEFAULT,
+    storage_size: int = STORAGE_SIZE_DEFAULT,
+    boot_wait: float = 4.0,
+    port_base: int | None = None,
+    renode_log: Path | None = None,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket", "RpcSocket"]:
+    """Boot two real flashable images on one BLE medium under Renode using
+    platforms/two_machine_ble.resc, so the host image can pair with and do an
+    encrypted Studio-RPC GATT read against the DUT.
+
+    `dut_elf` is an unmodified real ZMK BLE image (peripheral/advertiser);
+    `host_elf` is the renode-ble-host app (the simulated computer). Both boot on
+    the USBD/QSPI/FICR/NVMC-stub real platform, each with a distinct FICR BLE
+    identity (device_addr_for_machine(0)/(1) -- two machines must not share a
+    BLE address), plus the fake AES-CCM peripheral injected into BOTH machines
+    so the encrypted link can come up (Renode has no CCM model -- see
+    platforms/models/ccm.py; this is an identity transform, NOT real crypto).
+
+    Returns (session, dut_console, dut_rpc, host_console); the caller owns
+    cleanup (session.stop() + closing the sockets). The DUT NVS storage
+    partition is preloaded with erased 0xFF sectors before `start` (as in
+    boot_single_real). If `renode_log` is given, Renode's log is written there
+    (so a caller can scan it for radio "trimming" warnings).
+    """
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    dut_ficr = _materialize_ficr(device_addr_for_machine(0))
+    host_ficr = _materialize_ficr(device_addr_for_machine(1))
+    dut_repl = _materialize_real_repl(dut_ficr)
+    host_repl = _materialize_real_repl(host_ficr)
+    ccm_repl = _materialize_ccm_repl()
+    ff_path = _write_ff_binary(storage_size)
+    tmps = [dut_ficr, host_ficr, dut_repl, host_repl, ccm_repl, ff_path]
+
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "two_machine_ble.resc",
+        monitor_port=port_base,
+        variables={
+            "dut_bin": f"@{dut_elf}",
+            "host_bin": f"@{host_elf}",
+            "dut_platform": f"@{dut_repl}",
+            "host_platform": f"@{host_repl}",
+            "ccm": f"@{ccm_repl}",
+            "d_console": port_base + 1,
+            "d_rpc": port_base + 2,
+            "h_console": port_base + 3,
+        },
+        cwd=SKILL_DIR,
+    )
+    try:
+        session.start(boot_wait=boot_wait)
+        assert session.mon is not None
+        if renode_log is not None:
+            session.mon.execute(f"logFile @{renode_log}")
+        # connect_uart blocks until the resc's CreateServerSocketTerminal lines
+        # have run, so the temp platforms have been consumed by here.
+        dut_console = session.connect_uart(port_base + 1)
+        dut_rpc = session.connect_uart(port_base + 2)
+        host_console = session.connect_uart(port_base + 3)
+        # Preload the DUT's erased NVS sectors before the CPUs run. LoadBinary is
+        # machine-scoped, so select the DUT first (the resc leaves "host"
+        # selected as the last-created machine). The host app keeps keys in RAM
+        # (no NVS backend), so it needs no preload.
+        session.mon.execute('mach set "dut"')
+        session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
+        session.go()
+    finally:
+        for tmp in tmps:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return session, dut_console, dut_rpc, host_console

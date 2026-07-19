@@ -1,0 +1,16 @@
+// Fake AES-CCM link-crypto peripheral (0x4000F000) for Renode BLE mode.
+//
+// Loaded on TOP of xiao_nrf52840_real.repl into BOTH machines so a BLE
+// encrypted link can come up under Renode (which has no CCM model). See
+// platforms/models/ccm.py for the (deliberately non-cryptographic) identity
+// transform and its two load-bearing details, and README.md's Studio-over-BLE
+// section for the disclaimer.
+//
+// PythonPeripheral `filename:` needs an ABSOLUTE path (Renode resolves it
+// against neither the .repl dir nor its cwd). The path below is repo-relative
+// for readability; renode_harness.boot_ble_pair rewrites it to absolute into a
+// temp copy at boot, so this file is a template -- not loaded directly.
+ccm: Python.PythonPeripheral @ sysbus 0x4000F000
+    size: 0x1000
+    initable: true
+    filename: "platforms/models/ccm.py"
