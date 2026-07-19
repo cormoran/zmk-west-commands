@@ -449,12 +449,8 @@ def _materialize_ficr(device_addr: int) -> str:
     addr0 = device_addr & 0xFFFFFFFF  # DEVICEADDR[0] = low 32 bits
     addr1 = (device_addr >> 32) & 0xFFFF  # DEVICEADDR[1] = high 16 bits
     src = (PLATFORMS_DIR / "models" / "ficr.py").read_text()
-    src = re.sub(
-        r"^DEVICEADDR0 = .*$", f"DEVICEADDR0 = {hex(addr0)}", src, count=1, flags=re.M
-    )
-    src = re.sub(
-        r"^DEVICEADDR1 = .*$", f"DEVICEADDR1 = {hex(addr1)}", src, count=1, flags=re.M
-    )
+    src = re.sub(r"^DEVICEADDR0 = .*$", f"DEVICEADDR0 = {hex(addr0)}", src, count=1, flags=re.M)
+    src = re.sub(r"^DEVICEADDR1 = .*$", f"DEVICEADDR1 = {hex(addr1)}", src, count=1, flags=re.M)
     fd, path = tempfile.mkstemp(prefix="zmk-ficr-", suffix=".py")
     with os.fdopen(fd, "w") as fh:
         fh.write(src)

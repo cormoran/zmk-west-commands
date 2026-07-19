@@ -310,8 +310,16 @@ class ZMKRenodeTest(WestCommand):
             import renode_harness  # noqa: E402
 
             env["ZMK_RENODE_REAL"] = "1"
-            addr = args.storage_addr if args.storage_addr is not None else renode_harness.STORAGE_ADDR_DEFAULT
-            size = args.storage_size if args.storage_size is not None else renode_harness.STORAGE_SIZE_DEFAULT
+            addr = (
+                args.storage_addr
+                if args.storage_addr is not None
+                else renode_harness.STORAGE_ADDR_DEFAULT
+            )
+            size = (
+                args.storage_size
+                if args.storage_size is not None
+                else renode_harness.STORAGE_SIZE_DEFAULT
+            )
             env["ZMK_RENODE_STORAGE_ADDR"] = hex(addr)
             env["ZMK_RENODE_STORAGE_SIZE"] = hex(size)
         if args.ble:

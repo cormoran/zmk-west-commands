@@ -225,9 +225,7 @@ def run_liveness_smoke(
                 "CPU parked in a fatal frame -- image faulted: "
                 + ", ".join(f"{pc}={sym}" for pc, sym in halted)
             )
-        marker = next(
-            (m for m in FATAL_CONSOLE_MARKERS if m in console_buf or m in rtt_buf), None
-        )
+        marker = next((m for m in FATAL_CONSOLE_MARKERS if m in console_buf or m in rtt_buf), None)
         if marker:
             raise AssertionError(f"console/RTT reported a fatal error ({marker!r})")
         print("liveness OK (CPU running, no fatal frame)", file=sys.stderr)
