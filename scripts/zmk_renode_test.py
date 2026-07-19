@@ -102,11 +102,34 @@ class ZMKRenodeTest(WestCommand):
             ),
         )
         parser.add_argument(
+            "--ble",
+            action="store_true",
+            help=(
+                "Studio-over-BLE mode: boot the real DUT (--elf) and the renode-ble-host "
+                "app (--host-elf) on one BLE medium and assert an encrypted Studio RPC read "
+                "(fake CCM; ~6-7 min wall). Implies a real DUT image. See README."
+            ),
+        )
+        parser.add_argument(
+            "--host-elf",
+            help=(
+                "BLE mode: the renode-ble-host app ELF (build it with `west build -b "
+                "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`). Required with --ble."
+            ),
+        )
+        parser.add_argument(
+            "--ble-virtual-budget",
+            type=float,
+            default=20.0,
+            help="BLE mode: virtual seconds to reach the encrypted read before failing "
+            "(default: 20; ~1.3s is typical).",
+        )
+        parser.add_argument(
             "--storage-addr",
             type=lambda s: int(s, 0),
             default=None,
             help=(
-                "Real-binary mode: NVS storage_partition address preloaded as erased 0xFF "
+                "Real-binary/BLE mode: NVS storage_partition address preloaded as erased 0xFF "
                 "(default: 0xec000, xiao_ble)."
             ),
         )
@@ -135,8 +158,18 @@ class ZMKRenodeTest(WestCommand):
             log.die("Renode is not installed and could not be auto-installed.")
         log.inf(f"[*] Renode: {renode_path}")
 
+        host_elf = None
+        if args.ble:
+            if not args.host_elf:
+                log.die("--ble requires --host-elf <renode-ble-host ELF> (see README).")
+            host_elf = Path(args.host_elf).absolute()
+            if not host_elf.is_file():
+                log.die(f"host ELF not found: {host_elf}")
+
         if not args.skip_smoke:
-            if args.real_binary:
+            if args.ble:
+                self._run_ble_smoke(args, elf, host_elf, renode_path)
+            elif args.real_binary:
                 self._run_liveness_smoke(args, elf, renode_path)
             else:
                 self._run_smoke(args, elf, renode_path)
@@ -145,6 +178,28 @@ class ZMKRenodeTest(WestCommand):
 
         if args.tests_dir:
             self._run_module_tests(args, elf)
+
+    def _run_ble_smoke(self, args, elf: Path, host_elf: Path, renode_path: str) -> None:
+        import renode_smoke  # noqa: E402
+
+        kwargs = {}
+        if args.storage_addr is not None:
+            kwargs["storage_addr"] = args.storage_addr
+        if args.storage_size is not None:
+            kwargs["storage_size"] = args.storage_size
+
+        log.inf("[*] Running Studio-over-BLE smoke test (real DUT + renode-ble-host)")
+        try:
+            renode_smoke.run_ble_smoke(
+                dut_elf=elf,
+                host_elf=host_elf,
+                renode_path=renode_path,
+                virtual_budget=args.ble_virtual_budget,
+                **kwargs,
+            )
+        except AssertionError as err:
+            log.die(f"BLE smoke test FAILED: {err}")
+        log.inf("[*] BLE smoke test OK")
 
     def _run_liveness_smoke(self, args, elf: Path, renode_path: str) -> None:
         import renode_smoke  # noqa: E402
@@ -238,10 +293,10 @@ class ZMKRenodeTest(WestCommand):
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(LIB_RENODE_DIR) + (os.pathsep + existing if existing else "")
         env["ZMK_RENODE_ELF"] = str(elf)
-        if args.real_binary:
+        if args.real_binary or args.ble:
             # Tell the module's own tests to build real-binary machines
-            # (renode_harness.boot_single_real) rather than the UART-RPC one, and
-            # honor the same storage-partition overrides.
+            # (renode_harness.boot_single_real / boot_ble_pair) rather than the
+            # UART-RPC one, and honor the same storage-partition overrides.
             import renode_harness  # noqa: E402
 
             env["ZMK_RENODE_REAL"] = "1"
@@ -249,6 +304,12 @@ class ZMKRenodeTest(WestCommand):
             size = args.storage_size if args.storage_size is not None else renode_harness.STORAGE_SIZE_DEFAULT
             env["ZMK_RENODE_STORAGE_ADDR"] = hex(addr)
             env["ZMK_RENODE_STORAGE_SIZE"] = hex(size)
+        if args.ble:
+            # BLE mode contract: a module's own tests build a two-machine
+            # renode_harness.boot_ble_pair(dut_elf=ZMK_RENODE_ELF,
+            # host_elf=ZMK_RENODE_HOST_ELF).
+            env["ZMK_RENODE_BLE"] = "1"
+            env["ZMK_RENODE_HOST_ELF"] = str(Path(args.host_elf).absolute())
 
         failures = []
         for test_file in test_files:

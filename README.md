@@ -156,6 +156,7 @@ $ west zmk-renode-test --elf build/renode/zephyr/zmk.elf --no-rpc
 usage: west zmk-renode-test [-h] --elf ELF [--renode-version RENODE_VERSION]
                             [--boot-timeout BOOT_TIMEOUT] [--skip-smoke] [--no-rpc]
                             [--real-binary] [--min-virtual MIN_VIRTUAL] [--rtt]
+                            [--ble] [--host-elf HOST_ELF] [--ble-virtual-budget SECS]
                             [--storage-addr ADDR] [--storage-size SIZE]
                             [tests_dir]
 ```
@@ -291,14 +292,85 @@ deterministic static-random address per machine (machine 0 =
 `C0:E7:E7:E7:E7:E7`, machine 1 = `…:E8`, …), ready for a future two-machine BLE
 harness to call per machine.
 
-Limitations (real-binary mode today):
+Limitations (single-machine real-binary mode):
 
-- **Studio RPC is not reachable.** The USB/BLE transports are stubbed to idle,
-  not driven — there is no Studio round trip in real mode yet (BLE-encryption /
-  CCM work to reach it is a separate, parallel effort).
-- **Radio TX is visible but not connectable.** BLE advertising is emitted (you
-  can see it on ch 37/38/39), but a connection test needs a wireless medium and
-  a peer, which this single-machine platform does not wire up.
+- **Studio-over-USB is not reachable.** The USB transport is stubbed to idle
+  (unplugged cable), so there is no USB Studio round trip in real mode.
+- **Studio-over-BLE _is_ reachable via `--ble`.** The two-machine BLE mode below
+  wires up a wireless medium + peer and drives an encrypted Studio RPC read on
+  the real binary. Single-machine mode only emits advertising (visible on ch
+  37/38/39) and does not connect.
+
+#### Studio-over-BLE testing (Renode)
+
+```bash
+# Build the host app once (real ARM image for the DK board), then run the
+# two-machine BLE smoke against a real DUT image.
+$ west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host
+$ west zmk-renode-test --ble --elf build/zephyr/zmk.elf \
+      --host-elf build/zephyr/zephyr.elf
+```
+
+`--ble` boots **two real ARM images** on one emulated Renode BLE medium — the
+unmodified ZMK DUT (advertiser) and the [`renode-ble-host`](renode-ble-host/)
+app (the simulated computer) — and asserts the host reaches
+`STAGE:S4-SECURITY-CHANGED OK` (encrypted link up) and `STAGE:S5-GATT-READ OK`
+(encrypted read of the ZMK Studio RPC characteristic). **What it proves:** LE SC
+Just Works pairing and an encrypted GATT read run end-to-end on the real
+firmware — the same code paths as a hardware Studio-over-BLE session — with
+**zero firmware-side deviation** on the DUT.
+
+> **Fake-CCM disclaimer — NOT cryptographically real.** Renode has no AES-CCM
+> engine, so both machines share a *fake* CCM peripheral
+> ([`platforms/models/ccm.py`](scripts/lib/renode/platforms/models/ccm.py)) that
+> is an **identity transform** (it just appends/strips 4 dummy MIC bytes and
+> reports MIC-OK). It only has to be self-consistent because both endpoints run
+> the same fake. This is perfect for a **functional** test — the encrypted code
+> paths on both sides execute for real — but it validates **nothing** about
+> cryptography. Do not use it to check crypto correctness.
+
+Two constraints make it work (both load-bearing):
+
+- **Host-side data-length cap.** `renode-ble-host`'s `prj.conf` sets
+  `CONFIG_BT_CTLR_DATA_LENGTH_MAX=27`. Every encrypted on-air PDU is
+  `payload + 4-byte MIC`; `27+4 = 31` is exactly Renode's `NRF52840_Radio`
+  packet cap. LE Data Length's effective value is `min(local, remote)`, so
+  capping the **host** caps both directions — which is why the DUT needs no
+  change. Without it the DUT negotiates larger PDUs and anything over `27+4`
+  gets "trimmed" by the radio and the link breaks.
+- **Global quantum `0.00001`.** The two-machine `.resc` sets a 10 µs sync
+  quantum; coarser values (even `0.00003`) break the soft link-layer so the
+  host never receives an advertisement. This is ~600× slower than realtime with
+  two CPUs, which is why BLE mode is opt-in.
+
+Two hard-won `ccm.py` details are preserved with comments (each was a real
+failure mode):
+
+| Symptom | Root cause / fix |
+|---|---|
+| Renode `Payload length (34) … trimming` + peer disconnect `0x3d` right after the encryption start | lazy TX transform sent stale OUTPTR bytes — the transform must be **eager** (radio builds the frame before firmware reads `EVENTS_ENDCRYPT`) |
+| 30 s SMP timeout, `security_changed err=9`, DUT never TX-encrypts | lazy RX transform — Zephyr's `isr_rx_pdu` reads the OUT buffer before `EVENTS_ENDCRYPT`, so RX must be **eager** too |
+| Fast `0x3d` disconnect right after pairing | CCM payload copied at offset **+2** instead of **+3** (the nRF52 CCM data structure is Header/Length/RFU/Payload; radio `S1INCL=1`) |
+
+**Cost & budgets.** A run reaches the encrypted read at ~1.3 s virtual but
+~**6–7 min wall** (≈0.004× realtime). The smoke passes as soon as S4+S5 appear;
+`--ble-virtual-budget` (default 20 virtual seconds) caps how long it waits, and
+a wall-clock safety net stops a wedged run. It also exports `ZMK_RENODE_BLE=1`
+and `ZMK_RENODE_HOST_ELF=…` for a module's own `tests/renode/*_test.py` (which
+call `renode_harness.boot_ble_pair(dut_elf, host_elf)`), mirroring the
+`ZMK_RENODE_REAL` contract.
+
+**Relationship to `west zmk-ble-test`.** That command runs BabbleSim
+(`nrf52_bsim`) BLE tests — protocol-accurate POSIX binaries, fast, driving a
+full Studio request/response script via [`ble-studio-host`](ble-studio-host/).
+`--ble` here instead runs the **real ARM binary** under Renode and only proves
+the encrypted-link Studio read reaches the DUT. They are complementary.
+
+**Current limitations (BLE mode).** Only LE SC **Just Works** is exercised;
+identity addresses come from the FICR model (static-random,
+`device_addr_for_machine(n)`); the radio's 31-byte payload cap forces the
+host-side DLE cap above. Test-time reduction (the ~6–7 min wall cost) is a
+planned follow-up.
 
 #### Requirements
 
