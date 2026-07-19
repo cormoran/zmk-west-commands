@@ -137,44 +137,29 @@ options:
 ### west zmk-renode-test
 
 Boot an **already-built** ZMK firmware ELF in the [Renode](https://renode.io/)
-emulator, run a generic boot + core Studio RPC smoke test, then (optionally)
-the module's own `tests/renode/*_test.py` files. Hardware-free — no J-Link, no
-physical board. This command never builds firmware; the caller builds the ELF.
+emulator, run a boot + Studio smoke test, then (optionally) the module's own
+`tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
+This command never builds firmware; the caller builds the ELF.
 
-```bash
-# Smoke test only (boot banner + core Studio GetDeviceInfo round trip)
-$ west zmk-renode-test --elf build/renode/zephyr/zmk.elf
+There are **two modes** (`--mode`, default `uart`). `--elf` is the DUT in both:
 
-# Smoke test + the module's own custom-RPC tests
-$ west zmk-renode-test tests/renode --elf build/renode/zephyr/zmk.elf
-
-# Boot-banner only, for a module that does not enable Studio RPC
-$ west zmk-renode-test --elf build/renode/zephyr/zmk.elf --no-rpc
-```
-
-```
-usage: west zmk-renode-test [-h] --elf ELF [--renode-version RENODE_VERSION]
-                            [--boot-timeout BOOT_TIMEOUT] [--skip-smoke] [--no-rpc]
-                            [--real-binary] [--min-virtual MIN_VIRTUAL] [--rtt]
-                            [--ble] [--host-elf HOST_ELF] [--ble-virtual-budget SECS]
-                            [--storage-addr ADDR] [--storage-size SIZE]
-                            [tests_dir]
-```
+| Mode | DUT you build | What the smoke proves | Runtime |
+|---|---|---|---|
+| **`uart`** (default) | ELF built with this repo's `renode-studio-uart` snippet | Boots (ZMK banner) and answers a core Studio `GetDeviceInfo` over an emulated UART | ~15 s |
+| **`ble`** | the exact `studio-rpc-usb-uart` **hardware** image you would flash | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
 
 Renode is downloaded automatically on first use (a portable tarball, cached
 under `$RENODE_ROOT`, default `~/.renode`). Each `tests_dir/*_test.py` file is
-run non-recursively as `python3 <file> -v` with `ZMK_RENODE_ELF` set to the ELF
-and the harness (`scripts/lib/renode/`) prepended to `PYTHONPATH`, so a test
-file only needs `import renode_harness`.
+run non-recursively as `python3 <file> -v` with the harness (`scripts/lib/renode/`)
+on `PYTHONPATH` and the `ZMK_RENODE_*` env contract set — see
+[docs/renode-testing.md](docs/renode-testing.md).
 
-#### Building a Renode-testable ELF
+#### uart mode (default)
 
-This repo is also a Zephyr module: it provides the `renode-studio-uart` snippet
-and a Renode-only Studio RPC UART transport (both inert unless the snippet is
-used — see `renode-test-module/Kconfig`). Real hardware carries Studio RPC over
-USB-CDC, which Renode's nRF52840 USBD model cannot present; the snippet binds
-Studio RPC + the console to real UART peripherals instead. Add a `build.yaml`
-artifact that uses it:
+The DUT is built with the `renode-studio-uart` snippet this repo ships as a
+Zephyr module: real hardware carries Studio RPC over USB-CDC, which Renode's
+nRF52840 USBD model cannot present, so the snippet re-binds Studio RPC + the
+console to real UART peripherals Renode can drive. Add a `build.yaml` artifact:
 
 ```yaml
 include:
@@ -188,249 +173,55 @@ include:
 
 ```bash
 $ west zmk-build <your-zmk-config> -af renode
+# smoke + the module's own custom-RPC tests:
 $ west zmk-renode-test tests/renode --elf build/renode/zephyr/zmk.elf
+# boot-banner only, for a module that does not enable Studio RPC:
+$ west zmk-renode-test --elf build/renode/zephyr/zmk.elf --no-rpc
 ```
 
 > `CONFIG_ZMK_STUDIO=y` build-asserts on a `zmk,physical-layout` (with
 > `key_physical_attrs`) **and** the absence of a chosen `zmk,matrix-transform`.
 > Give your shield/board a keys'd physical layout that references the transform
 > directly — see the in-repo example
-> `tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`.
+> `tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`, and
+> [docs/renode-testing.md](docs/renode-testing.md) for the newer-ZMK board note.
 
-> The HWv2 `xiao_ble//zmk` board (and the node labels the `renode-studio-uart`
-> overlay disables) only exist on newer ZMK; this repo's own CI pins ZMK
-> `main` for the Renode job (`scripts/west-test-renode.yml`) while the rest of
-> the tests stay on `v0.3-branch`.
+#### ble mode
 
-#### Real-binary mode (`--real-binary`)
-
-The default flow above boots an ELF built with the `renode-studio-uart` snippet
-(Studio RPC re-bound to a UART so Renode can drive it). `--real-binary` instead
-boots a **real flashable image** — the exact artifact you would flash to a
-board, built with ZMK's own `studio-rpc-usb-uart` snippet (USB CDC + QSPI NOR +
-BLE all enabled), with **zero firmware-side deviation**:
+The DUT is the **real flashable image** (ZMK's own `studio-rpc-usb-uart`
+snippet: USB CDC + QSPI NOR + BLE), with **zero firmware-side deviation** —
+platform stubs make that exact image boot under Renode. Build the
+[`renode-ble-host`](renode-ble-host/) app (the simulated computer) once, then
+run the two-machine BLE smoke:
 
 ```bash
-# Boot a real xiao_ble image and verify it stays alive (no Zephyr fatal)
-$ west zmk-renode-test --real-binary --elf build/zephyr/zmk.elf
-```
-
-Renode's nRF52840 has no USBD/QSPI/FICR/NVMC models, so a real image would hang
-or oops on stock Renode. The `xiao_nrf52840_real.repl` platform adds five things
-(see that file and `scripts/lib/renode/platforms/models/`):
-
-1. **QSPI stub** (`0x40029000`) — completes the `nrfx_qspi` busy-wait on
-   `EVENTS_READY`; the JEDEC probe then mismatches so `nordic_qspi_nor` fails
-   gracefully (`-ENODEV`) instead of hanging. The external NOR is not the
-   settings backend, so this is harmless.
-2. **USBD stub** (`0x40027000`) — returns `EVENTCAUSE.READY` so
-   `nrf_usbd_common` enable completes, then reads 0 (no VBUS) so the driver
-   idles like an unplugged cable.
-3. **FICR model** (`0x10000000`) — serves real `CODEPAGESIZE`/`CODESIZE` (so
-   `settings_nvs` sizes its partition instead of failing `-EDOM`) and a BLE
-   identity address. Without it, settings never load, BT host init stalls, and
-   the HCI Read-BD_ADDR times out into a `BT_ASSERT` oops around 10 s.
-4. **NVMC model** (`0x4001E000`) — the flash controller. With no model the
-   region reads 0, so a BLE-enabled image can spin-poll `NVMC.READY` forever the
-   first time it touches flash (an observed *silent* hang in two-machine runs).
-   The model serves `READY`/`READYNEXT`=1 and implements real page erase
-   (`ERASEPAGE`/`ERASEPCR0` fill the 4 KiB page with `0xFF`), so NVS garbage
-   collection works once a settings sector fills.
-5. **NVS preload** — Renode zero-fills flash, but NVS needs erased sectors to
-   read `0xFF`, so the storage partition is preloaded with `0xFF` (else
-   `nvs_mount` fails `-EDEADLK`). Defaults to the **xiao_ble** `storage_partition`
-   (`0xec000`, size `0x8000`); override with `--storage-addr`/`--storage-size`
-   for other boards.
-
-A real image speaks Studio RPC only over USB/BLE, so there is no UART transport
-to drive. The smoke therefore becomes a **liveness check**: run `--min-virtual`
-virtual seconds (default 20), then sample the CPU `PC` a few times and resolve
-each symbol. It **fails** if any sample lands in a fatal frame
-(`arch_system_halt` / `z_fatal_error` / `k_sys_fatal_error_handler` — a Zephyr
-fatal parks the CPU spinning in `arch_system_halt`) and **passes** otherwise;
-if the image happens to have a console (observation builds), its output is
-captured and also checked for `FATAL ERROR` / `Halting system`, but console
-output is not required. Module `tests/renode/*_test.py` still run afterwards
-with `ZMK_RENODE_ELF` set plus `ZMK_RENODE_REAL=1` and
-`ZMK_RENODE_STORAGE_ADDR`/`ZMK_RENODE_STORAGE_SIZE`, so a test can build its own
-real machine via `renode_harness.boot_single_real(...)`.
-
-##### Observing a real image over SEGGER RTT (`--rtt`)
-
-PC-symbol sampling proves the image is *alive*, but a silent real image gives no
-log output. The **recommended observation path** is to build with Zephyr's
-SEGGER RTT log backend and pass `--rtt`:
-
-```bash
-$ west zmk-renode-test --real-binary --rtt --elf build/zephyr/zmk.elf
-```
-
-An RTT-logging build is still **real-hardware-flashable** — it is Kconfig-only,
-no firmware source changes:
-
-```
-CONFIG_LOG=y
-CONFIG_USE_SEGGER_RTT=y
-CONFIG_LOG_BACKEND_RTT=y
-```
-
-`--rtt` hooks `SEGGER_RTT_WriteSkipNoLock` (the function Zephyr's `log_backend_rtt`
-actually calls — Renode's stock `segger-rtt.py` hooks `SEGGER_RTT_WriteNoLock`,
-which Zephyr never calls, so it captures nothing; see
-`scripts/lib/renode/segger_rtt_writeskip.py`). The captured log is printed and
-also scanned for the same `FATAL ERROR` / `Halting system` markers, so a real
-image's boot banner (`Welcome to ZMK!`) and BT identity line become visible. On
-a non-RTT build the hook install is a graceful no-op (the capture is just empty).
-
-##### Per-machine BLE identity (multi-machine)
-
-The FICR model's `DEVICEADDR` is parameterized so two machines in one emulation
-can advertise **distinct** BLE addresses (sharing one breaks BLE tests).
-`boot_single_real(..., device_addr=<48-bit int>)` injects a per-machine copy of
-the FICR model; `renode_harness.device_addr_for_machine(n)` returns a
-deterministic static-random address per machine (machine 0 =
-`C0:E7:E7:E7:E7:E7`, machine 1 = `…:E8`, …), ready for a future two-machine BLE
-harness to call per machine.
-
-Limitations (single-machine real-binary mode):
-
-- **Studio-over-USB is not reachable.** The USB transport is stubbed to idle
-  (unplugged cable), so there is no USB Studio round trip in real mode.
-- **Studio-over-BLE _is_ reachable via `--ble`.** The two-machine BLE mode below
-  wires up a wireless medium + peer and drives an encrypted Studio RPC read on
-  the real binary. Single-machine mode only emits advertising (visible on ch
-  37/38/39) and does not connect.
-
-#### Studio-over-BLE testing (Renode)
-
-```bash
-# Build the host app once (real ARM image for the DK board), then run the
-# two-machine BLE smoke against a real DUT image.
 $ west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host
-$ west zmk-renode-test --ble --elf build/zephyr/zmk.elf \
+$ west zmk-renode-test --mode ble --elf build/zephyr/zmk.elf \
       --host-elf build/zephyr/zephyr.elf
 ```
 
-`--ble` boots **two real ARM images** on one emulated Renode BLE medium — the
-unmodified ZMK DUT (advertiser) and the [`renode-ble-host`](renode-ble-host/)
-app (the simulated computer) — and asserts the host reaches
-`STAGE:S4-SECURITY-CHANGED OK` (encrypted link up) and `STAGE:S5-GATT-READ OK`
-(encrypted read of the ZMK Studio RPC characteristic). **What it proves:** LE SC
-Just Works pairing and an encrypted GATT read run end-to-end on the real
-firmware — the same code paths as a hardware Studio-over-BLE session — with
-**zero firmware-side deviation** on the DUT.
+The host pairs (LE SC Just Works) and does an encrypted Studio GATT read — the
+same code paths as a hardware Studio-over-BLE session. **Without `--host-elf`**
+it degrades to a boot-liveness check (the real image boots and is not parked in
+a Zephyr fatal), handy to smoke a real image when you have no host app:
 
-> **Fake-CCM disclaimer — NOT cryptographically real.** Renode has no AES-CCM
-> engine, so both machines share a *fake* CCM peripheral
-> ([`platforms/models/ccm.py`](scripts/lib/renode/platforms/models/ccm.py)) that
-> is an **identity transform** (it just appends/strips 4 dummy MIC bytes and
-> reports MIC-OK). It only has to be self-consistent because both endpoints run
-> the same fake. This is perfect for a **functional** test — the encrypted code
-> paths on both sides execute for real — but it validates **nothing** about
-> cryptography. Do not use it to check crypto correctness.
+```bash
+$ west zmk-renode-test --mode ble --elf build/zephyr/zmk.elf
+```
 
-Two constraints make it work (both load-bearing):
-
-- **Host-side data-length cap.** `renode-ble-host`'s `prj.conf` sets
-  `CONFIG_BT_CTLR_DATA_LENGTH_MAX=27`. Every encrypted on-air PDU is
-  `payload + 4-byte MIC`; `27+4 = 31` is exactly Renode's `NRF52840_Radio`
-  packet cap. LE Data Length's effective value is `min(local, remote)`, so
-  capping the **host** caps both directions — which is why the DUT needs no
-  change. Without it the DUT negotiates larger PDUs and anything over `27+4`
-  gets "trimmed" by the radio and the link breaks.
-- **Global quantum `0.00001`.** The two-machine `.resc` sets a 10 µs sync
-  quantum; coarser values (even `0.00003` and `0.0001`) break the soft
-  link-layer so the host never receives an advertisement. This 10 µs sync is the
-  dominant wall-clock cost of BLE mode (the two CPUs re-synchronise 100 000×
-  per virtual second) — see **BLE-mode performance** below for the numbers and
-  the `--ble-steady-quantum` fine-then-coarse lever that recovers it after
-  pairing.
-
-Two hard-won `ccm.py` details are preserved with comments (each was a real
-failure mode):
-
-| Symptom | Root cause / fix |
-|---|---|
-| Renode `Payload length (34) … trimming` + peer disconnect `0x3d` right after the encryption start | lazy TX transform sent stale OUTPTR bytes — the transform must be **eager** (radio builds the frame before firmware reads `EVENTS_ENDCRYPT`) |
-| 30 s SMP timeout, `security_changed err=9`, DUT never TX-encrypts | lazy RX transform — Zephyr's `isr_rx_pdu` reads the OUT buffer before `EVENTS_ENDCRYPT`, so RX must be **eager** too |
-| Fast `0x3d` disconnect right after pairing | CCM payload copied at offset **+2** instead of **+3** (the nRF52 CCM data structure is Header/Length/RFU/Payload; radio `S1INCL=1`) |
-
-**Cost & budgets.** A run reaches the encrypted read (S5) at ~3.3 s virtual and
-~**35–50 s wall** (≈0.10× realtime on a lightly-loaded host). The smoke passes
-as soon as S4+S5 appear; `--ble-virtual-budget` (default 20 virtual seconds)
-caps how long it waits, and a wall-clock safety net stops a wedged run. It also
-exports `ZMK_RENODE_BLE=1` and `ZMK_RENODE_HOST_ELF=…` for a module's own
-`tests/renode/*_test.py` (which call
-`renode_harness.boot_ble_pair(dut_elf, host_elf)`), mirroring the
-`ZMK_RENODE_REAL` contract.
-
-##### BLE-mode performance
-
-BLE mode's wall cost is dominated by the **10 µs two-machine time-sync quantum**,
-not by the Python peripheral stubs (fake CCM / FICR / NVMC / QSPI / USBD). The
-proof: stripping the fake-CCM per-transform debug-string build changes nothing
-(0.099× vs 0.100×), yet *coarsening the quantum after pairing* — which does not
-reduce the number of CCM transforms per virtual second — recovers up to ~7×.
-Measurements (Renode 1.16.1, one lightly-loaded x86-64 host; median of ≥2 runs;
-all still **PASS** S4+S5):
-
-| Configuration | Wall to S5 | virtual/wall ratio | PASS |
-|---|---|---|---|
-| Default UART smoke (single machine, reference) | ~14 s | — | ✅ |
-| Real-binary liveness (single machine, reference) | ~85 s / 21 s vt | ~0.25× | ✅ |
-| **BLE baseline** (10 µs quantum, parallel CPUs) | ~33–48 s | **0.10×** | ✅ |
-| BLE + fake-CCM debug string removed | ~34 s | 0.099× | ✅ (no change) |
-| BLE + `SetGlobalSerialExecution true` | ~43 s | 0.055× | ✅ (slower) |
-| BLE + `PerformanceInMips 100` | ~33 s | 0.098× | ✅ (no change; ≈ default) |
-| BLE + `PerformanceInMips 1` | — | — | ❌ (too slow to pair) |
-| Quantum `0.00003` / `0.0001` from boot | — | — | ❌ (never advertises) |
-| **Steady phase** after S4, quantum `0.0001` (10×) | — | **≥0.35×** | ✅ (link survives) |
-| **Steady phase** after S4, quantum `0.001` (100×) | — | **≥0.70×** | ✅ (link survives, ~7×) |
-
-**Root cause.** Two nRF52840 CPUs re-synchronising every 10 µs of virtual time
-run at ~0.10× realtime; a single machine (no BLE medium, default quantum) runs
-at ~0.25×. The fine quantum is *load-bearing through connection + pairing* (the
-soft link-layer's radio-event prepare runs late and asserts otherwise), but once
-the encrypted link is up (host `STAGE:S4`) the link-layer tolerates a
-100×-coarser quantum: the connection stays up with no disconnect / LL assert and
-an encrypted GATT read (S5) still completes.
-
-**`--ble-steady-quantum` (fine-then-coarse).** For a module's own *long* BLE
-test (many virtual seconds of steady RPC traffic), pass e.g.
-`--ble-steady-quantum 0.001`: the harness raises the global quantum the moment
-the encrypted link comes up, running the steady-state phase ~7× faster.
-Equivalently, a module test using `renode_harness.boot_ble_pair(...)` directly
-calls `renode_harness.raise_global_quantum(session, "0.001")` after it observes
-`STAGE:S4`. The `--ble` smoke itself exits at S5 (a tiny virtual gap after S4),
-so it gains almost nothing from the flag — it mostly *validates* the schedule;
-the win is for post-pairing workloads.
-
-**What did not help** (all measured, all still correct): removing the fake-CCM
-debug logging (Python stubs are cold, <0.1× effect); `SetGlobalSerialExecution`
-(parallel CPU execution is the faster default); raising `PerformanceInMips`
-(already effectively saturated). Lowering MIPS or coarsening the *boot* quantum
-breaks pairing outright.
-
-**Relationship to `west zmk-ble-test`.** That command runs BabbleSim
-(`nrf52_bsim`) BLE tests — protocol-accurate POSIX binaries, fast, driving a
-full Studio request/response script via [`ble-studio-host`](ble-studio-host/).
-`--ble` here instead runs the **real ARM binary** under Renode and only proves
-the encrypted-link Studio read reaches the DUT. They are complementary.
-
-**Current limitations (BLE mode).** Only LE SC **Just Works** is exercised;
-identity addresses come from the FICR model (static-random,
-`device_addr_for_machine(n)`); the radio's 31-byte payload cap forces the
-host-side DLE cap above. Steady-state test-time is addressed by
-`--ble-steady-quantum` (see **BLE-mode performance**); the pairing phase's 10 µs
-quantum is a hard floor for the current soft link-layer.
+> ble mode's encrypted read is a **functional** check, **not** a cryptographic
+> one — Renode has no AES-CCM engine, so both machines share a *fake*
+> identity-transform CCM. Do not use it to validate crypto. Details, and how a
+> real image boots at all under Renode, are in
+> [docs/renode-internals.md](docs/renode-internals.md).
 
 #### Requirements
 
-The smoke test's Studio RPC check compiles the workspace's `zmk-studio-messages`
-protos, so it needs the python `protobuf` runtime and the `protoc` compiler.
-Install the python side with `pip install -r requirements-test.txt` (`protoc` is
-a system package, e.g. `apt-get install protobuf-compiler`). Pass `--no-rpc` to
-skip this and check only the boot banner.
+uart mode's Studio RPC check compiles the workspace's `zmk-studio-messages`
+protos, so it needs the python `protobuf` runtime and the `protoc` compiler:
+`pip install -r requirements-test.txt` (`protoc` is a system package, e.g.
+`apt-get install protobuf-compiler`). Pass `--no-rpc` to check only the boot
+banner.
 
 #### GitHub Action
 
@@ -443,10 +234,24 @@ manifest:
 - uses: cormoran/zmk-west-commands/.github/actions/zmk-renode-test@main
   with:
     elf-path: build/renode/zephyr/zmk.elf
-    tests: tests/renode          # optional
+    # mode: ble                          # optional; default uart
+    # host-elf: build/zephyr/zephyr.elf  # optional; ble mode
+    tests: tests/renode                  # optional
 ```
 
 See `.github/actions/zmk-renode-test/README.md` for the full contract.
+
+#### Going deeper
+
+- **[docs/renode-testing.md](docs/renode-testing.md)** — the advanced knobs
+  (`--rtt`, `--steady-quantum`, `--min-virtual`, storage overrides), the
+  `ZMK_RENODE_*` module-test env contract, observing a real image over SEGGER
+  RTT, BLE-mode performance + the fine-then-coarse quantum, a troubleshooting
+  table, and limitations.
+- **[docs/renode-internals.md](docs/renode-internals.md)** — how a real
+  hardware image boots under Renode at all: the QSPI/USBD/FICR/NVMC stubs, the
+  NVS preload, the fake-CCM identity transform (with the two load-bearing
+  gotchas and the crypto disclaimer), and the DLE-27 / 10 µs quantum constraints.
 
 ### west zmk-ble-test
 
