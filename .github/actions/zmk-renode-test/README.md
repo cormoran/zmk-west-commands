@@ -3,15 +3,17 @@
 Thin wrapper around the `west zmk-renode-test` command (provided by
 `zmk-west-commands`). It boots an **already-built** ZMK firmware ELF in the
 [Renode](https://renode.io/) emulator, runs a boot + Studio smoke test, and
-optionally the module's own `tests/renode/*_test.py` files. Three modes
-(`mode: ble` default, `mode: uart`, `mode: split`) — see the repo README's
-`west zmk-renode-test` section and `docs/renode-testing.md`.
+optionally the module's own `tests/renode/*_test.py` files. Five modes
+(`mode: ble` default, `mode: usb`, `mode: uart`, `mode: split`,
+`mode: ble-split`) — see the repo README's `west zmk-renode-test` section and
+`docs/renode-testing.md`.
 
 ## Contract
 
 - **The caller builds the ELF.** This action does not build firmware. For the
-  default `ble` mode, build the exact `studio-rpc-usb-uart` hardware image (no
-  extra config) in an earlier step; for `uart` mode, build a `build.yaml`
+  default `ble` mode — and for `usb` mode, which runs the **same** artifact —
+  build the exact `studio-rpc-usb-uart` hardware image (no extra config) in an
+  earlier step; for `uart` mode, build a `build.yaml`
   artifact with the `renode-studio-uart` snippet and `CONFIG_ZMK_STUDIO=y` (see
   the repo README's `west zmk-renode-test` section). ble mode with `host-elf`
   also needs the `renode-ble-host` app built (see below).
@@ -30,13 +32,13 @@ optionally the module's own `tests/renode/*_test.py` files. Three modes
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `elf-path` | yes | – | Path to the built DUT firmware ELF (relative paths resolve against `$GITHUB_WORKSPACE`). For the default `ble` mode this is the real `studio-rpc-usb-uart` image; for `uart` mode the snippet-built artifact. |
-| `mode` | no | `ble` | `ble` (real hardware image over emulated BLE, no extra config), `uart` (snippet-built DUT over emulated UARTs), or `split` (wired split: `elf-path` central + `peripheral-elf` peripheral). |
-| `host-elf` | no | `""` | ble mode only: the built `renode-ble-host` app ELF. Given → full S4/S5 smoke; omitted → boot-liveness only. |
-| `peripheral-elf` | no | `""` | split mode only: the built peripheral half's ELF (`elf-path` is the central). Required for `mode: split`. |
+| `elf-path` | yes | – | Path to the built DUT firmware ELF (relative paths resolve against `$GITHUB_WORKSPACE`). For the default `ble` mode **and** `usb` mode this is the real `studio-rpc-usb-uart` image (one build serves both); for `uart` mode the snippet-built artifact. |
+| `mode` | no | `ble` | `ble` (real hardware image over emulated BLE, no extra config), `usb` (the same real image, Studio RPC over the emulated USB CDC), `uart` (snippet-built DUT over emulated UARTs), `split` (wired split: `elf-path` central + `peripheral-elf` peripheral), or `ble-split` (wireless split: central + `peripheral-elf` + `host-elf`). |
+| `host-elf` | no | `""` | ble / ble-split mode: the built `renode-ble-host` app ELF. ble: given → full S4/S5 smoke; omitted → boot-liveness only. Required for `mode: ble-split`. |
+| `peripheral-elf` | no | `""` | split / ble-split mode: the built peripheral half's ELF (`elf-path` is the central). Required for `mode: split` / `ble-split`. |
 | `tests` | no | `""` | Directory of the module's own `*_test.py` files, run after the smoke test. |
 | `renode-version` | no | `1.16.1` | Renode portable release to install (must match the checked-in `.repl`). |
-| `boot-timeout-seconds` | no | `20` | uart mode: seconds to wait for the ZMK boot banner. |
+| `boot-timeout-seconds` | no | `20` | uart/split/usb mode: seconds to wait for the boot banner. |
 
 ## Usage
 
