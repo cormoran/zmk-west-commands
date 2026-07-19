@@ -141,12 +141,15 @@ emulator, run a boot + Studio smoke test, then (optionally) the module's own
 `tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
 This command never builds firmware; the caller builds the ELF.
 
-There are **two modes** (`--mode`, default `ble`). `--elf` is the DUT in both:
+There are **four modes** (`--mode`, default `ble`). `--elf` is the DUT (the
+central half in `split` / `ble-split`):
 
 | Mode | DUT you build | What the smoke proves | Runtime |
 |---|---|---|---|
 | **`ble`** (default) | the exact `studio-rpc-usb-uart` **hardware** image you would flash — **no extra config** | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
+| **`ble-split`** | both halves of a wireless split: `--elf` = split CENTRAL (Studio), `--peripheral-elf` = split PERIPHERAL, `--host-elf` = host | The encrypted split link comes up (peripheral↔central L2) **then** the host does an encrypted Studio read **through** the central (peripheral → central → host) | ~3–6 min |
 | **`uart`** | ELF built with this repo's `renode-studio-uart` snippet | Boots (ZMK banner) and answers a core Studio `GetDeviceInfo` over an emulated UART | ~15 s |
+| **`split`** | a **wired-split** pair: `--elf` central + `--peripheral-elf` peripheral (this repo's `renode_wired_split` shield) | BOTH halves boot (ZMK banner) **and** a keypress injected on the peripheral is relayed over the wired split UART and processed by the central | ~20 s |
 
 ble is the default because it boots the **exact image you flash** — a module
 needs no Renode-specific build artifact. uart mode is faster and does a direct
@@ -193,6 +196,45 @@ $ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
 > real image boots at all under Renode, are in
 > [docs/renode-internals.md](docs/renode-internals.md).
 
+#### ble-split mode
+
+Tests a **wireless split** keyboard end to end — three emulated nRF52840s on one
+BLE medium:
+
+```
+split PERIPHERAL half  ──BLE (split, encrypted)──▶  split CENTRAL half  ──BLE (Studio, encrypted)──▶  host
+```
+
+The split CENTRAL half is BOTH a GAP central (it connects+pairs to the
+peripheral half) **and** a GAP peripheral (it advertises ZMK Studio and the host
+connects+pairs to *it*). The smoke asserts, in order: (1) the encrypted split
+link comes up — the peripheral reaches BT security L2 with the central; then
+(2) the host reaches an encrypted Studio GATT read (S4/S5) **through** the
+central. Reaching S5 through the split central proves the whole
+peripheral → central → host encrypted chain. It also asserts **0** radio
+"trimming" warnings (every on-air PDU stayed within Renode's 31-byte cap).
+
+```bash
+# build both split halves + the host (both halves cap DLE to 27 via the shield):
+$ west zmk-build <your-zmk-config> --build-yaml <...>/build-ble-split.yaml -af <central-artifact> -d build
+$ west zmk-build <your-zmk-config> --build-yaml <...>/build-ble-split.yaml -af <peripheral-artifact> -d build
+$ west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host \
+      -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your central's name>"'
+$ west zmk-renode-test --mode ble-split \
+      --elf build/<central-artifact>/zephyr/zmk.elf \
+      --peripheral-elf build/<peripheral-artifact>/zephyr/zmk.elf \
+      --host-elf build/ble-host/zephyr/zephyr.elf
+```
+
+See `tests/zmk-config/boards/shields/renode_split/` and `build-ble-split.yaml`
+for a worked example (central = `renode_split_left`, peripheral =
+`renode_split_right`).
+
+> **Heavy / opt-in.** Three CPUs re-syncing every 10 µs of virtual time run
+> ~0.1× realtime; both pairings settle by ~18 s virtual (~3 min wall observed,
+> longer on a shared CI runner). Same fake-CCM disclaimer as ble mode — plus
+> the split link is itself encrypted, so it uses the fake CCM too.
+
 #### uart mode
 
 The DUT is built with the `renode-studio-uart` snippet this repo ships as a
@@ -226,6 +268,40 @@ $ west zmk-renode-test --mode uart --elf build/renode/zephyr/zmk.elf --no-rpc
 > directly — see the in-repo example
 > `tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`, and
 > [docs/renode-testing.md](docs/renode-testing.md) for the newer-ZMK board note.
+
+#### split mode (wired)
+
+The DUT is a **wired split pair**: two ZMK images — a central and a peripheral —
+booted as two Renode machines whose split-link UARTs (`uart1`) are
+cross-connected through a Renode UART hub, so the emulated boards talk over
+ZMK's `zmk,wired-split` transport (no BLE). Each half's console is on `uart0`.
+The nRF52840 has only two UARTEs, so console + split link leave **no** UART for
+a Studio RPC transport — the smoke proves the split *pairing/relay*, not Studio:
+both halves reach the boot banner, then a keypress injected on the peripheral is
+relayed over the wire and processed by the central (which logs the relayed key
+position).
+
+Build both halves from this repo's one `renode_wired_split` shield (they differ
+only by `CONFIG_ZMK_SPLIT_ROLE_CENTRAL`), e.g. via
+[`tests/zmk-config/build-split.yaml`](tests/zmk-config/build-split.yaml):
+
+```yaml
+include:
+  - artifact: split-central
+    board: xiao_ble//zmk
+    shield: renode_wired_split
+    cmake-args: -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y
+  - artifact: split-peripheral
+    board: xiao_ble//zmk
+    shield: renode_wired_split
+```
+
+```bash
+$ west zmk-build <your-zmk-config> --build-yaml tests/zmk-config/build-split.yaml -af split -d build
+$ west zmk-renode-test --mode split \
+      --elf build/split-central/zephyr/zmk.elf \
+      --peripheral-elf build/split-peripheral/zephyr/zmk.elf
+```
 
 #### Requirements
 

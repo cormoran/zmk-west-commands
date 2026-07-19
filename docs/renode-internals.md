@@ -54,17 +54,26 @@ can advertise **distinct** BLE addresses (sharing one breaks BLE tests).
 per-machine copy of the FICR model; `renode_harness.device_addr_for_machine(n)`
 returns a deterministic static-random address per machine (machine 0 =
 `C0:E7:E7:E7:E7:E7`, machine 1 = `…:E8`, …). `boot_ble_pair` uses this so the
-DUT and host advertise different addresses.
+DUT and host advertise different addresses; `boot_ble_split` extends it to
+**three** machines (central = `…:E7`, peripheral = `…:E8`, host = `…:E9`).
 
 ## Fake CCM — NOT cryptographically real
 
-Renode has no AES-CCM engine, so both machines in ble mode share a *fake* CCM
-peripheral ([`platforms/models/ccm.py`](../scripts/lib/renode/platforms/models/ccm.py))
+Renode has no AES-CCM engine, so every machine in ble / ble-split mode shares a
+*fake* CCM peripheral
+([`platforms/models/ccm.py`](../scripts/lib/renode/platforms/models/ccm.py))
 that is an **identity transform**: it just appends/strips 4 dummy MIC bytes and
 reports MIC-OK. It only has to be self-consistent because both endpoints run the
 same fake. This is perfect for a **functional** test — the encrypted code paths
 on both sides execute for real — but it validates **nothing** about
 cryptography. Do not use it to check crypto correctness.
+
+> **ble-split: three machines, two encrypted links, one CCM.**
+> `boot_ble_split` puts the fake CCM in **all three** machines
+> (`three_machine_ble.resc`), because *both* on-air links are encrypted: the
+> split peripheral↔central link (ZMK split does an encrypted GATT link at BT
+> security L2) **and** the central↔host Studio link. The central holds both at
+> once (GAP central to the peripheral, GAP peripheral to the host).
 
 Two hard-won `ccm.py` details are preserved with comments in the file (each was
 a real failure mode):
@@ -84,6 +93,13 @@ a real failure mode):
   capping the **host** caps both directions — which is why the DUT needs no
   change. Without it the DUT negotiates larger PDUs and anything over `27+4`
   gets "trimmed" by the radio and the link breaks.
+  In **ble-split** the host's cap only covers the host↔central link; the
+  peripheral↔central split link is between two ZMK images that neither default
+  to 27, so the `renode_split` shield caps **both** split halves' `.conf` with
+  `CONFIG_BT_CTLR_DATA_LENGTH_MAX=27` (the central's single controller cap
+  covers both of its links). All three machines therefore cap to 27, and the
+  smoke asserts **0** `trimming` warnings as a regression guard. (ZMK exposes
+  this Zephyr-controller Kconfig directly, so no firmware patch is needed.)
 - **Global quantum `0.00001` (10 µs).** The two-machine `.resc` sets a 10 µs
   sync quantum; coarser values (even `0.00003` and `0.0001`) break the soft
   link-layer so the host never receives an advertisement. This 10 µs sync is the
@@ -93,3 +109,29 @@ a real failure mode):
   otherwise), but once the encrypted link is up (host `STAGE:S4`) the link-layer
   tolerates a 100×-coarser quantum — the basis of the `--steady-quantum`
   fine-then-coarse lever (see [renode-testing.md](renode-testing.md#ble-mode-performance)).
+  In **ble-split** the same 10 µs quantum is load-bearing through **both**
+  pairings (`three_machine_ble.resc`), and with three CPUs re-syncing it is the
+  heaviest run here (~0.1× realtime; both pairings settle by ~18 s virtual).
+
+## Wired split: the UART hub (no platform stubs needed)
+
+`--mode split` needs none of the above. A wired-split image built with the
+`renode_wired_split` shield disables USB + QSPI and does not enable BLE, so both
+halves boot on the **plain** `xiao_nrf52840.repl` — no USBD/QSPI/FICR/NVMC stubs,
+no NVS preload, no fake CCM.
+
+The one platform mechanic is the **UART hub**. `platforms/split_wired.resc`
+creates two machines (`central`, `peripheral`); each puts its console on `uart0`
+(its own TCP socket) and its split link on `uart1`. Both `uart1`s are connected
+to a single `emulation CreateUARTHub "split_link"`, which makes a point-to-point
+byte pipe between the two emulated boards — a UART hub, not a
+`CreateServerSocketTerminal`, precisely because the two ends are *both* emulated
+UARTs (a server-socket terminal is for a host-side TCP client). ZMK's
+`zmk,wired-split` transport (uart1 on both halves) then runs over it unchanged.
+
+The one gotcha is timing, not wiring: there is **no cross-machine
+execution-order guarantee at `t=0`**, so a peripheral split event emitted in the
+first few ms can arrive before the central's `uart_irq_rx_enable()` runs and be
+dropped. `renode_harness.boot_split_wired` connects both consoles before `start`;
+`run_split_smoke` then waits for both boot banners and settles ~3 s before
+injecting the keypress it asserts on.

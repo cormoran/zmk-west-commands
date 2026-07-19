@@ -1,0 +1,21 @@
+# Wired-split DUT pair for `west zmk-renode-test --mode split` (see the repo
+# README's `west zmk-renode-test` section). Kept in its own file, alongside
+# build-ble.yaml / build-renode.yaml and separate from build.yaml + the repo
+# unittests, because it targets ZMK's HWv2 `xiao_ble//zmk` board (only in newer
+# ZMK; see scripts/west-test-renode.yml). Build both halves with:
+#   west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-split.yaml -af split -d build
+#
+# Produces build/split-central/zephyr/zmk.elf and
+# build/split-peripheral/zephyr/zmk.elf. Both halves build from the ONE
+# renode_wired_split shield (console on uart0, ZMK wired-split transport on
+# uart1, no BLE/USB -- see that shield's overlay/conf); the only difference is
+# CONFIG_ZMK_SPLIT_ROLE_CENTRAL, set here for the central half. The two ELFs are
+# then booted as two machines on a Renode UART hub (platforms/split_wired.resc).
+include:
+  - artifact: split-central
+    board: xiao_ble//zmk
+    shield: renode_wired_split
+    cmake-args: -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y
+  - artifact: split-peripheral
+    board: xiao_ble//zmk
+    shield: renode_wired_split

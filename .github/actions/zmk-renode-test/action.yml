@@ -29,15 +29,29 @@ inputs:
       Test mode: `ble` (default -- boots the exact `studio-rpc-usb-uart`
       hardware image, no extra module config; Studio over emulated BLE, with
       `host-elf` a full S4/S5 pairing + encrypted read, else a boot-liveness
-      check) or `uart` (snippet-built DUT, Studio over emulated UARTs, which
-      requires a `renode-studio-uart` build.yaml artifact). See README.md.
+      check), `uart` (snippet-built DUT, Studio over emulated UARTs, which
+      requires a `renode-studio-uart` build.yaml artifact), `split` (wired
+      split -- `elf-path` is the central half, `peripheral-elf` the peripheral;
+      smoke = both boot banners + a peripheral keypress relayed to the central),
+      or `ble-split` (a WIRELESS split -- `elf-path` is the split CENTRAL,
+      `peripheral-elf` the split PERIPHERAL, `host-elf` the host; asserts the
+      encrypted split link comes up then the host reads Studio through the
+      central). See README.md.
     required: false
     default: "ble"
+  peripheral-elf:
+    description: >-
+      split / ble-split mode: path to the built split PERIPHERAL half's firmware
+      ELF (relative paths resolve against $GITHUB_WORKSPACE; `elf-path` is the
+      CENTRAL half). Required when mode is `split` or `ble-split`.
+    required: false
+    default: ""
   host-elf:
     description: >-
-      ble mode only: path to the built renode-ble-host app ELF (relative paths
-      resolve against $GITHUB_WORKSPACE). Given -> full S4/S5 Studio-over-BLE
-      smoke; omitted -> boot-liveness only. Build it with
+      ble / ble-split mode: path to the built renode-ble-host app ELF (relative
+      paths resolve against $GITHUB_WORKSPACE). In ble mode: given -> full S4/S5
+      Studio-over-BLE smoke, omitted -> boot-liveness only. Required for
+      ble-split mode. Build it with
       `west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`,
       passing `-DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your DUT name>"'` when the
       DUT's advertised name does not start with the default "Module".
@@ -107,6 +121,7 @@ runs:
         IN_ELF_PATH: ${{ inputs.elf-path }}
         IN_MODE: ${{ inputs.mode }}
         IN_HOST_ELF: ${{ inputs.host-elf }}
+        IN_PERIPHERAL_ELF: ${{ inputs.peripheral-elf }}
         IN_TESTS: ${{ inputs.tests }}
         IN_RENODE_VERSION: ${{ inputs.renode-version }}
         IN_BOOT_TIMEOUT: ${{ inputs.boot-timeout-seconds }}
@@ -126,6 +141,14 @@ runs:
         args=(--elf "$elf_path" --mode "$IN_MODE" --renode-version "$IN_RENODE_VERSION" --boot-timeout "$IN_BOOT_TIMEOUT")
         if [ -n "$IN_HOST_ELF" ]; then
           args+=(--host-elf "$(abspath "$IN_HOST_ELF")")
+        fi
+        if [ -n "$IN_PERIPHERAL_ELF" ]; then
+          peripheral_elf="$(abspath "$IN_PERIPHERAL_ELF")"
+          if [ ! -f "$peripheral_elf" ]; then
+            echo "::error::peripheral-elf does not exist: $peripheral_elf (this action does not build firmware -- build it in an earlier step; see README.md)"
+            exit 1
+          fi
+          args+=(--peripheral-elf "$peripheral_elf")
         fi
         if [ -n "$IN_TESTS" ]; then
           west zmk-renode-test "$(abspath "$IN_TESTS")" "${args[@]}"
