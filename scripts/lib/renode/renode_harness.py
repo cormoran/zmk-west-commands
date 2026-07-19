@@ -602,6 +602,13 @@ def boot_single_real(
         # file synchronously here, so it is safe to delete afterwards).
         session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
         session.go()
+    except Exception:
+        # A half-booted session would otherwise leak its Renode process (the
+        # caller never gets a session to stop()) -- seen when a UART socket
+        # connect fails on a heavily-loaded host, where the leaked emulation
+        # then slows every subsequent boot (e.g. a smoke retry) further.
+        session.stop()
+        raise
     finally:
         for tmp in (repl_path, ff_path, ficr_path):
             if tmp is None:
