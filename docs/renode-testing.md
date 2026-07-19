@@ -45,7 +45,7 @@ Advanced (rarely needed):
 |---|---|---|
 | `--rtt` | ble (liveness) | capture Zephyr SEGGER RTT log output during the run and fail on RTT fatal lines. See [Observing a real image over SEGGER RTT](#observing-a-real-image-over-segger-rtt). |
 | `--min-virtual` | ble (liveness) | virtual seconds to run before PC sampling (default 20). |
-| `--virtual-budget` | ble / ble-split (with host) | virtual seconds to reach the encrypted read before failing (ble default 20, ~3.3 s typical; ble-split raises this to ≥40, ~18 s typical). |
+| `--virtual-budget` | ble / ble-split (with host) | virtual seconds to reach the encrypted read before failing (ble default 20, ~3.3 s typical; ble-split floors this to ≥120 s **per attempt**, ~18 s typical, and retries the whole emulation once). |
 | `--steady-quantum` | ble (with host) | after S4, raise the global time-sync quantum (e.g. `0.001`) for the steady-state phase. See [ble-mode performance](#ble-mode-performance). |
 | `--storage-addr` / `--storage-size` | ble | NVS `storage_partition` address/size preloaded as erased `0xFF` (default `0xec000`/`0x8000`, xiao_ble). |
 | `--renode-version` | both | Renode portable release to install/use (default `1.16.1`; must match the checked-in `.repl`). |
@@ -161,14 +161,23 @@ stayed within Renode's 31-byte cap (see the DLE-27 note in
 Both the split link and the Studio link are encrypted, so **all three** machines
 carry the fake CCM.
 
-Under the 3-machine load a first pairing attempt on either link can lose an SMP
-packet; ZMK (and the host app) simply disconnect, rescan and retry, and a later
-attempt succeeds — so transient `Security failed` / host-fail markers are
-**tolerated**, and the smoke only fails on the time budgets. Both pairings
-settle by ~18 s virtual; at ~0.1× realtime that is ~**3 min wall** on a
-lightly-loaded host (longer on a shared CI runner — the job budgets 60 min).
-See [ble-mode performance](#ble-mode-performance) for the quantum cost; three
-CPUs at the load-bearing 10 µs quantum is the heaviest configuration here.
+Under the 3-machine load the split and host pairings race: both do an LE Secure
+Connections pairing, and on Renode's shared BLE medium two pairings running
+close together can cross their SMP DHKey-Check PDUs (`Unexpected SMP code 0x0d`
+→ `in-progress pairing has been deleted` → `err 9`). Whichever link pairs first
+wins; the loser can fail to recover within one emulation's budget. This is a
+transient property of the emulated radio, **not** a firmware regression — both
+links pair fine in isolation. Within an attempt, a lost SMP packet that ZMK (or
+the host) recovers from by disconnect/rescan/retry is **tolerated** (transient
+`Security failed` / host-fail markers only count for the report); the attempt
+only fails on the time budget. On top of that, `run_ble_split_smoke` retries the
+**whole emulation once** (a fresh boot re-rolls the race), so a genuine break —
+which fails *both* attempts — is still caught. A winning attempt settles by
+~18 s virtual (default per-attempt budget 120 s); at ~0.1× realtime that is
+~**3 min wall** on a lightly-loaded host, and a full retry roughly doubles the
+worst case (the CI job budgets 60 min). See
+[ble-mode performance](#ble-mode-performance) for the quantum cost; three CPUs
+at the load-bearing 10 µs quantum is the heaviest configuration here.
 
 Building the two halves + host — the split shield caps
 `CONFIG_BT_CTLR_DATA_LENGTH_MAX=27` on **both** halves (see

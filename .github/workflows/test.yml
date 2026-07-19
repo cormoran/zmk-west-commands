@@ -150,10 +150,12 @@ jobs:
   renode-ble-split:
     runs-on: ubuntu-latest
     # HEAVY: three emulated nRF52840s on one BLE medium at a 10us quantum runs
-    # ~0.1x realtime; both pairings (split L2 then host S4/S5) complete by
-    # ~18s virtual (~3 min wall observed locally). Give a generous ceiling for a
-    # slow shared runner + the two extra firmware builds.
-    timeout-minutes: 60
+    # ~0.1x realtime; a winning attempt completes by ~18s virtual (~3 min wall).
+    # The split and host LE-SC pairings race on the shared radio, so the smoke
+    # retries the whole emulation once (see renode_smoke.run_ble_split_smoke);
+    # give a generous ceiling for two 120s-virtual attempts + the two extra
+    # firmware builds on a slow shared runner.
+    timeout-minutes: 90
     container:
       image: zmkfirmware/zmk-build-arm:stable
     name: Renode BLE-split

@@ -522,13 +522,78 @@ def run_ble_split_smoke(
     peripheral_elf: Path,
     host_elf: Path,
     renode_path: str,
-    virtual_budget: float = 40.0,
+    virtual_budget: float = 120.0,
+    wall_budget: float = 1500.0,
+    storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
+    storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
+    steady_quantum: str | None = None,
+    max_attempts: int = 2,
+) -> None:
+    """ble-split-mode smoke with a bounded whole-emulation retry.
+
+    Runs `_run_ble_split_attempt` (one fresh 3-machine boot) up to `max_attempts`
+    times, succeeding on the first attempt that reaches the full chain.
+
+    WHY the retry: the split (peripheral<->central) and host (host<->central)
+    links each do an LE Secure Connections pairing, and on Renode's shared BLE
+    medium two pairings running close together can cross their SMP DHKey-Check
+    PDUs ("Unexpected SMP code 0x0d" -> "in-progress pairing has been deleted" ->
+    err 9). Whichever link pairs first wins; the loser can fail to recover within
+    the budget. This is a transient property of the emulated radio, NOT a
+    firmware regression (both links pair fine in isolation, and a real radio has
+    no such cross-talk). A fresh emulation re-rolls the timing, so a single
+    bounded retry makes the smoke reliably green without masking a real failure:
+    a genuine break fails BOTH attempts. Sequencing the two pairings by delaying
+    the host does NOT help -- once one link is an active connection its
+    connection events collide with the other link's pairing just the same.
+
+    See `_run_ble_split_attempt` for the per-attempt assertions and parameters.
+    """
+    last_err: AssertionError | None = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            print(
+                f"--- ble-split attempt {attempt}/{max_attempts} "
+                "(fresh emulation; previous attempt hit the transient SMP race) ---",
+                file=sys.stderr,
+            )
+        try:
+            _run_ble_split_attempt(
+                central_elf=central_elf,
+                peripheral_elf=peripheral_elf,
+                host_elf=host_elf,
+                renode_path=renode_path,
+                virtual_budget=virtual_budget,
+                wall_budget=wall_budget,
+                storage_addr=storage_addr,
+                storage_size=storage_size,
+                steady_quantum=steady_quantum,
+            )
+            if attempt > 1:
+                print(f"ble-split smoke OK on attempt {attempt}", file=sys.stderr)
+            return
+        except AssertionError as err:
+            last_err = err
+            print(
+                f"ble-split attempt {attempt}/{max_attempts} FAILED: {err}",
+                file=sys.stderr,
+            )
+    assert last_err is not None
+    raise last_err
+
+
+def _run_ble_split_attempt(
+    central_elf: Path,
+    peripheral_elf: Path,
+    host_elf: Path,
+    renode_path: str,
+    virtual_budget: float = 120.0,
     wall_budget: float = 1500.0,
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
 ) -> None:
-    """ble-split-mode smoke: boot a WIRELESS split keyboard (central + peripheral
+    """One ble-split attempt: boot a WIRELESS split keyboard (central + peripheral
     halves) and the renode-ble-host on ONE Renode BLE medium (fake CCM in all
     three machines), then assert the full peripheral -> central -> host encrypted
     chain, IN ORDER:

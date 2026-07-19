@@ -300,7 +300,7 @@ class ZMKRenodeTest(WestCommand):
                 peripheral_elf=peripheral_elf,
                 host_elf=host_elf,
                 renode_path=renode_path,
-                virtual_budget=max(args.virtual_budget, 40.0),
+                virtual_budget=max(args.virtual_budget, 120.0),
                 **kwargs,
             )
         except AssertionError as err:
