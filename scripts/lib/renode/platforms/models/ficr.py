@@ -8,6 +8,17 @@
 # serves real hardware-like values for every FICR word ZMK/Zephyr/nrfx touches
 # at boot (flash geometry, device id, ER/IR, BLE identity address); everything
 # else reads 0xFFFFFFFF, like real erased/unused FICR words. Read-only.
+#
+# DEVICEADDR[0]/[1] hold the BLE identity (a static-random address:
+# C0:E7:E7:E7:E7:E7 by default -- the top two bits of the MSB must be 0b11).
+# They are pulled out as named constants below so the harness can materialize a
+# *per-machine* copy of this model with a distinct address: two machines in one
+# emulation must not share a BLE address. renode_harness._materialize_ficr()
+# rewrites these two lines (matched by their `DEVICEADDR0 = ` / `DEVICEADDR1 = `
+# prefix); keep them on their own line as `NAME = 0x...`.
+DEVICEADDR0 = 0xE7E7E7E7  # FICR DEVICEADDR[0] = low 32 bits of the BLE address
+DEVICEADDR1 = 0x0000C0E7  # FICR DEVICEADDR[1] = high 16 bits (MSB 0xC0 = static)
+
 vals = {
     0x010: 0x00001000,  # CODEPAGESIZE = 4 KiB
     0x014: 0x00000100,  # CODESIZE = 256 pages (1 MiB)
@@ -22,8 +33,8 @@ vals = {
     0x098: 0x31323334,  # IR[2]
     0x09C: 0x41424344,  # IR[3]
     0x0A0: 0x00000001,  # DEVICEADDRTYPE = random
-    0x0A4: 0xE7E7E7E7,  # DEVICEADDR[0]
-    0x0A8: 0x0000C0E7,  # DEVICEADDR[1]
+    0x0A4: DEVICEADDR0,  # DEVICEADDR[0]
+    0x0A8: DEVICEADDR1,  # DEVICEADDR[1]
     0x100: 0x00052840,  # INFO.PART
     0x104: 0x41414130,  # INFO.VARIANT "AAA0"
     0x108: 0x00002004,  # INFO.PACKAGE
