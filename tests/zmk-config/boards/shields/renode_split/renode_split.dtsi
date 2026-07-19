@@ -1,0 +1,53 @@
+/*
+ * Shared devicetree for the renode_split shield -- a minimal two-part BLE
+ * split used only by `west zmk-renode-test --mode ble-split` (see the repo
+ * README's `west zmk-renode-test` section and docs/renode-testing.md).
+ *
+ * Both halves (renode_split_left = central, renode_split_right = peripheral)
+ * include this. Like renode_tester it is Studio-ready: a zmk,physical-layout
+ * with key_physical_attrs and NO chosen zmk,matrix-transform (CONFIG_ZMK_STUDIO
+ * build-asserts on exactly that shape -- the transform is referenced from the
+ * physical layout instead). The 4-key direct kscan / 2x2 transform / 4-key
+ * layout all agree in size so the shared keymap compiles for both halves; the
+ * emulated split never produces real key events, this is a boot + pairing test.
+ */
+#include <dt-bindings/zmk/matrix_transform.h>
+#include <physical_layouts.dtsi>
+
+/ {
+	chosen {
+		zmk,kscan = &kscan0;
+	};
+
+	kscan0: kscan {
+		compatible = "zmk,kscan-gpio-direct";
+		input-gpios
+			= <&xiao_d 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			;
+	};
+
+	transform0: keymap_transform {
+		compatible = "zmk,matrix-transform";
+		columns = <2>;
+		rows = <2>;
+		map = <
+		RC(0,0)  RC(0,1)
+		RC(1,0)  RC(1,1)
+		>;
+	};
+
+	physical_layout0: physical_layout0 {
+		compatible = "zmk,physical-layout";
+		display-name = "Renode";
+		transform = <&transform0>;
+		keys  /* w   h    x    y   rot  rx  ry */
+			= <&key_physical_attrs 100 100   0   0 0 0 0>
+			, <&key_physical_attrs 100 100 100   0 0 0 0>
+			, <&key_physical_attrs 100 100   0 100 0 0 0>
+			, <&key_physical_attrs 100 100 100 100 0 0 0>
+			;
+	};
+};

@@ -54,17 +54,26 @@ can advertise **distinct** BLE addresses (sharing one breaks BLE tests).
 per-machine copy of the FICR model; `renode_harness.device_addr_for_machine(n)`
 returns a deterministic static-random address per machine (machine 0 =
 `C0:E7:E7:E7:E7:E7`, machine 1 = `…:E8`, …). `boot_ble_pair` uses this so the
-DUT and host advertise different addresses.
+DUT and host advertise different addresses; `boot_ble_split` extends it to
+**three** machines (central = `…:E7`, peripheral = `…:E8`, host = `…:E9`).
 
 ## Fake CCM — NOT cryptographically real
 
-Renode has no AES-CCM engine, so both machines in ble mode share a *fake* CCM
-peripheral ([`platforms/models/ccm.py`](../scripts/lib/renode/platforms/models/ccm.py))
+Renode has no AES-CCM engine, so every machine in ble / ble-split mode shares a
+*fake* CCM peripheral
+([`platforms/models/ccm.py`](../scripts/lib/renode/platforms/models/ccm.py))
 that is an **identity transform**: it just appends/strips 4 dummy MIC bytes and
 reports MIC-OK. It only has to be self-consistent because both endpoints run the
 same fake. This is perfect for a **functional** test — the encrypted code paths
 on both sides execute for real — but it validates **nothing** about
 cryptography. Do not use it to check crypto correctness.
+
+> **ble-split: three machines, two encrypted links, one CCM.**
+> `boot_ble_split` puts the fake CCM in **all three** machines
+> (`three_machine_ble.resc`), because *both* on-air links are encrypted: the
+> split peripheral↔central link (ZMK split does an encrypted GATT link at BT
+> security L2) **and** the central↔host Studio link. The central holds both at
+> once (GAP central to the peripheral, GAP peripheral to the host).
 
 Two hard-won `ccm.py` details are preserved with comments in the file (each was
 a real failure mode):
@@ -84,6 +93,13 @@ a real failure mode):
   capping the **host** caps both directions — which is why the DUT needs no
   change. Without it the DUT negotiates larger PDUs and anything over `27+4`
   gets "trimmed" by the radio and the link breaks.
+  In **ble-split** the host's cap only covers the host↔central link; the
+  peripheral↔central split link is between two ZMK images that neither default
+  to 27, so the `renode_split` shield caps **both** split halves' `.conf` with
+  `CONFIG_BT_CTLR_DATA_LENGTH_MAX=27` (the central's single controller cap
+  covers both of its links). All three machines therefore cap to 27, and the
+  smoke asserts **0** `trimming` warnings as a regression guard. (ZMK exposes
+  this Zephyr-controller Kconfig directly, so no firmware patch is needed.)
 - **Global quantum `0.00001` (10 µs).** The two-machine `.resc` sets a 10 µs
   sync quantum; coarser values (even `0.00003` and `0.0001`) break the soft
   link-layer so the host never receives an advertisement. This 10 µs sync is the
@@ -93,6 +109,9 @@ a real failure mode):
   otherwise), but once the encrypted link is up (host `STAGE:S4`) the link-layer
   tolerates a 100×-coarser quantum — the basis of the `--steady-quantum`
   fine-then-coarse lever (see [renode-testing.md](renode-testing.md#ble-mode-performance)).
+  In **ble-split** the same 10 µs quantum is load-bearing through **both**
+  pairings (`three_machine_ble.resc`), and with three CPUs re-syncing it is the
+  heaviest run here (~0.1× realtime; both pairings settle by ~18 s virtual).
 
 ## Wired split: the UART hub (no platform stubs needed)
 

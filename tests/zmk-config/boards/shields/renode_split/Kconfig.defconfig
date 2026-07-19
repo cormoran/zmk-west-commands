@@ -1,0 +1,18 @@
+if SHIELD_RENODE_SPLIT_LEFT
+
+# The central half is the DUT the renode-ble-host scans for -- its advertised
+# name must start with CONFIG_RENODE_BLE_HOST_TARGET_NAME ("Renode").
+config ZMK_KEYBOARD_NAME
+    default "Renode"
+
+config ZMK_SPLIT_ROLE_CENTRAL
+    default y
+
+endif
+
+if SHIELD_RENODE_SPLIT_LEFT || SHIELD_RENODE_SPLIT_RIGHT
+
+config ZMK_SPLIT
+    default y
+
+endif

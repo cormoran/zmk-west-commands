@@ -1,0 +1,2 @@
+/* renode_split central half (left). See renode_split.dtsi. */
+#include "renode_split.dtsi"

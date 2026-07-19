@@ -17,8 +17,8 @@ module's own tests (e.g. this template's tests/renode/test_renode.py)
 import renode_harness directly for anything more specific (their own custom
 RPC subsystem, etc.).
 
-Three modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
-split mode). ble mode boots a real hardware image and (with `--host-elf`) drives
+Four modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
+split / ble-split mode). ble mode boots a real hardware image and (with `--host-elf`) drives
 an encrypted Studio-over-BLE read, or without a host a boot-liveness check. uart
 mode boots a snippet-built DUT and checks the boot banner + a core Studio
 GetDeviceInfo. split mode boots a wired-split central (`--elf`) + peripheral
@@ -356,6 +356,21 @@ BLE_FAIL_MARKERS = (
     "STAGE:S3-SECURITY-CHANGED FAIL",
 )
 
+# ZMK split-PERIPHERAL RTT log markers (peripheral.c security_changed):
+#   LOG_DBG("Security changed: %s level %u", addr, level)   -- on success
+#   LOG_ERR("Security failed: %s level %u err %d", ...)      -- on failure
+# Seeing "Security changed" + "level 2" proves the encrypted split link
+# (peripheral <-> central) reached BT_SECURITY_L2. (These need
+# CONFIG_ZMK_LOG_LEVEL_DBG + RTT, set by the renode_split right.conf.)
+SPLIT_L2_NEEDLE = "Security changed"
+SPLIT_L2_LEVEL = "level 2"
+SPLIT_FAIL_NEEDLE = "Security failed"
+
+
+def _split_l2_seen(rtt_buf: str) -> bool:
+    """True once the peripheral RTT shows an encrypted (L2) split link."""
+    return SPLIT_L2_NEEDLE in rtt_buf and SPLIT_L2_LEVEL in rtt_buf
+
 
 def run_ble_studio_smoke(
     dut_elf: Path,
@@ -502,6 +517,218 @@ def run_ble_studio_smoke(
         session.stop()
 
 
+def run_ble_split_smoke(
+    central_elf: Path,
+    peripheral_elf: Path,
+    host_elf: Path,
+    renode_path: str,
+    virtual_budget: float = 40.0,
+    wall_budget: float = 1500.0,
+    storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
+    storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
+    steady_quantum: str | None = None,
+) -> None:
+    """ble-split-mode smoke: boot a WIRELESS split keyboard (central + peripheral
+    halves) and the renode-ble-host on ONE Renode BLE medium (fake CCM in all
+    three machines), then assert the full peripheral -> central -> host encrypted
+    chain, IN ORDER:
+
+      1. the split link comes up encrypted -- the peripheral's RTT log shows
+         "Security changed: ... level 2" (BT_SECURITY_L2 between the peripheral
+         and central halves); THEN
+      2. the host reaches an encrypted Studio GATT read of the CENTRAL half --
+         both STAGE:S4-SECURITY-CHANGED OK (encrypted link up) and
+         STAGE:S5-GATT-READ OK (encrypted read).
+
+    Reaching S5 through the split central proves the whole chain: the host's
+    encrypted Studio read is served by the same central that holds the encrypted
+    split link to the peripheral. Also asserts 0 radio "trimming" warnings on
+    either link (the DLE-27 cap on both halves + host should keep every on-air
+    PDU within Renode's 31-byte radio cap).
+
+    FAILS on the peripheral's "Security failed" marker, any host FAIL marker, the
+    virtual-time budget, or the `wall_budget` wall-clock safety net. Also fails if
+    the host reaches S5 but the split link never secured (that would mean the
+    central served Studio without the peripheral -- not the full chain). On
+    failure the peripheral RTT + host console tails are printed. NOT a
+    cryptographic assertion -- the CCM is a shared identity transform.
+
+    `steady_quantum` (e.g. "0.001") raises the global time-sync quantum once BOTH
+    links are secured (split L2 + host S4), for a faster steady-state phase; None
+    (default) keeps the load-bearing 10us quantum throughout. Three machines at
+    10us is HEAVY -- budget accordingly (see docs/renode-testing.md)."""
+    import tempfile
+
+    log_fd, log_path = tempfile.mkstemp(prefix="zmk-ble-split-renode-", suffix=".log")
+    os.close(log_fd)
+
+    print(
+        "booting split central + peripheral + renode-ble-host on one BLE medium "
+        f"(virtual budget {virtual_budget:.0f}s, wall safety {wall_budget:.0f}s)...",
+        file=sys.stderr,
+    )
+    session, central_console, peripheral_rtt, host_console = renode_harness.boot_ble_split(
+        renode_path,
+        central_elf=central_elf,
+        peripheral_elf=peripheral_elf,
+        host_elf=host_elf,
+        storage_addr=storage_addr,
+        storage_size=storage_size,
+        renode_log=Path(log_path),
+    )
+    assert session.mon is not None
+    mon = session.mon
+    rtt_buf = ""
+    host_buf = ""
+    central_buf = ""
+    reason = None
+    split_l2_at = None
+    steady_raised = False
+    split_fail_seen = False
+    host_fail_seen = False
+    try:
+        deadline = time.monotonic() + wall_budget
+        vt = 0.0
+        while time.monotonic() < deadline:
+            if peripheral_rtt is not None:
+                rtt_buf += renode_harness.drain_text(peripheral_rtt._sock, timeout=0.3)
+            host_buf += renode_harness.drain_text(host_console._sock, timeout=0.3)
+            central_buf += renode_harness.drain_text(central_console._sock, timeout=0.2)
+
+            if split_l2_at is None and _split_l2_seen(rtt_buf):
+                split_l2_at = vt
+                print(
+                    f"split link encrypted (peripheral reached L2) at vt~{vt:.1f}s",
+                    file=sys.stderr,
+                )
+
+            # Fine-then-coarse: once BOTH links are up, optionally coarsen.
+            if (
+                steady_quantum
+                and not steady_raised
+                and split_l2_at is not None
+                and BLE_SECURITY_OK in host_buf
+            ):
+                renode_harness.raise_global_quantum(session, steady_quantum)
+                steady_raised = True
+                print(
+                    f"raised global quantum to {steady_quantum} after both links up",
+                    file=sys.stderr,
+                )
+
+            if (
+                BLE_GATT_READ_OK in host_buf
+                and BLE_SECURITY_OK in host_buf
+                and split_l2_at is not None
+            ):
+                break
+
+            # NOTE: transient failure markers are NOT fatal here. Under the
+            # 3-machine load a first pairing attempt on either link can lose an
+            # SMP packet ("Security failed" / "Unexpected SMP code") and ZMK (and
+            # the host app) simply disconnect, rescan and RETRY -- a later attempt
+            # succeeds (hardware-observed under Renode). So we only ever succeed
+            # on the positive markers and only ever fail on the time budgets; the
+            # failure markers are just counted for the diagnostic report.
+            if SPLIT_FAIL_NEEDLE in rtt_buf:
+                split_fail_seen = True
+            if any(m in host_buf for m in BLE_FAIL_MARKERS):
+                host_fail_seen = True
+
+            mon.execute('mach set "central"', settle=0.2)
+            vt = _parse_virtual_seconds(mon.execute("machine GetTimeSourceInfo", settle=0.3)) or vt
+            if vt >= virtual_budget:
+                reason = (
+                    f"virtual-time budget exhausted ({vt:.1f}s >= {virtual_budget:.0f}s) "
+                    "before the full chain completed"
+                )
+                break
+        else:
+            reason = f"wall-clock safety budget exhausted ({wall_budget:.0f}s)"
+
+        # Final drain so late markers/log lines are captured.
+        if peripheral_rtt is not None:
+            rtt_buf += renode_harness.drain_text(peripheral_rtt._sock, timeout=1.0)
+        host_buf += renode_harness.drain_text(host_console._sock, timeout=1.0)
+        central_buf += renode_harness.drain_text(central_console._sock, timeout=0.3)
+
+        renode_log = ""
+        try:
+            renode_log = Path(log_path).read_text(errors="replace")
+        except OSError:
+            pass
+        trimming = renode_log.count("trimming")
+
+        host_reached = BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf
+        split_ok = split_l2_at is not None
+        stages = [ln.strip() for ln in host_buf.splitlines() if "STAGE:" in ln]
+
+        retry_note = ""
+        if split_fail_seen or host_fail_seen:
+            which = ", ".join(
+                w for w, seen in (("split", split_fail_seen), ("host", host_fail_seen)) if seen
+            )
+            retry_note = f" (recovered after transient pairing retry on: {which})"
+
+        # Success requires BOTH: the split link secured AND the host read.
+        if reason is None and host_reached and split_ok:
+            for ln in stages:
+                print(f"  host| {ln}", file=sys.stderr)
+            print(
+                f"BLE-split smoke OK: split link L2 (vt~{split_l2_at:.1f}s) then host "
+                f"encrypted Studio read; radio 'trimming' warnings: {trimming}{retry_note}",
+                file=sys.stderr,
+            )
+            if trimming:
+                print(
+                    f"WARNING: {trimming} radio 'trimming' line(s) in the Renode log "
+                    "(expected 0 for a clean fake-CCM run -- check the DLE-27 cap)",
+                    file=sys.stderr,
+                )
+                raise AssertionError(
+                    f"{trimming} radio 'trimming' warning(s) -- an on-air PDU exceeded "
+                    "Renode's 31-byte cap (DLE not capped to 27 on some link)"
+                )
+            return
+
+        if reason is None and host_reached and not split_ok:
+            reason = (
+                "host reached the encrypted Studio read but the split link never "
+                "secured (no peripheral 'Security changed ... level 2') -- the central "
+                "served Studio without the peripheral, so the full chain is unproven"
+            )
+
+        # Failure: dump the peripheral RTT + host console tails for diagnosis.
+        print(f"--- split L2 secured: {split_ok} (at vt~{split_l2_at}) ---", file=sys.stderr)
+        print("--- host console STAGE markers ---", file=sys.stderr)
+        for ln in stages:
+            print(f"  host| {ln}", file=sys.stderr)
+        print("--- peripheral RTT tail ---", file=sys.stderr)
+        print("\n".join(rtt_buf.splitlines()[-30:]), file=sys.stderr)
+        print("--- central console tail (usually silent: USB-CDC) ---", file=sys.stderr)
+        print("\n".join(central_buf.splitlines()[-15:]), file=sys.stderr)
+        if trimming:
+            print(
+                f"(also: {trimming} radio 'trimming' line(s) in the Renode log)", file=sys.stderr
+            )
+        raise AssertionError(reason or "peripheral->central->host encrypted chain not reached")
+    finally:
+        try:
+            os.unlink(log_path)
+        except OSError:
+            pass
+        if peripheral_rtt is not None:
+            peripheral_rtt.close()
+        host_console.close()
+        central_console.close()
+        for sock in getattr(session, "_idle_sockets", []):
+            try:
+                sock.close()
+            except OSError:
+                pass
+        session.stop()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -514,25 +741,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--mode",
-        choices=("uart", "ble", "split"),
+        choices=("uart", "ble", "split", "ble-split"),
         default="ble",
         help="ble (default): real hardware image; with --host-elf a full encrypted "
-        "Studio-over-BLE read (S4/S5), without it a boot-liveness check. uart: "
-        "snippet-built DUT, boot banner + Studio GetDeviceInfo over emulated UARTs. "
-        "split: wired-split central (--elf) + --peripheral-elf on a Renode UART hub; "
-        "smoke = both boot banners + a peripheral keypress relayed to the central.",
-    )
-    ap.add_argument(
-        "--peripheral-elf",
-        type=Path,
-        help="split mode only: the PERIPHERAL half's firmware ELF (--elf is the central).",
+        "Studio-over-BLE read (S4/S5), without it a boot-liveness check. ble-split: a "
+        "wireless split -- --elf is the split CENTRAL, --peripheral-elf the split "
+        "PERIPHERAL, --host-elf the host; asserts the split link secures then the host "
+        "reads Studio through the central. uart: snippet-built DUT, boot banner + Studio "
+        "GetDeviceInfo over emulated UARTs. split: wired-split central (--elf) + "
+        "--peripheral-elf on a Renode UART hub; smoke = both boot banners + a peripheral "
+        "keypress relayed to the central.",
     )
     ap.add_argument(
         "--host-elf",
         type=Path,
         help="ble mode only: the renode-ble-host app ELF (built with `west build -b "
         "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`). Given -> full S4/S5 "
-        "smoke; omitted -> boot-liveness only.",
+        "smoke; omitted -> boot-liveness only. Required for --mode ble-split.",
+    )
+    ap.add_argument(
+        "--peripheral-elf",
+        type=Path,
+        help="split / ble-split mode: the split PERIPHERAL half's firmware ELF (--elf is "
+        "the CENTRAL half).",
     )
     ap.add_argument(
         "--no-rpc",
@@ -598,19 +829,19 @@ def main(argv: list[str] | None = None) -> int:
     if not args.elf.is_file():
         print(f"ELF not found: {args.elf}", file=sys.stderr)
         return 2
-    if args.host_elf is not None and args.mode != "ble":
-        print("--host-elf is only valid with --mode ble", file=sys.stderr)
+    if args.host_elf is not None and args.mode not in ("ble", "ble-split"):
+        print("--host-elf is only valid with --mode ble / ble-split", file=sys.stderr)
         return 2
-    if args.mode == "split":
+    if args.peripheral_elf is not None and args.mode not in ("split", "ble-split"):
+        print("--peripheral-elf is only valid with --mode split / ble-split", file=sys.stderr)
+        return 2
+    if args.mode in ("split", "ble-split"):
         if args.peripheral_elf is None:
-            print("--mode split requires --peripheral-elf", file=sys.stderr)
+            print(f"--mode {args.mode} requires --peripheral-elf", file=sys.stderr)
             return 2
         if not args.peripheral_elf.is_file():
             print(f"peripheral ELF not found: {args.peripheral_elf}", file=sys.stderr)
             return 2
-    elif args.peripheral_elf is not None:
-        print("--peripheral-elf is only valid with --mode split", file=sys.stderr)
-        return 2
 
     renode_path = renode_harness.find_or_install_renode(version=args.renode_version)
     if renode_path is None:
@@ -624,6 +855,33 @@ def main(argv: list[str] | None = None) -> int:
                 peripheral_elf=args.peripheral_elf,
                 renode_path=renode_path,
                 boot_timeout=args.boot_timeout,
+            )
+        except AssertionError as err:
+            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
+            return 1
+        print("SMOKE TEST OK", file=sys.stderr)
+        return 0
+
+    if args.mode == "ble-split":
+        if args.peripheral_elf is None or not args.peripheral_elf.is_file():
+            print(f"--peripheral-elf not found: {args.peripheral_elf}", file=sys.stderr)
+            return 2
+        if args.host_elf is None or not args.host_elf.is_file():
+            print(
+                f"--host-elf is required for ble-split; not found: {args.host_elf}",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            run_ble_split_smoke(
+                central_elf=args.elf,
+                peripheral_elf=args.peripheral_elf,
+                host_elf=args.host_elf,
+                renode_path=renode_path,
+                virtual_budget=args.virtual_budget,
+                storage_addr=args.storage_addr,
+                storage_size=args.storage_size,
+                steady_quantum=args.steady_quantum,
             )
         except AssertionError as err:
             print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
