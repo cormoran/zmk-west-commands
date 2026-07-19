@@ -7,9 +7,9 @@ and limitations. For how a real hardware image boots under emulation at all
 (platform stubs, fake CCM, on-air constraints) see
 [renode-internals.md](renode-internals.md).
 
-`west zmk-renode-test` has **two modes** (`--mode`, default `ble` — it boots the
-exact hardware-flashable image with no extra module config); `--elf` is the DUT
-in both. The generic smoke (boot + Studio) is what
+`west zmk-renode-test` has **three modes** (`--mode`, default `ble` — it boots
+the exact hardware-flashable image with no extra module config); `--elf` is the
+DUT (the central half in `split`). The generic smoke (boot + Studio) is what
 `.github/actions/zmk-renode-test/action.yml` always runs before any
 module-specific test. A module's own `tests/renode/*_test.py` run afterwards and
 `import renode_harness` directly for anything more specific.
@@ -17,7 +17,8 @@ module-specific test. A module's own `tests/renode/*_test.py` run afterwards and
 ## Command reference
 
 ```
-usage: west zmk-renode-test [-h] --elf ELF [--mode {uart,ble}] [--host-elf HOST_ELF]
+usage: west zmk-renode-test [-h] --elf ELF [--mode {uart,ble,split}]
+                            [--peripheral-elf PERIPHERAL_ELF] [--host-elf HOST_ELF]
                             [--no-rpc] [--boot-timeout BOOT_TIMEOUT] [--skip-smoke]
                             [--rtt] [--min-virtual MIN_VIRTUAL]
                             [--virtual-budget VIRTUAL_BUDGET] [--steady-quantum Q]
@@ -30,12 +31,13 @@ Common:
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--elf` (required) | both | the DUT firmware ELF (built by the caller). |
-| `--mode {uart,ble}` | — | `ble` (default) or `uart`. |
+| `--elf` (required) | all | the DUT firmware ELF (built by the caller); the central half in split mode. |
+| `--mode {uart,ble,split}` | — | `ble` (default), `uart`, or `split` (wired split). |
+| `--peripheral-elf` | split | the peripheral half's firmware ELF (`--elf` is the central). Required for `--mode split`. |
 | `--host-elf` | ble | the `renode-ble-host` app ELF. Given → full S4/S5 smoke; omitted → boot-liveness only. |
 | `--no-rpc` | uart | check only the boot banner (modules without Studio RPC). |
-| `--boot-timeout` | uart | seconds to wait for the ZMK boot banner (default 20). |
-| `--skip-smoke` | both | skip the smoke test; run only `tests_dir`. |
+| `--boot-timeout` | uart, split | seconds to wait for the ZMK boot banner (default 20). |
+| `--skip-smoke` | all | skip the smoke test; run only `tests_dir`. |
 
 Advanced (rarely needed):
 
@@ -92,6 +94,41 @@ otherwise; if the image happens to have a console (observation builds), its
 output is captured and also checked for `FATAL ERROR` / `Halting system`, but
 console output is not required.
 
+## split mode: what it proves
+
+split mode boots a **wired split pair** — a central (`--elf`) and a peripheral
+(`--peripheral-elf`) — as two Renode machines whose split-link UARTs (`uart1`)
+are cross-connected through a Renode UART hub (`platforms/split_wired.resc`, via
+`renode_harness.boot_split_wired`). The two boards talk over ZMK's
+`zmk,wired-split` transport (`CONFIG_ZMK_SPLIT_WIRED`); each half's console is on
+its own `uart0` socket.
+
+**What it proves:** both halves boot to the ZMK banner, **and** the wired split
+link is up — a synthetic keypress injected on the peripheral (`gpio0` pin 2,
+the first `kscan-gpio-direct` input) is relayed over the split UART and processed
+by the central, which logs the relayed key `position: 0` (ZMK's default DBG log
+level). The smoke waits for both banners, then settles ~3 s before injecting
+(there is **no** cross-machine execution-order guarantee at `t=0`, so an event
+fired too early races the central's UART RX-enable and is silently dropped — the
+historical wired-split boot-order gotcha).
+
+**Why no Studio RPC:** the nRF52840 has only two UARTEs (`uart0` console +
+`uart1` split link), so there is no third UART for a Studio RPC transport. The
+correct, valuable smoke for a wired split is therefore the split pairing/relay,
+not a Studio round trip.
+
+Build both halves from this repo's one `renode_wired_split` shield (console on
+`uart0`, wired split on `uart1`, no BLE/USB), differing only by
+`CONFIG_ZMK_SPLIT_ROLE_CENTRAL` — see
+[`tests/zmk-config/build-split.yaml`](../tests/zmk-config/build-split.yaml):
+
+```bash
+$ west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-split.yaml -af split -d build
+$ west zmk-renode-test --mode split \
+      --elf build/split-central/zephyr/zmk.elf \
+      --peripheral-elf build/split-peripheral/zephyr/zmk.elf
+```
+
 ## Module-test env contract
 
 After the smoke test, every `*_test.py` directly under `tests_dir` runs as
@@ -99,15 +136,17 @@ After the smoke test, every `*_test.py` directly under `tests_dir` runs as
 
 | Variable | When | Meaning |
 |---|---|---|
-| `ZMK_RENODE_MODE` | always | `uart` or `ble` — which harness the test should build. |
-| `ZMK_RENODE_ELF` | always | absolute path to the DUT ELF. |
+| `ZMK_RENODE_MODE` | always | `uart`, `ble`, or `split` — which harness the test should build. |
+| `ZMK_RENODE_ELF` | always | absolute path to the DUT ELF (the central half in split mode). |
+| `ZMK_RENODE_PERIPHERAL_ELF` | split | absolute path to the peripheral half's ELF, for `boot_split_wired`. |
 | `ZMK_RENODE_STORAGE_ADDR` / `ZMK_RENODE_STORAGE_SIZE` | ble | NVS `storage_partition` overrides (hex), for `boot_single_real` / `boot_ble_pair`. |
 | `ZMK_RENODE_HOST_ELF` | ble, with `--host-elf` | absolute path to the `renode-ble-host` app ELF, for `boot_ble_pair`. |
 
 A `uart`-mode test builds a single UART-RPC machine via
 `renode_harness.boot_single(...)`. A `ble`-mode test builds a real machine via
 `renode_harness.boot_single_real(...)` (liveness) or a two-machine pair via
-`renode_harness.boot_ble_pair(dut_elf, host_elf)`.
+`renode_harness.boot_ble_pair(dut_elf, host_elf)`. A `split`-mode test builds a
+wired pair via `renode_harness.boot_split_wired(central_elf, peripheral_elf)`.
 
 ## Observing a real image over SEGGER RTT
 

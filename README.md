@@ -141,12 +141,14 @@ emulator, run a boot + Studio smoke test, then (optionally) the module's own
 `tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
 This command never builds firmware; the caller builds the ELF.
 
-There are **two modes** (`--mode`, default `ble`). `--elf` is the DUT in both:
+There are **three modes** (`--mode`, default `ble`). `--elf` is the DUT (the
+central half in `split`):
 
 | Mode | DUT you build | What the smoke proves | Runtime |
 |---|---|---|---|
 | **`ble`** (default) | the exact `studio-rpc-usb-uart` **hardware** image you would flash — **no extra config** | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
 | **`uart`** | ELF built with this repo's `renode-studio-uart` snippet | Boots (ZMK banner) and answers a core Studio `GetDeviceInfo` over an emulated UART | ~15 s |
+| **`split`** | a **wired-split** pair: `--elf` central + `--peripheral-elf` peripheral (this repo's `renode_wired_split` shield) | BOTH halves boot (ZMK banner) **and** a keypress injected on the peripheral is relayed over the wired split UART and processed by the central | ~20 s |
 
 ble is the default because it boots the **exact image you flash** — a module
 needs no Renode-specific build artifact. uart mode is faster and does a direct
@@ -226,6 +228,40 @@ $ west zmk-renode-test --mode uart --elf build/renode/zephyr/zmk.elf --no-rpc
 > directly — see the in-repo example
 > `tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`, and
 > [docs/renode-testing.md](docs/renode-testing.md) for the newer-ZMK board note.
+
+#### split mode (wired)
+
+The DUT is a **wired split pair**: two ZMK images — a central and a peripheral —
+booted as two Renode machines whose split-link UARTs (`uart1`) are
+cross-connected through a Renode UART hub, so the emulated boards talk over
+ZMK's `zmk,wired-split` transport (no BLE). Each half's console is on `uart0`.
+The nRF52840 has only two UARTEs, so console + split link leave **no** UART for
+a Studio RPC transport — the smoke proves the split *pairing/relay*, not Studio:
+both halves reach the boot banner, then a keypress injected on the peripheral is
+relayed over the wire and processed by the central (which logs the relayed key
+position).
+
+Build both halves from this repo's one `renode_wired_split` shield (they differ
+only by `CONFIG_ZMK_SPLIT_ROLE_CENTRAL`), e.g. via
+[`tests/zmk-config/build-split.yaml`](tests/zmk-config/build-split.yaml):
+
+```yaml
+include:
+  - artifact: split-central
+    board: xiao_ble//zmk
+    shield: renode_wired_split
+    cmake-args: -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y
+  - artifact: split-peripheral
+    board: xiao_ble//zmk
+    shield: renode_wired_split
+```
+
+```bash
+$ west zmk-build <your-zmk-config> --build-yaml tests/zmk-config/build-split.yaml -af split -d build
+$ west zmk-renode-test --mode split \
+      --elf build/split-central/zephyr/zmk.elf \
+      --peripheral-elf build/split-peripheral/zephyr/zmk.elf
+```
 
 #### Requirements
 

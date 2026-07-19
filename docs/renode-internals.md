@@ -93,3 +93,26 @@ a real failure mode):
   otherwise), but once the encrypted link is up (host `STAGE:S4`) the link-layer
   tolerates a 100×-coarser quantum — the basis of the `--steady-quantum`
   fine-then-coarse lever (see [renode-testing.md](renode-testing.md#ble-mode-performance)).
+
+## Wired split: the UART hub (no platform stubs needed)
+
+`--mode split` needs none of the above. A wired-split image built with the
+`renode_wired_split` shield disables USB + QSPI and does not enable BLE, so both
+halves boot on the **plain** `xiao_nrf52840.repl` — no USBD/QSPI/FICR/NVMC stubs,
+no NVS preload, no fake CCM.
+
+The one platform mechanic is the **UART hub**. `platforms/split_wired.resc`
+creates two machines (`central`, `peripheral`); each puts its console on `uart0`
+(its own TCP socket) and its split link on `uart1`. Both `uart1`s are connected
+to a single `emulation CreateUARTHub "split_link"`, which makes a point-to-point
+byte pipe between the two emulated boards — a UART hub, not a
+`CreateServerSocketTerminal`, precisely because the two ends are *both* emulated
+UARTs (a server-socket terminal is for a host-side TCP client). ZMK's
+`zmk,wired-split` transport (uart1 on both halves) then runs over it unchanged.
+
+The one gotcha is timing, not wiring: there is **no cross-machine
+execution-order guarantee at `t=0`**, so a peripheral split event emitted in the
+first few ms can arrive before the central's `uart_irq_rx_enable()` runs and be
+dropped. `renode_harness.boot_split_wired` connects both consoles before `start`;
+`run_split_smoke` then waits for both boot banners and settles ~3 s before
+injecting the keypress it asserts on.
