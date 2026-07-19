@@ -108,6 +108,45 @@ jobs:
           mode: uart
           elf-path: build/renode/zephyr/zmk.elf
 
+  renode-split:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    name: Renode (wired split)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache west modules
+        uses: actions/cache@v4
+        continue-on-error: true
+        env:
+          cache_name: cache-west-modules-renode
+        with:
+          path: dependencies/
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache_name }}-
+      - name: Init
+        # Same main-pinned manifest as the renode job (HWv2 xiao_ble//zmk).
+        run: |
+          git config --global --add safe.directory ${{ github.workspace }}
+          west init -l . --mf scripts/west-test-renode-standalone.yml
+          west update --narrow
+          west zephyr-export
+      - name: Build wired-split central + peripheral halves
+        # Both halves from the one renode_wired_split shield (console on uart0,
+        # wired split on uart1, no BLE/USB); they differ only by
+        # CONFIG_ZMK_SPLIT_ROLE_CENTRAL (set for the central in build-split.yaml).
+        # -af split matches both split-central and split-peripheral artifacts.
+        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-split.yaml -af split -d build
+      - name: Renode wired-split smoke test
+        uses: ./.github/actions/zmk-renode-test
+        with:
+          mode: split
+          elf-path: build/split-central/zephyr/zmk.elf
+          peripheral-elf: build/split-peripheral/zephyr/zmk.elf
+
   ble:
     runs-on: ubuntu-latest
     timeout-minutes: 45
