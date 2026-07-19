@@ -17,6 +17,7 @@
 //
 
 using System;
+using System.Collections.Generic;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure.Registers;
@@ -59,6 +60,11 @@ namespace Antmicro.Renode.Peripherals.USB
         {
             interruptManager.Reset();
             registers.Reset();
+            setupPacketResultCallback = null;
+            ep0SetupPayload = null;
+            ep0SetupPayloadOffset = 0;
+            ep0InAccumulator.Clear();
+            Array.Clear(sizeEpOut, 0, sizeEpOut.Length);
         }
 
         public USBDeviceCore USBCore { get; }
@@ -70,46 +76,125 @@ namespace Antmicro.Renode.Peripherals.USB
 
         public event Action<uint> EventTriggered;
 
-        private void HandleSetupPacket(SetupPacket packet, byte[] arg2, Action<byte[]> action)
+        private void HandleSetupPacket(SetupPacket packet, byte[] additionalData, Action<byte[]> action)
         {
-            // Note: this method handled some setup packets in the model instead of relying them to the simulated software
-            // This is a simplification that needs to be resolved in the future
-            this.Log(LogLevel.Noisy, "Received SetupPacket. Request: {0}", packet.Request);
-            setupPacket = packet;
-            SetEvent(Events.Ep0Setup);
-            setupPacketResultCallback = action;
+            this.Log(LogLevel.Noisy, "Received SetupPacket: {0}", packet);
 
-            switch(packet.Request)
+            // Standard SET_ADDRESS is handled autonomously by the real hardware: the
+            // guest driver never sees the SETUP packet (usb_dc_nrfx merely asserts
+            // addr == USBD->USBADDR), so latch the address and self-ack without
+            // raising Ep0Setup.
+            if(packet.Recipient == PacketRecipient.Device
+                && packet.Type == PacketType.Standard
+                && packet.Request == (byte)StandardRequest.SetAddress)
             {
-            case (byte)StandardRequest.SetAddress:
-                USBCore.Address = (byte)setupPacket.Value;
-                setupPacketResultCallback(Array.Empty<byte>());
-                break;
-            case (byte)StandardRequest.SetConfiguration:
-                setupPacketResultCallback(Array.Empty<byte>());
-                break;
+                usbAddress.Value = (ulong)(packet.Value & 0x7F);
+                USBCore.Address = (byte)packet.Value;
+                action(Array.Empty<byte>());
+                return;
             }
+
+            // Everything else (including SET_CONFIGURATION and class requests) is
+            // forwarded to the guest: latch the packet and its host->device data
+            // payload, then raise Ep0Setup. The guest's response comes back via
+            // GetData(0) (control-IN data stage, accumulated) and TASKS_EP0STATUS
+            // (status stage), which invokes the latched callback.
+            setupPacket = packet;
+            setupPacketResultCallback = action;
+            ep0SetupPayload = additionalData ?? Array.Empty<byte>();
+            ep0SetupPayloadOffset = 0;
+            ep0InAccumulator.Clear();
+            sizeEpOut[0] = 0;
+            SetEvent(Events.Ep0Setup);
         }
 
         private void GetData(ushort epNumber)
         {
             this.Log(LogLevel.Noisy, "Reading data from EP number: {0}", epNumber);
-            // Every pointer to endpoint data and endpoint count is n * 0x14 away from endpoint's 0, where n is number of endpoint. 
-            // E.g: pointer to second endpoint data would be: (2 * 0x14 + address of endpoint 0) 
+            // Every pointer to endpoint data and endpoint count is n * 0x14 away from endpoint's 0, where n is number of endpoint.
+            // E.g: pointer to second endpoint data would be: (2 * 0x14 + address of endpoint 0)
             uint endpointIn = registers.Read((0x14 * epNumber) + (long)Registers.Endpoint0In);
             uint endpointInCount = registers.Read((0x14 * epNumber) + (long)Registers.Endpoint0InCount);
             var usbPacket = machine.GetSystemBus(this).ReadBytes(endpointIn, (int)endpointInCount);
 
+            epInAmount[epNumber].Value = endpointInCount;
             if(epNumber == 0)
             {
-                setupPacketResultCallback(usbPacket);
+                // Control-IN data stage: accumulate the chunks; the complete response
+                // is delivered to the host on TASKS_EP0STATUS (the status stage).
+                ep0InAccumulator.AddRange(usbPacket);
                 endpoint0InCount.Value = endpointInCount;
             }
             else if(usbPacket.Length != 0)
             {
-                deviceToHostEndpoint.HandlePacket(usbPacket);
+                deviceToHostEndpoints[epNumber].HandlePacket(usbPacket);
             }
             DataAcknowledged(epNumber);
+        }
+
+        private void HandleEp0RcvOut(ushort epNumber)
+        {
+            // TASKS_EP0RCVOUT arms reception of the (next chunk of the) host->device
+            // data stage. On real hardware the host then sends a DATA packet and
+            // EP0DATADONE fires; here the whole payload was latched with the SETUP
+            // packet, so serve it in maximumPacketSize chunks.
+            if(ep0SetupPayload == null || ep0SetupPayloadOffset >= ep0SetupPayload.Length)
+            {
+                this.Log(LogLevel.Warning, "TASKS_EP0RCVOUT with no pending host->device data");
+                return;
+            }
+            sizeEpOut[0] = (ulong)Math.Min((int)maximumPacketSize, ep0SetupPayload.Length - ep0SetupPayloadOffset);
+            SetEvent(Events.Ep0DataDone);
+        }
+
+        private void StartEpOut(ushort epNumber)
+        {
+            if(epNumber != 0)
+            {
+                // Bulk OUT (the guest-facing host->device data path) is not
+                // implemented yet -- see docs/renode-usb-design.md, gap (b).
+                this.Log(LogLevel.Warning, "TASKS_STARTEPOUT{0}: bulk OUT endpoints are not implemented yet", epNumber);
+                return;
+            }
+            if(ep0SetupPayload == null || ep0SetupPayloadOffset >= ep0SetupPayload.Length)
+            {
+                this.Log(LogLevel.Warning, "TASKS_STARTEPOUT0 with no pending host->device data");
+                return;
+            }
+            var pending = Math.Min((int)maximumPacketSize, ep0SetupPayload.Length - ep0SetupPayloadOffset);
+            var chunk = (int)Math.Min((ulong)pending, epOutMaxCnt[0].Value);
+            var data = new byte[chunk];
+            Array.Copy(ep0SetupPayload, ep0SetupPayloadOffset, data, 0, chunk);
+            machine.GetSystemBus(this).WriteBytes(data, epOutPtr[0].Value);
+            ep0SetupPayloadOffset += chunk;
+            epOutAmount[0].Value = (ulong)chunk;
+            SetEvent(Events.EndEpOut0);
+        }
+
+        private void HandleEp0Status(ushort epNumber)
+        {
+            // Status stage: complete the control transfer towards the host. For
+            // device-to-host requests this carries the accumulated EP0 IN data; for
+            // host-to-device requests it is the zero-length acknowledgement. This is
+            // what lets a forwarded SET_CONFIGURATION complete USBHost's enumeration.
+            var callback = setupPacketResultCallback;
+            setupPacketResultCallback = null;
+            if(callback == null)
+            {
+                this.Log(LogLevel.Warning, "TASKS_EP0STATUS with no pending setup transaction");
+                return;
+            }
+            var response = ep0InAccumulator.ToArray();
+            ep0InAccumulator.Clear();
+            callback(response);
+        }
+
+        private void HandleEp0Stall(ushort epNumber)
+        {
+            // The guest refused the control transfer; drop the pending callback so a
+            // later TASKS_EP0STATUS cannot complete a stalled transaction.
+            this.Log(LogLevel.Warning, "TASKS_EP0STALL: control transfer stalled by guest (request 0x{0:X})", setupPacket.Request);
+            setupPacketResultCallback = null;
         }
 
         private void DataAcknowledged(ushort epNumber)
@@ -165,30 +250,35 @@ namespace Antmicro.Renode.Peripherals.USB
             DefineTask(Registers.TasksStartEpIn5, GetData, 5, "TASKS_STARTEPIN5");
             DefineTask(Registers.TasksStartEpIn6, GetData, 6, "TASKS_STARTEPIN6");
             DefineTask(Registers.TasksStartEpIn7, GetData, 7, "TASKS_STARTEPIN7");
-            DefineTask(Registers.TasksEp0Status, (_) => { }, 0, "TASKS_EP0STATUS");
-            DefineEvent(Registers.EventsUsbReset, Events.UsbReset, "EVENTS_USBRESET");
-            DefineEvent(Registers.EventsEp0Setup, Events.Ep0Setup, "EVENTS_EP0SETUP");
-            DefineEvent(Registers.EventsStarted, Events.Started, "EVENTS_STARTED");
-            DefineEvent(Registers.EventsEndEpIn0, Events.EndEpIn0, "EVENTS_ENDEPIN0");
-            DefineEvent(Registers.EventsEndEpIn1, Events.EndEpIn1, "EVENTS_ENDEPIN1");
-            DefineEvent(Registers.EventsEndEpIn2, Events.EndEpIn2, "EVENTS_ENDEPIN2");
-            DefineEvent(Registers.EventsEndEpIn3, Events.EndEpIn3, "EVENTS_ENDEPIN3");
-            DefineEvent(Registers.EventsEndEpIn4, Events.EndEpIn4, "EVENTS_ENDEPIN4");
-            DefineEvent(Registers.EventsEndEpIn5, Events.EndEpIn5, "EVENTS_ENDEPIN5");
-            DefineEvent(Registers.EventsEndEpIn6, Events.EndEpIn6, "EVENTS_ENDEPIN6");
-            DefineEvent(Registers.EventsEndEpIn7, Events.EndEpIn7, "EVENTS_ENDEPIN7");
-            DefineEvent(Registers.EventsEp0DataDone, Events.Ep0DataDone, "EVENTS_EP0DATADONE");
-            DefineEvent(Registers.EventsEpData, Events.EpData, "EVENTS_EPDATA");
+            DefineTask(Registers.TasksEp0Status, HandleEp0Status, 0, "TASKS_EP0STATUS");
+            DefineTask(Registers.TasksEp0RcvOut, HandleEp0RcvOut, 0, "TASKS_EP0RCVOUT");
+            DefineTask(Registers.TasksEp0Stall, HandleEp0Stall, 0, "TASKS_EP0STALL");
+            for(ushort i = 0; i < EndpointCount; i++)
+            {
+                DefineTask(Registers.TasksStartEpOut0 + 4 * i, StartEpOut, i, $"TASKS_STARTEPOUT{i}");
+            }
+            // The event registers are laid out at 0x100 + 4 * eventNumber, in exactly
+            // the order of the Events enum -- define them all (upstream left the
+            // ENDEPOUT[n]/SOF/USBEVENT ones undefined, but the guest driver reads
+            // several of them on every interrupt).
+            for(var i = 0; i <= (int)Events.EpData; i++)
+            {
+                DefineEvent((Registers)(0x100 + 4 * i), (Events)i, $"EVENTS_{(Events)i}");
+            }
 
             registers.AddRegister((long)Registers.InterruptEnable,
+                interruptManager.GetInterruptEnableRegister<DoubleWordRegister>());
+            registers.AddRegister((long)Registers.InterruptEnableSet,
                 interruptManager.GetInterruptEnableSetRegister<DoubleWordRegister>());
+            registers.AddRegister((long)Registers.InterruptEnableClear,
+                interruptManager.GetInterruptEnableClearRegister<DoubleWordRegister>());
 
             Registers.EventCause.Define(this)
                 .WithTaggedFlag("EVENT_ISOOUTCRC", 0)
                 .WithTaggedFlag("EVENT_SUSPEND", 8)
                 .WithTaggedFlag("EVENT_RESUME", 9)
                 .WithTaggedFlag("EVENT_USBWUALLOWED", 10)
-                .WithFlag(11, name: "EVENT_READY")
+                .WithFlag(11, out eventCauseReady, FieldMode.Read | FieldMode.WriteOneToClear, name: "EVENT_READY")
                 .WithReservedBits(12, 20);
 
             Registers.EndpointStatus.Define(this)
@@ -236,8 +326,8 @@ namespace Antmicro.Renode.Peripherals.USB
                 .WithReservedBits(7, 24);
 
             Registers.bmRequestType.Define(this)
-                .WithTag("RECIPIENT", 0, 5)
-                .WithValueField(5, 2, FieldMode.Read, valueProviderCallback: _ => 0, name: "TYPE")
+                .WithValueField(0, 5, FieldMode.Read, valueProviderCallback: _ => (ulong)setupPacket.Recipient, name: "RECIPIENT")
+                .WithValueField(5, 2, FieldMode.Read, valueProviderCallback: _ => (ulong)setupPacket.Type, name: "TYPE")
                 .WithValueField(7, 1, FieldMode.Read, name: "DIRECTION",
                     valueProviderCallback: _ => (ulong)setupPacket.Direction)
                 .WithReservedBits(8, 24);
@@ -255,15 +345,31 @@ namespace Antmicro.Renode.Peripherals.USB
                 .WithReservedBits(8, 24);
 
             Registers.wIndexLow.Define(this)
-                .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => setupPacket.Index)
+                .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => (ulong)(setupPacket.Index & 0xFF))
+                .WithReservedBits(8, 24);
+
+            Registers.wIndexHigh.Define(this)
+                .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => (ulong)(setupPacket.Index >> 8 & 0xFF))
                 .WithReservedBits(8, 24);
 
             Registers.wLengthLow.Define(this)
-                .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => setupPacket.Count)
+                .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => (ulong)(setupPacket.Count & 0xFF))
+                .WithReservedBits(8, 24);
+
+            Registers.wLengthHigh.Define(this)
+                .WithValueField(0, 8, FieldMode.Read, valueProviderCallback: _ => (ulong)(setupPacket.Count >> 8 & 0xFF))
                 .WithReservedBits(8, 24);
 
             Registers.Enable.Define(this)
-                .WithFlag(0, out usbEnable, name: "ENABLE")
+                .WithFlag(0, out usbEnable, name: "ENABLE", writeCallback: (_, value) =>
+                {
+                    if(value)
+                    {
+                        // Real hardware raises EVENTCAUSE.READY once the peripheral
+                        // has powered up after ENABLE; the driver busy-waits on it.
+                        eventCauseReady.Value = true;
+                    }
+                })
                 .WithReservedBits(1, 31);
 
             Registers.UsbPullup.Define(this)
@@ -360,6 +466,31 @@ namespace Antmicro.Renode.Peripherals.USB
             Registers.Endpoint7InCount.Define(this)
                 .WithValueField(0, 8, name: "EPIN7_MAXCNT")
                 .WithReservedBits(8, 24);
+
+            for(var i = 0; i < EndpointCount; i++)
+            {
+                var idx = i;
+                // SIZE.EPOUT[n]: number of received bytes waiting in the endpoint
+                // buffer; writing any value clears it (accepts the next packet).
+                registers.AddRegister((long)Registers.SizeEpOut0 + 4 * idx, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, valueProviderCallback: _ => sizeEpOut[idx],
+                        writeCallback: (_, __) => { sizeEpOut[idx] = 0; }, name: $"SIZE_EPOUT{idx}")
+                    .WithReservedBits(7, 25));
+
+                registers.AddRegister((long)Registers.Endpoint0Out + 0x14 * idx, new DoubleWordRegister(this)
+                    .WithValueField(0, 32, out epOutPtr[idx], name: $"EPOUT{idx}_PTR"));
+                registers.AddRegister((long)Registers.Endpoint0OutCount + 0x14 * idx, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, out epOutMaxCnt[idx], name: $"EPOUT{idx}_MAXCNT")
+                    .WithReservedBits(7, 25));
+                registers.AddRegister((long)Registers.Endpoint0OutAmount + 0x14 * idx, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, out epOutAmount[idx], FieldMode.Read, name: $"EPOUT{idx}_AMOUNT")
+                    .WithReservedBits(7, 25));
+                // EPIN[n].AMOUNT: bytes transferred in the last IN DMA (the driver
+                // reads it after every finished DMA to track transfer parity).
+                registers.AddRegister((long)Registers.Endpoint0InAmount + 0x14 * idx, new DoubleWordRegister(this)
+                    .WithValueField(0, 7, out epInAmount[idx], FieldMode.Read, name: $"EPIN{idx}_AMOUNT")
+                    .WithReservedBits(7, 25));
+            }
         }
 
         private void HandleToggle()
@@ -381,106 +512,33 @@ namespace Antmicro.Renode.Peripherals.USB
 
         private void InitiateUSBCore()
         {
-            // Define all possible endpoints as available right away
-            // This is to be improved in the future and should reflect what software returns as a result of enumaration, but will require support from `USB` subsystem in Renode
+            // Define all possible endpoints as available right away.
+            // Unlike upstream (which let the framework auto-assign endpoint ids
+            // sequentially across both directions, funneling all IN data to one
+            // hardcoded id), pass explicit ids so the framework endpoint ids match
+            // the nRF endpoint numbers, and keep the references so GetData can
+            // route each IN endpoint's data to its own framework endpoint.
             USBConfiguration config = new USBConfiguration(this, 0, "").WithInterface(
-                    configure: x =>
+                configure: x =>
+                {
+                    for(byte i = 0; i < EndpointCount; i++)
+                    {
                         x.WithEndpoint(
                             Direction.DeviceToHost,
-                            EndpointTransferType.Control,
+                            i == 0 ? EndpointTransferType.Control : EndpointTransferType.Bulk,
                             maximumPacketSize,
                             0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.DeviceToHost,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out deviceToHostEndpoint)
-                        .WithEndpoint(
-                            Direction.DeviceToHost,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.DeviceToHost,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.DeviceToHost,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.DeviceToHost,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.DeviceToHost,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.DeviceToHost,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
+                            out deviceToHostEndpoints[i],
+                            id: i)
                         .WithEndpoint(
                             Direction.HostToDevice,
-                            EndpointTransferType.Control,
+                            i == 0 ? EndpointTransferType.Control : EndpointTransferType.Bulk,
                             maximumPacketSize,
                             0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.HostToDevice,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.HostToDevice,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.HostToDevice,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.HostToDevice,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.HostToDevice,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.HostToDevice,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _)
-                        .WithEndpoint(
-                            Direction.HostToDevice,
-                            EndpointTransferType.Bulk,
-                            maximumPacketSize,
-                            0x10,
-                            out _));
+                            out hostToDeviceEndpoints[i],
+                            id: i);
+                    }
+                });
             USBCore.SelectedConfiguration = config;
         }
 
@@ -504,7 +562,17 @@ namespace Antmicro.Renode.Peripherals.USB
         private IFlagRegisterField ep0InEnabled;
         private IFlagRegisterField ep0OutEnabled;
 
-        private USBEndpoint deviceToHostEndpoint;
+        private readonly USBEndpoint[] deviceToHostEndpoints = new USBEndpoint[EndpointCount];
+        private readonly USBEndpoint[] hostToDeviceEndpoints = new USBEndpoint[EndpointCount];
+        private byte[] ep0SetupPayload;
+        private int ep0SetupPayloadOffset;
+        private readonly List<byte> ep0InAccumulator = new List<byte>();
+        private readonly ulong[] sizeEpOut = new ulong[EndpointCount];
+        private IFlagRegisterField eventCauseReady;
+        private readonly IValueRegisterField[] epOutPtr = new IValueRegisterField[EndpointCount];
+        private readonly IValueRegisterField[] epOutMaxCnt = new IValueRegisterField[EndpointCount];
+        private readonly IValueRegisterField[] epOutAmount = new IValueRegisterField[EndpointCount];
+        private readonly IValueRegisterField[] epInAmount = new IValueRegisterField[EndpointCount];
         private Action<byte[]> setupPacketResultCallback;
         private readonly IMachine machine;
         private readonly bool[] epInDataStatus;
@@ -598,6 +666,9 @@ namespace Antmicro.Renode.Peripherals.USB
             EventsEp0Setup = 0x15C,
             EventsEpData = 0x160,
             InterruptEnable = 0x300,
+            InterruptEnableSet = 0x304,
+            InterruptEnableClear = 0x308,
+            SizeEpOut0 = 0x4A0,
             UsbPullup = 0x504,
             DataToggle = 0x50C,
             IsoSplit = 0x51C,
