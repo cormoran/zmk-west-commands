@@ -7,7 +7,7 @@
 // Renode 1.16.1. Renode's nRF52840 has no USBD/QSPI/FICR models, so we add
 // three PythonPeripheral stubs and drop the FICR Tags from the init block
 // (a Tag may not overlap a registered peripheral). See the model .py files
-// for the per-peripheral rationale, and README.md's real-binary section.
+// for the per-peripheral rationale, and docs/renode-internals.md.
 //
 // PythonPeripheral `filename:` needs an ABSOLUTE path (Renode resolves it
 // against neither the .repl dir nor its cwd). The paths below are written

@@ -1,12 +1,19 @@
-"""`west zmk-renode-test` -- boot a built ZMK ELF in the Renode emulator, run
-the generic boot + core Studio RPC smoke test, then a module's own
-`tests/renode/*_test.py` files.
+"""`west zmk-renode-test` -- boot a built ZMK ELF in the Renode emulator, run a
+boot + Studio smoke test, then a module's own `tests/renode/*_test.py` files.
 
-This never builds firmware: the ELF is always built by the caller (typically
-a `build.yaml` artifact using the `renode-studio-uart` snippet this repo
-provides as a Zephyr module). See README.md and the harness under
-`scripts/lib/renode/` (renode_harness.py, references in cormoran/zmk-workspace's
-skills/test-zmk-renode for the underlying Renode gotchas).
+Two modes (`--mode`, default `uart`):
+
+  * **uart** -- the DUT is built with this repo's `renode-studio-uart` snippet;
+    console + Studio RPC ride emulated UARTs. Smoke = boot banner + a core
+    Studio GetDeviceInfo round trip.
+  * **ble** -- the DUT is the exact `studio-rpc-usb-uart` *hardware* image;
+    platform stubs make it boot. With `--host-elf`, the `renode-ble-host` app
+    pairs over an emulated BLE medium and does an encrypted Studio GATT read
+    (S4/S5). Without `--host-elf`, it degrades to a boot-liveness check.
+
+This never builds firmware: the ELF is always built by the caller. See
+README.md, docs/renode-testing.md, and the harness under `scripts/lib/renode/`
+(renode_harness.py).
 """
 
 import os
@@ -34,8 +41,10 @@ class ZMKRenodeTest(WestCommand):
             help="run ZMK Renode emulator tests against a pre-built ELF",
             description=(
                 "Boot a caller-built ZMK firmware ELF in the Renode emulator, run a "
-                "generic boot + core Studio RPC smoke test, then the module's own "
-                "tests/renode/*_test.py files. Does not build firmware."
+                "boot + Studio smoke test, then the module's own tests/renode/*_test.py "
+                "files. Two modes: --mode uart (default, snippet-built DUT over emulated "
+                "UARTs) and --mode ble (real hardware image, Studio over emulated BLE). "
+                "Does not build firmware."
             ),
         )
 
@@ -46,106 +55,104 @@ class ZMKRenodeTest(WestCommand):
             nargs="?",
             help=(
                 "Directory with the module's own *_test.py files, run non-recursively "
-                "via `python3 <file> -v` with PYTHONPATH and ZMK_RENODE_ELF set. "
-                "Omit to run only the generic smoke test."
+                "via `python3 <file> -v` with PYTHONPATH and the ZMK_RENODE_* env "
+                "contract set. Omit to run only the smoke test."
             ),
         )
         parser.add_argument(
             "--elf",
             required=True,
-            help="Path to the firmware ELF to test (built by the caller).",
+            help="Path to the DUT firmware ELF to test (built by the caller). Both modes.",
         )
         parser.add_argument(
-            "--renode-version",
-            default="1.16.1",
-            help="Renode portable release version to install/use (default: 1.16.1).",
-        )
-        parser.add_argument(
-            "--boot-timeout",
-            type=float,
-            default=20.0,
-            help="Seconds to wait for the ZMK boot banner (default: 20).",
-        )
-        parser.add_argument(
-            "--skip-smoke",
-            action="store_true",
-            help="Skip the generic boot + Studio RPC smoke test.",
-        )
-        parser.add_argument(
-            "--no-rpc",
-            action="store_true",
-            help="Smoke test checks the boot banner only (for modules without Studio RPC).",
-        )
-        parser.add_argument(
-            "--real-binary",
-            action="store_true",
+            "--mode",
+            choices=("uart", "ble"),
+            default="uart",
             help=(
-                "Boot a real flashable image (ZMK's studio-rpc-usb-uart snippet: USB CDC + "
-                "QSPI + BLE) on the real-binary platform. The generic smoke becomes a "
-                "liveness check (run >= --min-virtual virtual seconds, then PC-symbol "
-                "sampling -- no UART Studio transport exists in a real image). See README."
-            ),
-        )
-        parser.add_argument(
-            "--min-virtual",
-            type=float,
-            default=20.0,
-            help="Real-binary mode: virtual seconds to run before PC sampling (default: 20).",
-        )
-        parser.add_argument(
-            "--rtt",
-            action="store_true",
-            help=(
-                "Real-binary mode: capture Zephyr SEGGER RTT log output during the "
-                "liveness run and fail on RTT fatal lines (for RTT-logging builds: "
-                "CONFIG_LOG + CONFIG_USE_SEGGER_RTT + CONFIG_LOG_BACKEND_RTT). See README."
-            ),
-        )
-        parser.add_argument(
-            "--ble",
-            action="store_true",
-            help=(
-                "Studio-over-BLE mode: boot the real DUT (--elf) and the renode-ble-host "
-                "app (--host-elf) on one BLE medium and assert an encrypted Studio RPC read "
-                "(fake CCM; ~6-7 min wall). Implies a real DUT image. See README."
+                "uart (default): snippet-built DUT, console + Studio RPC over emulated "
+                "UARTs; smoke = boot banner + GetDeviceInfo. "
+                "ble: real hardware image; with --host-elf the renode-ble-host app pairs "
+                "and does an encrypted Studio GATT read (S4/S5), without it a boot-liveness "
+                "check. See docs/renode-testing.md."
             ),
         )
         parser.add_argument(
             "--host-elf",
             help=(
-                "BLE mode: the renode-ble-host app ELF (build it with `west build -b "
-                "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`). Required with --ble."
+                "ble mode only: the renode-ble-host app ELF (build it with `west build -b "
+                "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`). Given -> full "
+                "S4/S5 Studio-over-BLE smoke; omitted -> boot-liveness only."
             ),
         )
         parser.add_argument(
-            "--ble-virtual-budget",
+            "--no-rpc",
+            action="store_true",
+            help="uart mode: smoke checks the boot banner only (for modules without Studio RPC).",
+        )
+        parser.add_argument(
+            "--boot-timeout",
             type=float,
             default=20.0,
-            help="BLE mode: virtual seconds to reach the encrypted read before failing "
-            "(default: 20; ~3.3s is typical).",
+            help="uart mode: seconds to wait for the ZMK boot banner (default: 20).",
         )
         parser.add_argument(
-            "--ble-steady-quantum",
+            "--skip-smoke",
+            action="store_true",
+            help="Skip the smoke test; run only the module's own tests_dir.",
+        )
+
+        # Advanced knobs -- rarely needed; see docs/renode-testing.md and
+        # docs/renode-internals.md. Kept out of the common story on purpose.
+        adv = parser.add_argument_group(
+            "advanced", "rarely-needed knobs (see docs/renode-testing.md)"
+        )
+        adv.add_argument(
+            "--rtt",
+            action="store_true",
+            help=(
+                "ble mode (liveness, no --host-elf): capture Zephyr SEGGER RTT log output "
+                "and fail on RTT fatal lines (RTT-logging builds: CONFIG_LOG + "
+                "CONFIG_USE_SEGGER_RTT + CONFIG_LOG_BACKEND_RTT)."
+            ),
+        )
+        adv.add_argument(
+            "--min-virtual",
+            type=float,
+            default=20.0,
+            help="ble mode (liveness): virtual seconds to run before PC sampling (default: 20).",
+        )
+        adv.add_argument(
+            "--virtual-budget",
+            type=float,
+            default=20.0,
+            help="ble mode (with --host-elf): virtual seconds to reach the encrypted read "
+            "before failing (default: 20; ~3.3s is typical).",
+        )
+        adv.add_argument(
+            "--steady-quantum",
             default=None,
-            help="BLE mode: after the encrypted link is up (S4), raise the global "
-            "time-sync quantum to this value (e.g. 0.001) for the steady-state phase "
-            "(~7x faster; pairing still needs the 10us boot quantum). For long BLE "
-            "tests; the smoke itself exits at S5 so it gains little. See README.",
+            help="ble mode (with --host-elf): after the encrypted link is up (S4), raise "
+            "the global time-sync quantum to this value (e.g. 0.001) for the steady-state "
+            "phase (~7x faster; pairing still needs the 10us boot quantum). Mainly for a "
+            "module's own long BLE tests. See docs/renode-testing.md.",
         )
-        parser.add_argument(
+        adv.add_argument(
             "--storage-addr",
             type=lambda s: int(s, 0),
             default=None,
-            help=(
-                "Real-binary/BLE mode: NVS storage_partition address preloaded as erased 0xFF "
-                "(default: 0xec000, xiao_ble)."
-            ),
+            help="ble mode: NVS storage_partition address preloaded as erased 0xFF "
+            "(default: 0xec000, xiao_ble).",
         )
-        parser.add_argument(
+        adv.add_argument(
             "--storage-size",
             type=lambda s: int(s, 0),
             default=None,
-            help="Real-binary mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
+            help="ble mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
+        )
+        adv.add_argument(
+            "--renode-version",
+            default="1.16.1",
+            help="Renode portable release version to install/use (default: 1.16.1).",
         )
         return parser
 
@@ -157,6 +164,9 @@ class ZMKRenodeTest(WestCommand):
                 "first, e.g. `west zmk-build <zmk-config> -af <artifact>`)"
             )
 
+        if args.mode == "uart" and args.host_elf:
+            log.die("--host-elf is only valid with --mode ble.")
+
         # Make the harness (and the module's own tests) importable.
         sys.path.insert(0, str(LIB_RENODE_DIR))
         import renode_harness  # noqa: E402
@@ -167,27 +177,30 @@ class ZMKRenodeTest(WestCommand):
         log.inf(f"[*] Renode: {renode_path}")
 
         host_elf = None
-        if args.ble:
-            if not args.host_elf:
-                log.die("--ble requires --host-elf <renode-ble-host ELF> (see README).")
+        if args.mode == "ble" and args.host_elf:
             host_elf = Path(args.host_elf).absolute()
             if not host_elf.is_file():
                 log.die(f"host ELF not found: {host_elf}")
 
         if not args.skip_smoke:
-            if args.ble:
-                self._run_ble_smoke(args, elf, host_elf, renode_path)
-            elif args.real_binary:
-                self._run_liveness_smoke(args, elf, renode_path)
+            if args.mode == "ble":
+                if host_elf is not None:
+                    self._run_ble_studio_smoke(args, elf, host_elf, renode_path)
+                else:
+                    log.inf(
+                        "[*] ble mode without --host-elf: no host given, checking DUT "
+                        "boot liveness only (no encrypted Studio read)."
+                    )
+                    self._run_ble_liveness_smoke(args, elf, renode_path)
             else:
-                self._run_smoke(args, elf, renode_path)
+                self._run_uart_smoke(args, elf, renode_path)
         else:
-            log.inf("[*] Skipping generic smoke test (--skip-smoke)")
+            log.inf("[*] Skipping smoke test (--skip-smoke)")
 
         if args.tests_dir:
             self._run_module_tests(args, elf)
 
-    def _run_ble_smoke(self, args, elf: Path, host_elf: Path, renode_path: str) -> None:
+    def _run_ble_studio_smoke(self, args, elf: Path, host_elf: Path, renode_path: str) -> None:
         import renode_smoke  # noqa: E402
 
         kwargs = {}
@@ -195,23 +208,23 @@ class ZMKRenodeTest(WestCommand):
             kwargs["storage_addr"] = args.storage_addr
         if args.storage_size is not None:
             kwargs["storage_size"] = args.storage_size
-        if getattr(args, "ble_steady_quantum", None):
-            kwargs["steady_quantum"] = args.ble_steady_quantum
+        if getattr(args, "steady_quantum", None):
+            kwargs["steady_quantum"] = args.steady_quantum
 
         log.inf("[*] Running Studio-over-BLE smoke test (real DUT + renode-ble-host)")
         try:
-            renode_smoke.run_ble_smoke(
+            renode_smoke.run_ble_studio_smoke(
                 dut_elf=elf,
                 host_elf=host_elf,
                 renode_path=renode_path,
-                virtual_budget=args.ble_virtual_budget,
+                virtual_budget=args.virtual_budget,
                 **kwargs,
             )
         except AssertionError as err:
             log.die(f"BLE smoke test FAILED: {err}")
         log.inf("[*] BLE smoke test OK")
 
-    def _run_liveness_smoke(self, args, elf: Path, renode_path: str) -> None:
+    def _run_ble_liveness_smoke(self, args, elf: Path, renode_path: str) -> None:
         import renode_smoke  # noqa: E402
 
         kwargs = {}
@@ -220,7 +233,7 @@ class ZMKRenodeTest(WestCommand):
         if args.storage_size is not None:
             kwargs["storage_size"] = args.storage_size
 
-        log.inf("[*] Running real-binary liveness smoke test")
+        log.inf("[*] Running ble-mode boot-liveness smoke test")
         try:
             renode_smoke.run_liveness_smoke(
                 elf=elf,
@@ -233,7 +246,7 @@ class ZMKRenodeTest(WestCommand):
             log.die(f"liveness smoke test FAILED: {err}")
         log.inf("[*] Liveness smoke test OK")
 
-    def _run_smoke(self, args, elf: Path, renode_path: str) -> None:
+    def _run_uart_smoke(self, args, elf: Path, renode_path: str) -> None:
         import renode_harness  # noqa: E402
         import renode_smoke  # noqa: E402
 
@@ -250,9 +263,9 @@ class ZMKRenodeTest(WestCommand):
                 )
             proto_dir = self._find_studio_proto_dir(renode_harness)
 
-        log.inf("[*] Running generic Renode smoke test")
+        log.inf("[*] Running uart-mode Renode smoke test")
         try:
-            renode_smoke.run_smoke(
+            renode_smoke.run_uart_smoke(
                 elf=elf,
                 renode_path=renode_path,
                 studio_proto_dir=proto_dir,
@@ -302,14 +315,18 @@ class ZMKRenodeTest(WestCommand):
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(LIB_RENODE_DIR) + (os.pathsep + existing if existing else "")
+        # Module-test env contract (see docs/renode-testing.md):
+        #   ZMK_RENODE_MODE  = uart | ble  (which harness a test should build)
+        #   ZMK_RENODE_ELF   = the DUT ELF
+        # ble mode also exports the storage-partition overrides and, when a host
+        # was given, ZMK_RENODE_HOST_ELF for renode_harness.boot_ble_pair().
+        env["ZMK_RENODE_MODE"] = args.mode
         env["ZMK_RENODE_ELF"] = str(elf)
-        if args.real_binary or args.ble:
-            # Tell the module's own tests to build real-binary machines
-            # (renode_harness.boot_single_real / boot_ble_pair) rather than the
-            # UART-RPC one, and honor the same storage-partition overrides.
+        if args.mode == "ble":
+            # ble-mode tests build a real image via renode_harness.boot_single_real
+            # (liveness) or boot_ble_pair (two-machine), honoring these overrides.
             import renode_harness  # noqa: E402
 
-            env["ZMK_RENODE_REAL"] = "1"
             addr = (
                 args.storage_addr
                 if args.storage_addr is not None
@@ -322,12 +339,8 @@ class ZMKRenodeTest(WestCommand):
             )
             env["ZMK_RENODE_STORAGE_ADDR"] = hex(addr)
             env["ZMK_RENODE_STORAGE_SIZE"] = hex(size)
-        if args.ble:
-            # BLE mode contract: a module's own tests build a two-machine
-            # renode_harness.boot_ble_pair(dut_elf=ZMK_RENODE_ELF,
-            # host_elf=ZMK_RENODE_HOST_ELF).
-            env["ZMK_RENODE_BLE"] = "1"
-            env["ZMK_RENODE_HOST_ELF"] = str(Path(args.host_elf).absolute())
+            if args.host_elf:
+                env["ZMK_RENODE_HOST_ELF"] = str(Path(args.host_elf).absolute())
 
         failures = []
         for test_file in test_files:

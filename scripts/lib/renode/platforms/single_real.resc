@@ -3,7 +3,7 @@
 
 # Real-binary counterpart of single.resc: loads xiao_nrf52840_real.repl (which
 # adds the USBD/QSPI/FICR stubs a real flashable image needs -- see that file
-# and README.md's real-binary section) instead of the studio-rpc-uart platform.
+# and docs/renode-internals.md) instead of the studio-rpc-uart platform.
 #
 # A real image speaks Studio RPC only over USB/BLE, so there is no UART RPC
 # transport to attach to -- but uart0 may still carry a console (observation

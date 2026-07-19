@@ -434,8 +434,8 @@ def boot_single(
 
 # --------------------------------------------------------------------------
 # Convenience: boot a REAL flashable image (USB CDC + QSPI + BLE) using
-# platforms/single_real.resc + xiao_nrf52840_real.repl (see README's
-# real-binary section for what the platform stubs do and why).
+# platforms/single_real.resc + xiao_nrf52840_real.repl (see
+# docs/renode-internals.md for what the platform stubs do and why).
 # --------------------------------------------------------------------------
 
 

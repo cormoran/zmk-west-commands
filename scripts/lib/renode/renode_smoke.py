@@ -17,12 +17,21 @@ module's own tests (e.g. this template's tests/renode/test_renode.py)
 import renode_harness directly for anything more specific (their own custom
 RPC subsystem, etc.).
 
+Two modes (`--mode`, default `uart`); `--elf` is the DUT in both. ble mode
+boots a real hardware image instead and (with `--host-elf`) drives an encrypted
+Studio-over-BLE read, or without a host a boot-liveness check. See
+docs/renode-testing.md and docs/renode-internals.md.
+
 Usage:
+    # uart mode (default):
     python renode_smoke.py --elf /path/to/zmk.elf \\
         --studio-proto-dir /path/to/zmk-studio-messages/proto/zmk
-
     # or let it auto-discover the proto dir under a west topdir:
     python renode_smoke.py --elf /path/to/zmk.elf --west-topdir /path/to/module
+
+    # ble mode (real image + host app):
+    python renode_smoke.py --mode ble --elf /path/to/zmk.elf \\
+        --host-elf /path/to/renode-ble-host/zephyr.elf
 
 Exits non-zero (with a message on stderr) on any failure.
 """
@@ -72,7 +81,7 @@ def _clean_symbol(find_symbol_output: str) -> str:
     return ""
 
 
-def run_smoke(
+def run_uart_smoke(
     elf: Path,
     renode_path: str,
     studio_proto_dir: Path | None = None,
@@ -81,9 +90,10 @@ def run_smoke(
     boot_timeout: float = 15.0,
     rpc_timeout: float = 10.0,
 ) -> None:
-    """Boot `elf` under Renode and assert the ZMK boot banner appears; unless
-    `check_rpc` is False, also assert a core Studio RPC GetDeviceInfo round
-    trip (which requires `studio_proto_dir`)."""
+    """uart-mode smoke: boot `elf` (built with the renode-studio-uart snippet)
+    under Renode and assert the ZMK boot banner appears; unless `check_rpc` is
+    False, also assert a core Studio RPC GetDeviceInfo round trip (which
+    requires `studio_proto_dir`)."""
     if check_rpc:
         if studio_proto_dir is None:
             raise ValueError("studio_proto_dir is required unless check_rpc is False")
@@ -142,9 +152,10 @@ def run_liveness_smoke(
     rtt: bool = False,
     device_addr: int | None = None,
 ) -> None:
-    """Real-binary liveness smoke: boot a real flashable image (no UART Studio
-    transport) and prove it is still running -- not parked in a Zephyr fatal --
-    after `min_virtual` virtual seconds.
+    """ble-mode boot-liveness smoke (no host): boot a real flashable image (no
+    UART Studio transport) and prove it is still running -- not parked in a
+    Zephyr fatal -- after `min_virtual` virtual seconds. This is what ble mode
+    degrades to when no --host-elf is given.
 
     Runs the emulation until virtual time reaches `min_virtual`, then samples
     `sysbus.cpu PC` `sample_count` times over a few more virtual seconds and
@@ -246,7 +257,7 @@ BLE_FAIL_MARKERS = (
 )
 
 
-def run_ble_smoke(
+def run_ble_studio_smoke(
     dut_elf: Path,
     host_elf: Path,
     renode_path: str,
@@ -256,7 +267,7 @@ def run_ble_smoke(
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
 ) -> None:
-    """Studio-over-BLE smoke: boot a real ZMK DUT and the renode-ble-host app on
+    """ble-mode Studio smoke (with host): boot a real ZMK DUT and the renode-ble-host app on
     one Renode BLE medium (fake CCM in both machines), then assert the host
     reaches an encrypted GATT read of the ZMK Studio RPC characteristic.
 
@@ -395,86 +406,88 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--elf", required=True, type=Path)
+    ap.add_argument("--elf", required=True, type=Path, help="DUT firmware ELF (both modes).")
+    ap.add_argument(
+        "--mode",
+        choices=("uart", "ble"),
+        default="uart",
+        help="uart (default): snippet-built DUT, boot banner + Studio GetDeviceInfo over "
+        "emulated UARTs. ble: real hardware image; with --host-elf a full encrypted "
+        "Studio-over-BLE read (S4/S5), without it a boot-liveness check.",
+    )
+    ap.add_argument(
+        "--host-elf",
+        type=Path,
+        help="ble mode only: the renode-ble-host app ELF (built with `west build -b "
+        "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`). Given -> full S4/S5 "
+        "smoke; omitted -> boot-liveness only.",
+    )
+    ap.add_argument(
+        "--no-rpc",
+        action="store_true",
+        help="uart mode: check only the boot banner (for modules without Studio RPC).",
+    )
     ap.add_argument(
         "--studio-proto-dir",
         type=Path,
-        help="path to zmk-studio-messages' proto/zmk dir (auto-discovered from --west-topdir if omitted)",
+        help="uart mode: path to zmk-studio-messages' proto/zmk dir "
+        "(auto-discovered from --west-topdir if omitted).",
     )
     ap.add_argument("--west-topdir", type=Path, help="used to auto-discover --studio-proto-dir")
     ap.add_argument("--renode-version", default=renode_harness.RENODE_VERSION_DEFAULT)
     ap.add_argument("--boot-timeout", type=float, default=15.0)
     ap.add_argument("--rpc-timeout", type=float, default=10.0)
-    ap.add_argument(
-        "--no-rpc",
-        action="store_true",
-        help="check only the boot banner (for modules that do not enable Studio RPC)",
-    )
-    ap.add_argument(
-        "--real-binary",
-        action="store_true",
-        help="real-binary liveness smoke: boot a real flashable USB/BLE/QSPI image "
-        "(no UART RPC) and check it is not parked in a Zephyr fatal after --min-virtual "
-        "seconds, via PC-symbol sampling. Ignores --no-rpc/--studio-proto-dir.",
-    )
-    ap.add_argument(
+
+    # Advanced ble-mode knobs (see docs/renode-testing.md).
+    adv = ap.add_argument_group("advanced ble-mode knobs")
+    adv.add_argument(
         "--min-virtual",
         type=float,
         default=20.0,
-        help="real-binary mode: virtual seconds to run before sampling (default: 20).",
+        help="ble mode (liveness): virtual seconds to run before PC sampling (default: 20).",
     )
-    ap.add_argument(
+    adv.add_argument(
         "--rtt",
         action="store_true",
-        help="real-binary mode: capture Zephyr SEGGER RTT log output during the "
-        "liveness run (RTT-logging builds); printed and scanned for fatal markers.",
+        help="ble mode (liveness): capture Zephyr SEGGER RTT log output during the "
+        "run (RTT-logging builds); printed and scanned for fatal markers.",
     )
-    ap.add_argument(
-        "--ble",
-        action="store_true",
-        help="Studio-over-BLE smoke: boot the real DUT (--elf) and the "
-        "renode-ble-host app (--host-elf) on one BLE medium and assert an "
-        "encrypted Studio RPC read (S4+S5). Runs ~6-7 min wall. See README.",
-    )
-    ap.add_argument(
-        "--host-elf",
-        type=Path,
-        help="BLE mode: the renode-ble-host app ELF (built with `west build -b "
-        "nrf52840dk/nrf52840 -s <this repo>/renode-ble-host`).",
-    )
-    ap.add_argument(
-        "--ble-virtual-budget",
+    adv.add_argument(
+        "--virtual-budget",
         type=float,
         default=20.0,
-        help="BLE mode: virtual seconds to reach the encrypted read before "
+        help="ble mode (with host): virtual seconds to reach the encrypted read before "
         "failing (default: 20; ~3.3s is typical).",
     )
-    ap.add_argument(
-        "--ble-steady-quantum",
+    adv.add_argument(
+        "--steady-quantum",
         default=None,
-        help="BLE mode: after the encrypted link is up (S4), raise the global "
-        "time-sync quantum to this value (e.g. 0.001) for the steady-state phase. "
-        "Pairing needs the 10us boot quantum, but the encrypted link tolerates a "
-        "100x-coarser quantum and runs ~7x faster -- use for long BLE tests. "
-        "Default: keep 10us throughout. See README's BLE performance section.",
+        help="ble mode (with host): after the encrypted link is up (S4), raise the global "
+        "time-sync quantum to this value (e.g. 0.001) for the steady-state phase. Pairing "
+        "needs the 10us boot quantum, but the encrypted link tolerates a 100x-coarser "
+        "quantum and runs ~7x faster -- use for long BLE tests. Default: keep 10us "
+        "throughout. See docs/renode-testing.md.",
     )
-    ap.add_argument(
+    adv.add_argument(
         "--storage-addr",
         type=lambda s: int(s, 0),
         default=renode_harness.STORAGE_ADDR_DEFAULT,
-        help="real-binary/BLE mode: NVS storage_partition address to preload as erased "
-        "0xFF (default: 0xec000, xiao_ble).",
+        help="ble mode: NVS storage_partition address to preload as erased 0xFF "
+        "(default: 0xec000, xiao_ble).",
     )
-    ap.add_argument(
+    adv.add_argument(
         "--storage-size",
         type=lambda s: int(s, 0),
         default=renode_harness.STORAGE_SIZE_DEFAULT,
-        help="real-binary/BLE mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
+        help="ble mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
     )
     args = ap.parse_args(argv)
 
     if not args.elf.is_file():
         print(f"ELF not found: {args.elf}", file=sys.stderr)
+        return 2
+    if args.mode == "uart" and args.host_elf is not None:
+        print("--host-elf is only valid with --mode ble", file=sys.stderr)
         return 2
 
     renode_path = renode_harness.find_or_install_renode(version=args.renode_version)
@@ -482,42 +495,42 @@ def main(argv: list[str] | None = None) -> int:
         print("Renode is not installed and could not be auto-installed", file=sys.stderr)
         return 2
 
-    if args.ble:
-        if args.host_elf is None or not args.host_elf.is_file():
-            print("BLE mode requires --host-elf <renode-ble-host ELF>", file=sys.stderr)
-            return 2
+    if args.mode == "ble":
         try:
-            run_ble_smoke(
-                dut_elf=args.elf,
-                host_elf=args.host_elf,
-                renode_path=renode_path,
-                virtual_budget=args.ble_virtual_budget,
-                storage_addr=args.storage_addr,
-                storage_size=args.storage_size,
-                steady_quantum=args.ble_steady_quantum,
-            )
+            if args.host_elf is not None:
+                if not args.host_elf.is_file():
+                    print(f"host ELF not found: {args.host_elf}", file=sys.stderr)
+                    return 2
+                run_ble_studio_smoke(
+                    dut_elf=args.elf,
+                    host_elf=args.host_elf,
+                    renode_path=renode_path,
+                    virtual_budget=args.virtual_budget,
+                    storage_addr=args.storage_addr,
+                    storage_size=args.storage_size,
+                    steady_quantum=args.steady_quantum,
+                )
+            else:
+                print(
+                    "ble mode without --host-elf: no host given, checking DUT boot liveness "
+                    "only (no encrypted Studio read).",
+                    file=sys.stderr,
+                )
+                run_liveness_smoke(
+                    elf=args.elf,
+                    renode_path=renode_path,
+                    min_virtual=args.min_virtual,
+                    storage_addr=args.storage_addr,
+                    storage_size=args.storage_size,
+                    rtt=args.rtt,
+                )
         except AssertionError as err:
             print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
             return 1
         print("SMOKE TEST OK", file=sys.stderr)
         return 0
 
-    if args.real_binary:
-        try:
-            run_liveness_smoke(
-                elf=args.elf,
-                renode_path=renode_path,
-                min_virtual=args.min_virtual,
-                storage_addr=args.storage_addr,
-                storage_size=args.storage_size,
-                rtt=args.rtt,
-            )
-        except AssertionError as err:
-            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
-            return 1
-        print("SMOKE TEST OK", file=sys.stderr)
-        return 0
-
+    # uart mode.
     proto_dir = None
     if not args.no_rpc:
         proto_dir = args.studio_proto_dir
@@ -528,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
             proto_dir = renode_harness.find_studio_proto_dir(args.west_topdir)
 
     try:
-        run_smoke(
+        run_uart_smoke(
             elf=args.elf,
             renode_path=renode_path,
             studio_proto_dir=proto_dir,
