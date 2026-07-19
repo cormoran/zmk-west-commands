@@ -1,6 +1,32 @@
 # Design: Studio-over-USB on the unchanged firmware image (Renode "usb mode")
 
-Status: design study, 2026-07-19. Not implemented yet.
+Status: design study, 2026-07-19. Phases 0-2 implemented (gaps (a)-(d)
+closed); Phase 2 gate green 2026-07-19 -- a real `studio-rpc-usb-uart`
+flashable image answers a Studio RPC `GetDeviceInfo` round trip over the
+emulated USB CDC via `DualCdcAcmBridge` + two TCP socket terminals
+(`renode_harness.attach_dual_cdc_bridge`). Phase-2 findings that amend the
+text below:
+
+- **Bridge channels are machine peripherals, not externals.** `connector
+  Connect <uart> <terminal>` runs `BackendTerminal.AttachTo`, which resolves
+  the IUART's machine via `GetMachine()` -- fatal crash on 1.16.1 for a
+  machine-less external IUART (so `CDCToUARTConverter`-style `IUART +
+  IExternal` cannot be wired to a socket terminal at all). The channels are
+  registered on sysbus with `NullRegistrationPoint` (the VirtualConsole
+  pattern) instead.
+- **CDC interface order** (verified empirically from the real descriptors):
+  when both CDCs are enabled, the board console CDC is the composite's first
+  CDC function and the snippet Studio CDC the second. The standard
+  `studio-rpc-usb-uart` artifacts (`exp-hw-obs`/`exp-hw-real`) have the board
+  CDC *disabled* (it requires `CONFIG_ZMK_USB_LOGGING`), so their composite
+  is 1xCDC (Studio, interfaces 0/1) + HID and there is no console-CDC channel
+  to assert; the dual-channel path (console banner on cdc0 + Studio RPC on
+  cdc1) was proven on the split-central artifact, which enables both.
+- **Two-step attach.** Terminal wiring must complete before enumeration
+  starts or the first post-configuration device output races the hookup;
+  `CreateDualCdcAcmBridge` / `AttachDualCdcAcmBridge` split exists for this,
+  and `pause`/`start` completions must be polled (`machine IsPaused`) -- both
+  return before the state change lands on a busy machine.
 
 ## Goal
 
