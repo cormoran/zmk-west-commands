@@ -137,41 +137,70 @@ options:
 ### west zmk-renode-test
 
 Boot an **already-built** ZMK firmware ELF in the [Renode](https://renode.io/)
-emulator, run a generic boot + core Studio RPC smoke test, then (optionally)
-the module's own `tests/renode/*_test.py` files. Hardware-free — no J-Link, no
-physical board. This command never builds firmware; the caller builds the ELF.
+emulator, run a boot + Studio smoke test, then (optionally) the module's own
+`tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
+This command never builds firmware; the caller builds the ELF.
 
-```bash
-# Smoke test only (boot banner + core Studio GetDeviceInfo round trip)
-$ west zmk-renode-test --elf build/renode/zephyr/zmk.elf
+There are **two modes** (`--mode`, default `ble`). `--elf` is the DUT in both:
 
-# Smoke test + the module's own custom-RPC tests
-$ west zmk-renode-test tests/renode --elf build/renode/zephyr/zmk.elf
+| Mode | DUT you build | What the smoke proves | Runtime |
+|---|---|---|---|
+| **`ble`** (default) | the exact `studio-rpc-usb-uart` **hardware** image you would flash — **no extra config** | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
+| **`uart`** | ELF built with this repo's `renode-studio-uart` snippet | Boots (ZMK banner) and answers a core Studio `GetDeviceInfo` over an emulated UART | ~15 s |
 
-# Boot-banner only, for a module that does not enable Studio RPC
-$ west zmk-renode-test --elf build/renode/zephyr/zmk.elf --no-rpc
-```
-
-```
-usage: west zmk-renode-test [-h] --elf ELF [--renode-version RENODE_VERSION]
-                            [--boot-timeout BOOT_TIMEOUT] [--skip-smoke] [--no-rpc]
-                            [tests_dir]
-```
+ble is the default because it boots the **exact image you flash** — a module
+needs no Renode-specific build artifact. uart mode is faster and does a direct
+UART Studio round trip, but requires you to add a `renode-studio-uart` snippet
+build (see below).
 
 Renode is downloaded automatically on first use (a portable tarball, cached
 under `$RENODE_ROOT`, default `~/.renode`). Each `tests_dir/*_test.py` file is
-run non-recursively as `python3 <file> -v` with `ZMK_RENODE_ELF` set to the ELF
-and the harness (`scripts/lib/renode/`) prepended to `PYTHONPATH`, so a test
-file only needs `import renode_harness`.
+run non-recursively as `python3 <file> -v` with the harness (`scripts/lib/renode/`)
+on `PYTHONPATH` and the `ZMK_RENODE_*` env contract set — see
+[docs/renode-testing.md](docs/renode-testing.md).
 
-#### Building a Renode-testable ELF
+#### ble mode (default)
 
-This repo is also a Zephyr module: it provides the `renode-studio-uart` snippet
-and a Renode-only Studio RPC UART transport (both inert unless the snippet is
-used — see `renode-test-module/Kconfig`). Real hardware carries Studio RPC over
-USB-CDC, which Renode's nRF52840 USBD model cannot present; the snippet binds
-Studio RPC + the console to real UART peripherals instead. Add a `build.yaml`
-artifact that uses it:
+The DUT is the **real flashable image** (ZMK's own `studio-rpc-usb-uart`
+snippet: USB CDC + QSPI NOR + BLE), with **zero firmware-side deviation** —
+platform stubs make that exact image boot under Renode, so there is nothing
+module-specific to build. Build the [`renode-ble-host`](renode-ble-host/) app
+(the simulated computer) once, then run the two-machine BLE smoke:
+
+```bash
+# build the exact hardware image (no renode-studio-uart snippet):
+$ west zmk-build <your-zmk-config> -af <your studio-rpc-usb-uart artifact>
+# build the host app once (match its target-name prefix to your DUT's
+# advertised CONFIG_ZMK_KEYBOARD_NAME; default prefix is "Module"):
+$ west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host \
+      -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your DUT name>"'
+$ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf \
+      --host-elf build/zephyr/zephyr.elf
+```
+
+The host pairs (LE SC Just Works) and does an encrypted Studio GATT read — the
+same code paths as a hardware Studio-over-BLE session. **Without `--host-elf`**
+it degrades to a boot-liveness check (the real image boots and is not parked in
+a Zephyr fatal), handy to smoke a real image when you have no host app:
+
+```bash
+$ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
+```
+
+> ble mode's encrypted read is a **functional** check, **not** a cryptographic
+> one — Renode has no AES-CCM engine, so both machines share a *fake*
+> identity-transform CCM. Do not use it to validate crypto. Details, and how a
+> real image boots at all under Renode, are in
+> [docs/renode-internals.md](docs/renode-internals.md).
+
+#### uart mode
+
+The DUT is built with the `renode-studio-uart` snippet this repo ships as a
+Zephyr module: real hardware carries Studio RPC over USB-CDC, which Renode's
+nRF52840 USBD model cannot present, so the snippet re-binds Studio RPC + the
+console to real UART peripherals Renode can drive. This is extra build config
+(vs. ble mode's flashable image), but gives a fast direct UART Studio round
+trip. Add a `build.yaml` artifact:
 
 ```yaml
 include:
@@ -185,27 +214,26 @@ include:
 
 ```bash
 $ west zmk-build <your-zmk-config> -af renode
-$ west zmk-renode-test tests/renode --elf build/renode/zephyr/zmk.elf
+# smoke + the module's own custom-RPC tests:
+$ west zmk-renode-test tests/renode --mode uart --elf build/renode/zephyr/zmk.elf
+# boot-banner only, for a module that does not enable Studio RPC:
+$ west zmk-renode-test --mode uart --elf build/renode/zephyr/zmk.elf --no-rpc
 ```
 
 > `CONFIG_ZMK_STUDIO=y` build-asserts on a `zmk,physical-layout` (with
 > `key_physical_attrs`) **and** the absence of a chosen `zmk,matrix-transform`.
 > Give your shield/board a keys'd physical layout that references the transform
 > directly — see the in-repo example
-> `tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`.
-
-> The HWv2 `xiao_ble//zmk` board (and the node labels the `renode-studio-uart`
-> overlay disables) only exist on newer ZMK; this repo's own CI pins ZMK
-> `main` for the Renode job (`scripts/west-test-renode.yml`) while the rest of
-> the tests stay on `v0.3-branch`.
+> `tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`, and
+> [docs/renode-testing.md](docs/renode-testing.md) for the newer-ZMK board note.
 
 #### Requirements
 
-The smoke test's Studio RPC check compiles the workspace's `zmk-studio-messages`
-protos, so it needs the python `protobuf` runtime and the `protoc` compiler.
-Install the python side with `pip install -r requirements-test.txt` (`protoc` is
-a system package, e.g. `apt-get install protobuf-compiler`). Pass `--no-rpc` to
-skip this and check only the boot banner.
+uart mode's Studio RPC check compiles the workspace's `zmk-studio-messages`
+protos, so it needs the python `protobuf` runtime and the `protoc` compiler:
+`pip install -r requirements-test.txt` (`protoc` is a system package, e.g.
+`apt-get install protobuf-compiler`). Pass `--no-rpc` to check only the boot
+banner.
 
 #### GitHub Action
 
@@ -217,11 +245,26 @@ manifest:
 ```yaml
 - uses: cormoran/zmk-west-commands/.github/actions/zmk-renode-test@main
   with:
-    elf-path: build/renode/zephyr/zmk.elf
-    tests: tests/renode          # optional
+    # default mode is `ble`: elf-path is the real studio-rpc-usb-uart image.
+    elf-path: build/ble/zephyr/zmk.elf
+    host-elf: build/zephyr/zephyr.elf   # optional; ble full S4/S5 (else liveness)
+    # mode: uart                         # opt in to the snippet-built UART DUT
+    tests: tests/renode                  # optional
 ```
 
 See `.github/actions/zmk-renode-test/README.md` for the full contract.
+
+#### Going deeper
+
+- **[docs/renode-testing.md](docs/renode-testing.md)** — the advanced knobs
+  (`--rtt`, `--steady-quantum`, `--min-virtual`, storage overrides), the
+  `ZMK_RENODE_*` module-test env contract, observing a real image over SEGGER
+  RTT, BLE-mode performance + the fine-then-coarse quantum, a troubleshooting
+  table, and limitations.
+- **[docs/renode-internals.md](docs/renode-internals.md)** — how a real
+  hardware image boots under Renode at all: the QSPI/USBD/FICR/NVMC stubs, the
+  NVS preload, the fake-CCM identity transform (with the two load-bearing
+  gotchas and the crypto disclaimer), and the DLE-27 / 10 µs quantum constraints.
 
 ### west zmk-ble-test
 

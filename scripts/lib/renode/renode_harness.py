@@ -17,6 +17,7 @@ the *how*.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -64,7 +65,65 @@ __all__ = [
     "load_studio_pb2",
     "find_studio_proto_dir",
     "boot_single",
+    "boot_single_real",
+    "boot_ble_pair",
+    "STORAGE_ADDR_DEFAULT",
+    "STORAGE_SIZE_DEFAULT",
+    "DEFAULT_DEVICE_ADDR",
+    "device_addr_for_machine",
+    "raise_global_quantum",
+    "SEGGER_RTT_HELPER",
 ]
+
+# xiao_ble storage_partition (from the board's zephyr.dts): the internal-flash
+# region NVS/settings uses. Renode's MappedMemory zero-fills, but NVS needs
+# erased sectors to read 0xFF, so real-binary mode preloads this range with
+# 0xFF before `start` (see boot_single_real). Defaults match xiao_ble; override
+# for other boards via the CLI flags.
+STORAGE_ADDR_DEFAULT = 0xEC000
+STORAGE_SIZE_DEFAULT = 0x8000
+
+# Default BLE identity served by the FICR model (see platforms/models/ficr.py):
+# the static-random address C0:E7:E7:E7:E7:E7 (48-bit int, MSB 0xC0 first).
+# Machine 0 uses this; multi-machine tests derive a distinct address per machine
+# via device_addr_for_machine() so two machines never share a BLE address.
+DEFAULT_DEVICE_ADDR = 0xC0E7E7E7E7E7
+
+# The Zephyr-aware SEGGER RTT capture helper, `include`d over the monitor when
+# boot_single_real(rtt=True) is used (see that function and the file header).
+SEGGER_RTT_HELPER = SCRIPTS_DIR / "segger_rtt_writeskip.py"
+
+
+def raise_global_quantum(session: "RenodeSession", quantum: str) -> None:
+    """Raise (or lower) the emulation global time-sync quantum on a live session.
+
+    BLE mode boots at a 10us global quantum (SetGlobalQuantum "0.00001"), which is
+    load-bearing through connection + pairing but is also the dominant wall-clock
+    cost of two-machine BLE runs (see README's "BLE-mode performance" section): the
+    two CPUs re-synchronise every 10us of virtual time, so the emulation runs at
+    ~0.10x realtime. Once the encrypted link is up (host STAGE:S4), the soft
+    link-layer tolerates a much coarser quantum: raising it to "0.0001" (10x) or
+    "0.001" (100x) keeps the connection alive with no disconnect / LL assert and an
+    encrypted GATT read (S5) still succeeds -- hardware-in-the-loop-free measured
+    ~7x steady-state speedup at "0.001". Use this from a module's own long-running
+    BLE test AFTER it has observed the encrypted link, to run the steady-state
+    workload ("fine-then-coarse"). Do NOT call it before pairing -- a coarse
+    quantum from boot breaks advertising/pairing entirely (verified: even 0.00003
+    never connects)."""
+    assert session.mon is not None
+    session.mon.execute(f'emulation SetGlobalQuantum "{quantum}"')
+
+
+def device_addr_for_machine(index: int) -> int:
+    """Return a deterministic 48-bit BLE static-random address for machine
+    `index`, keeping the MSB (top byte) fixed at 0xC0 so it stays a valid
+    static-random address (top two bits 0b11). Machine 0 returns the default
+    C0:E7:E7:E7:E7:E7; each subsequent machine bumps the low 40 bits by
+    `index`, so a two-machine BLE test can call this per machine and get
+    distinct identities."""
+    msb = DEFAULT_DEVICE_ADDR & 0xFF0000000000
+    low = ((DEFAULT_DEVICE_ADDR & 0xFFFFFFFFFF) + index) & 0xFFFFFFFFFF
+    return msb | low
 
 
 # --------------------------------------------------------------------------
@@ -371,3 +430,256 @@ def boot_single(
     rpc = session.connect_uart(port_base + 2)
     session.go()
     return session, console, rpc
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot a REAL flashable image (USB CDC + QSPI + BLE) using
+# platforms/single_real.resc + xiao_nrf52840_real.repl (see
+# docs/renode-internals.md for what the platform stubs do and why).
+# --------------------------------------------------------------------------
+
+
+def _materialize_ficr(device_addr: int) -> str:
+    """Write a temp copy of platforms/models/ficr.py with its DEVICEADDR0/
+    DEVICEADDR1 constants rewritten to `device_addr` (a 48-bit BLE address, MSB
+    first). Used so each machine in a multi-machine emulation can serve a
+    distinct BLE identity -- two machines sharing FICR DEVICEADDR would advertise
+    the same address and break BLE tests. Returns the temp file path (caller
+    deletes it once the platform has loaded)."""
+    addr0 = device_addr & 0xFFFFFFFF  # DEVICEADDR[0] = low 32 bits
+    addr1 = (device_addr >> 32) & 0xFFFF  # DEVICEADDR[1] = high 16 bits
+    src = (PLATFORMS_DIR / "models" / "ficr.py").read_text()
+    src = re.sub(r"^DEVICEADDR0 = .*$", f"DEVICEADDR0 = {hex(addr0)}", src, count=1, flags=re.M)
+    src = re.sub(r"^DEVICEADDR1 = .*$", f"DEVICEADDR1 = {hex(addr1)}", src, count=1, flags=re.M)
+    fd, path = tempfile.mkstemp(prefix="zmk-ficr-", suffix=".py")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(src)
+    return path
+
+
+def _materialize_real_repl(ficr_path: str | None = None) -> str:
+    """Write a temp copy of platforms/xiao_nrf52840_real.repl with the model
+    `filename:` paths rewritten to absolute. Renode resolves PythonPeripheral
+    filenames against neither the .repl dir nor its cwd, so the checked-in repl
+    keeps them repo-relative (readable) and we make them absolute here. Returns
+    the temp file path (caller deletes it once the platform has loaded).
+
+    If `ficr_path` is given (an already-materialized per-machine ficr .py, see
+    _materialize_ficr), the FICR model's filename is pointed at it instead of the
+    checked-in models/ficr.py -- this is how a per-machine BLE address is injected
+    without touching the other model stubs."""
+    template = (PLATFORMS_DIR / "xiao_nrf52840_real.repl").read_text()
+    abs_models = str((PLATFORMS_DIR / "models").resolve())
+    repl = template.replace('filename: "platforms/models/', f'filename: "{abs_models}/')
+    if ficr_path is not None:
+        repl = repl.replace(f'filename: "{abs_models}/ficr.py"', f'filename: "{ficr_path}"')
+    fd, path = tempfile.mkstemp(prefix="xiao_nrf52840_real-", suffix=".repl")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(repl)
+    return path
+
+
+def _materialize_ccm_repl() -> str:
+    """Write a temp copy of platforms/ccm.repl with the models/ccm.py
+    `filename:` rewritten to absolute (same reason as _materialize_real_repl --
+    Renode does not resolve a PythonPeripheral filename against the .repl dir or
+    its cwd). Returns the temp file path (caller deletes it once loaded)."""
+    template = (PLATFORMS_DIR / "ccm.repl").read_text()
+    abs_ccm = str((PLATFORMS_DIR / "models" / "ccm.py").resolve())
+    repl = template.replace('filename: "platforms/models/ccm.py"', f'filename: "{abs_ccm}"')
+    fd, path = tempfile.mkstemp(prefix="zmk-ccm-", suffix=".repl")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(repl)
+    return path
+
+
+def _write_ff_binary(size: int) -> str:
+    """Write a temp `size`-byte all-0xFF file to preload as erased NVS sectors
+    (Renode zero-fills flash; NVS needs 0xFF to see erased sectors)."""
+    fd, path = tempfile.mkstemp(prefix="zmk-nvs-ff-", suffix=".bin")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(b"\xff" * size)
+    return path
+
+
+def boot_single_real(
+    renode_path: str,
+    elf: Path,
+    storage_addr: int = STORAGE_ADDR_DEFAULT,
+    storage_size: int = STORAGE_SIZE_DEFAULT,
+    boot_wait: float = 3.0,
+    port_base: int | None = None,
+    device_addr: int | None = None,
+    rtt: bool = False,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
+    """Boot a real flashable `elf` under Renode using platforms/single_real.resc
+    (the USBD/QSPI/FICR/NVMC-stub platform) with the storage partition preloaded
+    as erased 0xFF sectors. Returns (session, console_socket, rpc_socket); as with
+    boot_single the caller owns cleanup (session.stop() + closing sockets).
+
+    A real image has no UART Studio transport, so `rpc_socket` here is just the
+    (idle) uart1 terminal -- kept for symmetry and for a module's own tests.
+    uart0 (console_socket) carries a console only for observation builds; a pure
+    real image is silent, so liveness is judged by PC-symbol sampling, not UART
+    output -- see renode_smoke.run_liveness_smoke.
+
+    `device_addr` (a 48-bit BLE static-random address, MSB first) overrides the
+    FICR DEVICEADDR the image advertises; the default (None) keeps the checked-in
+    ficr.py value (C0:E7:E7:E7:E7:E7). A future two-machine harness passes a
+    distinct address per machine -- see device_addr_for_machine().
+
+    `rtt=True` sets up Zephyr-aware SEGGER RTT capture (segger_rtt_writeskip.py):
+    an RTT VirtualConsole is created, hooked, and exposed on port_base+3, and the
+    connected socket is stashed on `session.rtt_socket` for the caller to read
+    (RTT-logging builds only -- CONFIG_LOG + CONFIG_USE_SEGGER_RTT +
+    CONFIG_LOG_BACKEND_RTT; on a non-RTT build the hook install is a graceful
+    no-op and the socket stays silent). session.rtt_socket is None when rtt=False.
+    """
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    ficr_path = _materialize_ficr(device_addr) if device_addr is not None else None
+    repl_path = _materialize_real_repl(ficr_path)
+    ff_path = _write_ff_binary(storage_size)
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "single_real.resc",
+        monitor_port=port_base,
+        variables={
+            "bin": f"@{elf}",
+            "console_port": port_base + 1,
+            "rpc_port": port_base + 2,
+            "platform": f"@{repl_path}",
+        },
+        cwd=SKILL_DIR,
+    )
+    session.rtt_socket = None
+    try:
+        session.start(boot_wait=boot_wait)
+        # connect_uart blocks until the resc's CreateServerSocketTerminal lines
+        # run (which come after LoadPlatformDescription), so by here the temp
+        # repl has been consumed and the platform is loaded.
+        console = session.connect_uart(port_base + 1)
+        rpc = session.connect_uart(port_base + 2)
+        assert session.mon is not None
+        if rtt:
+            # The resc has already LoadELF'd (needed so the RTT symbol resolves),
+            # so we can include the helper, create+hook the RTT console and expose
+            # it as a socket terminal -- all before `start`, so no early RTT bytes
+            # are lost. setup_segger_rtt_wskip is a no-op if the symbol is absent.
+            rtt_port = port_base + 3
+            session.mon.execute(f"include @{SEGGER_RTT_HELPER}")
+            session.mon.execute('machine CreateVirtualConsole "segger_rtt"')
+            session.mon.execute("setup_segger_rtt_wskip sysbus.segger_rtt")
+            session.mon.execute(
+                f'emulation CreateServerSocketTerminal {rtt_port} "rtt_term" false'
+            )
+            session.mon.execute("connector Connect sysbus.segger_rtt rtt_term")
+            session.rtt_socket = session.connect_uart(rtt_port)
+        # Preload erased NVS sectors before the CPU runs (LoadBinary reads the
+        # file synchronously here, so it is safe to delete afterwards).
+        session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
+        session.go()
+    finally:
+        for tmp in (repl_path, ff_path, ficr_path):
+            if tmp is None:
+                continue
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return session, console, rpc
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot TWO real images on one BLE medium for Studio-over-BLE
+# tests (platforms/two_machine_ble.resc + the fake CCM). DUT = unmodified real
+# ZMK BLE image (advertiser); host = the renode-ble-host app (scan/connect/
+# pair/encrypted read). See README.md's Studio-over-BLE section for what this
+# proves and the (non-cryptographic) fake-CCM disclaimer.
+# --------------------------------------------------------------------------
+
+
+def boot_ble_pair(
+    renode_path: str,
+    dut_elf: Path,
+    host_elf: Path,
+    storage_addr: int = STORAGE_ADDR_DEFAULT,
+    storage_size: int = STORAGE_SIZE_DEFAULT,
+    boot_wait: float = 4.0,
+    port_base: int | None = None,
+    renode_log: Path | None = None,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket", "RpcSocket"]:
+    """Boot two real flashable images on one BLE medium under Renode using
+    platforms/two_machine_ble.resc, so the host image can pair with and do an
+    encrypted Studio-RPC GATT read against the DUT.
+
+    `dut_elf` is an unmodified real ZMK BLE image (peripheral/advertiser);
+    `host_elf` is the renode-ble-host app (the simulated computer). Both boot on
+    the USBD/QSPI/FICR/NVMC-stub real platform, each with a distinct FICR BLE
+    identity (device_addr_for_machine(0)/(1) -- two machines must not share a
+    BLE address), plus the fake AES-CCM peripheral injected into BOTH machines
+    so the encrypted link can come up (Renode has no CCM model -- see
+    platforms/models/ccm.py; this is an identity transform, NOT real crypto).
+
+    Returns (session, dut_console, dut_rpc, host_console); the caller owns
+    cleanup (session.stop() + closing the sockets). The DUT NVS storage
+    partition is preloaded with erased 0xFF sectors before `start` (as in
+    boot_single_real). If `renode_log` is given, Renode's log is written there
+    (so a caller can scan it for radio "trimming" warnings).
+    """
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    dut_ficr = _materialize_ficr(device_addr_for_machine(0))
+    host_ficr = _materialize_ficr(device_addr_for_machine(1))
+    dut_repl = _materialize_real_repl(dut_ficr)
+    host_repl = _materialize_real_repl(host_ficr)
+    ccm_repl = _materialize_ccm_repl()
+    ff_path = _write_ff_binary(storage_size)
+    tmps = [dut_ficr, host_ficr, dut_repl, host_repl, ccm_repl, ff_path]
+
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "two_machine_ble.resc",
+        monitor_port=port_base,
+        variables={
+            "dut_bin": f"@{dut_elf}",
+            "host_bin": f"@{host_elf}",
+            "dut_platform": f"@{dut_repl}",
+            "host_platform": f"@{host_repl}",
+            "ccm": f"@{ccm_repl}",
+            "d_console": port_base + 1,
+            "d_rpc": port_base + 2,
+            "h_console": port_base + 3,
+        },
+        cwd=SKILL_DIR,
+    )
+    try:
+        session.start(boot_wait=boot_wait)
+        assert session.mon is not None
+        if renode_log is not None:
+            session.mon.execute(f"logFile @{renode_log}")
+        # connect_uart blocks until the resc's CreateServerSocketTerminal lines
+        # have run, so the temp platforms have been consumed by here.
+        dut_console = session.connect_uart(port_base + 1)
+        dut_rpc = session.connect_uart(port_base + 2)
+        host_console = session.connect_uart(port_base + 3)
+        # Preload the DUT's erased NVS sectors before the CPUs run. LoadBinary is
+        # machine-scoped, so select the DUT first (the resc leaves "host"
+        # selected as the last-created machine). The host app keeps keys in RAM
+        # (no NVS backend), so it needs no preload.
+        session.mon.execute('mach set "dut"')
+        session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
+        session.go()
+    finally:
+        for tmp in tmps:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return session, dut_console, dut_rpc, host_console

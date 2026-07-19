@@ -55,7 +55,7 @@ jobs:
 
   renode:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     container:
       image: zmkfirmware/zmk-build-arm:stable
     name: Renode
@@ -81,15 +81,31 @@ jobs:
           west init -l . --mf scripts/west-test-renode-standalone.yml
           west update --narrow
           west zephyr-export
-      - name: Build Renode-testable firmware
-        # -d keeps the ELF under $GITHUB_WORKSPACE (the standalone manifest
-        # puts `west topdir` at the checkout's parent, so the default build
-        # dir would land outside it). build-renode.yaml is a separate file so
-        # the v0.3 unittests never try to build the HWv2 board.
+      - name: Build ble-mode DUT (real studio-rpc-usb-uart image)
+        # The DUT for the DEFAULT ble mode: the exact hardware-flashable image,
+        # with NO renode-studio-uart snippet (build-ble.yaml). -d keeps the ELF
+        # under $GITHUB_WORKSPACE (the standalone manifest puts `west topdir` at
+        # the checkout's parent, so the default build dir would land outside it).
+        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble.yaml -af ble -d build
+      - name: Build uart-mode DUT (renode-studio-uart snippet image)
+        # Kept so uart mode stays covered too. build-renode.yaml is a separate
+        # file so the v0.3 unittests never try to build the HWv2 board.
         run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-renode.yaml -af renode -d build
-      - name: Renode smoke test
+      - name: Build renode-ble-host app
+        # The Studio-over-BLE host (a stock nrf52840dk Zephyr app). Match its
+        # target-name prefix to this repo's DUT, which the renode_tester shield
+        # names "Renode" (tests/.../renode_tester/Kconfig.defconfig); the default
+        # "Module" prefix would never match the advertisement.
+        run: west build -b nrf52840dk/nrf52840 -d build/ble-host -s renode-ble-host -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"Renode"'
+      - name: Renode ble-mode smoke test (default; full S4/S5)
         uses: ./.github/actions/zmk-renode-test
         with:
+          elf-path: build/ble/zephyr/zmk.elf
+          host-elf: build/ble-host/zephyr/zephyr.elf
+      - name: Renode uart-mode smoke test
+        uses: ./.github/actions/zmk-renode-test
+        with:
+          mode: uart
           elf-path: build/renode/zephyr/zmk.elf
 
   ble:

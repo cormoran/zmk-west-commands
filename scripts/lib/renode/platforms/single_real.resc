@@ -1,0 +1,39 @@
+:name: XIAO nRF52840 single -- REAL-BINARY mode (boot a flashable USB/BLE/QSPI image)
+:description: Boot one real xiao_ble ZMK image (studio-rpc-usb-uart snippet) unmodified.
+
+# Real-binary counterpart of single.resc: loads xiao_nrf52840_real.repl (which
+# adds the USBD/QSPI/FICR stubs a real flashable image needs -- see that file
+# and docs/renode-internals.md) instead of the studio-rpc-uart platform.
+#
+# A real image speaks Studio RPC only over USB/BLE, so there is no UART RPC
+# transport to attach to -- but uart0 may still carry a console (observation
+# builds) and uart1 exists in the platform, so both are exposed as server
+# sockets for symmetry with single.resc / for a module's own tests. Liveness is
+# verified by PC-symbol sampling rather than a UART round trip (see
+# renode_smoke.run_liveness_smoke).
+#
+# This script does NOT preload the NVS storage partition or call `start`: the
+# harness issues `sysbus LoadBinary` (erased-0xFF sectors, so nvs_mount does
+# not fail -EDEADLK) and `start` over the monitor, after connecting the UART
+# sockets -- see renode_harness.boot_single_real.
+
+using sysbus
+
+$bin?=@zmk.elf
+$console_port?=3455
+$rpc_port?=3456
+# $platform is the real repl with absolute model-.py paths, materialized by
+# renode_harness.boot_single_real; the default here keeps the script runnable
+# only after those paths are made absolute (see the .repl header).
+$platform?=@platforms/xiao_nrf52840_real.repl
+
+mach create "single"
+machine LoadPlatformDescription $platform
+
+emulation CreateServerSocketTerminal $console_port "console_term" false
+connector Connect sysbus.uart0 console_term
+
+emulation CreateServerSocketTerminal $rpc_port "rpc_term" false
+connector Connect sysbus.uart1 rpc_term
+
+sysbus LoadELF $bin

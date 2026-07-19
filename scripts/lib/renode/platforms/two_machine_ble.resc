@@ -1,0 +1,64 @@
+:name: Two nRF52840 machines on one BLE medium -- Studio-over-BLE REAL-BINARY mode
+:description: DUT = unmodified real ZMK BLE image (peripheral/advertiser); host =
+:description: renode-ble-host app (scan/connect/pair/encrypted Studio read). The
+:description: harness preloads NVS and calls `start`.
+
+# Two-machine counterpart of single_real.resc. Each machine boots a *real*
+# flashable image on the USBD/QSPI/FICR/NVMC-stub platform
+# (xiao_nrf52840_real.repl, materialized per machine with a distinct FICR BLE
+# identity by renode_harness.boot_ble_pair) plus the fake AES-CCM peripheral
+# (ccm.repl) so the encrypted link can come up. See README.md's
+# Studio-over-BLE section and renode_harness.boot_ble_pair for the full recipe.
+
+using sysbus
+
+# --- Variables materialized by renode_harness.boot_ble_pair -----------------
+# $dut_platform / $host_platform: per-machine real repls with absolute model
+#   paths and a distinct FICR DEVICEADDR each (two machines must not share a
+#   BLE address).
+# $ccm: the fake-CCM repl with an absolute models/ccm.py path.
+$dut_bin?=@zmk.elf
+$host_bin?=@zephyr.elf
+$dut_platform?=@platforms/xiao_nrf52840_real.repl
+$host_platform?=@platforms/xiao_nrf52840_real.repl
+$ccm?=@platforms/ccm.repl
+$d_console?=3461
+$d_rpc?=3462
+$h_console?=3463
+
+# Shared BLE radio medium.
+emulation CreateBLEMedium "wireless"
+
+# BLE inter-machine timing sync. 0.00001 (10us) is LOAD-BEARING: coarser
+# quantum (even 0.00003, and 0.0001) breaks the soft link-layer -- the host
+# never even receives an advertisement. Verified in the PoC; do not coarsen.
+# It is ~600x slower than realtime with two CPUs (~6-7 min wall to the
+# encrypted read), which is why BLE mode is opt-in.
+emulation SetGlobalQuantum "0.00001"
+
+# ---- DUT (unmodified ZMK peripheral/advertiser) ----------------------------
+mach create "dut"
+machine LoadPlatformDescription $dut_platform
+machine LoadPlatformDescription $ccm
+connector Connect sysbus.radio wireless
+
+emulation CreateServerSocketTerminal $d_console "dut_console" false
+connector Connect sysbus.uart0 dut_console
+emulation CreateServerSocketTerminal $d_rpc "dut_rpc" false
+connector Connect sysbus.uart1 dut_rpc
+
+sysbus LoadELF $dut_bin
+
+# ---- Host (renode-ble-host: simulated computer / BLE central) --------------
+mach create "host"
+machine LoadPlatformDescription $host_platform
+machine LoadPlatformDescription $ccm
+connector Connect sysbus.radio wireless
+
+emulation CreateServerSocketTerminal $h_console "host_console" false
+connector Connect sysbus.uart0 host_console
+
+sysbus LoadELF $host_bin
+
+# Harness preloads the DUT NVS storage partition (erased 0xFF) and issues
+# `start` over the monitor after connecting the UART sockets.

@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "renode-ble-host"
+
+config RENODE_BLE_HOST_TARGET_NAME
+	string "Advertised name prefix of the DUT to connect to"
+	default "Module"
+	help
+	  The app connects to the first advertiser whose complete/shortened
+	  local name STARTS WITH this string. The default "Module" matches the
+	  zmk-module-template's default keyboard name ("Module Test"); a module
+	  whose DUT advertises a different name overrides this
+	  (e.g. -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"My Keeb"' or an overlay
+	  conf). ZMK's own CONFIG_ZMK_KEYBOARD_NAME has no fixed default, so this
+	  is a prefix rather than an exact match.
+
+source "Kconfig.zephyr"

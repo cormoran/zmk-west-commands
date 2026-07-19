@@ -1,0 +1,172 @@
+// XIAO nRF52840 platform for Renode -- REAL-BINARY variant.
+//
+// Same SoC peripherals as xiao_nrf52840.repl (its comment block below still
+// applies), but adapted so a *real flashable* xiao_ble ZMK image -- built
+// with ZMK's own `studio-rpc-usb-uart` snippet (USB CDC + QSPI NOR + BLE all
+// enabled), with zero firmware-side deviation -- boots to a steady idle under
+// Renode 1.16.1. Renode's nRF52840 has no USBD/QSPI/FICR models, so we add
+// three PythonPeripheral stubs and drop the FICR Tags from the init block
+// (a Tag may not overlap a registered peripheral). See the model .py files
+// for the per-peripheral rationale, and docs/renode-internals.md.
+//
+// PythonPeripheral `filename:` needs an ABSOLUTE path (Renode resolves it
+// against neither the .repl dir nor its cwd). The paths below are written
+// repo-relative for readability; renode_harness.boot_single_real rewrites them
+// to absolute into a temp copy at boot, so this file is not loaded directly --
+// it is the template. (To load it by hand, s/platforms/<abs>/ the filenames.)
+//
+
+nvic: IRQControllers.NVIC @ sysbus 0xE000E000
+    -> cpu@0
+
+cpu: CPU.CortexM @ sysbus
+    cpuType: "cortex-m4"
+    nvic: nvic
+
+uart0: UART.NRF52840_UART @ sysbus 0x40002000
+    easyDMA: true
+    -> nvic@2
+
+uart1: UART.NRF52840_UART @ sysbus 0x40028000
+    easyDMA: true
+    -> nvic@40
+
+rtc0: Timers.NRF52840_RTC @ sysbus 0x4000B000
+    numberOfEvents: 3
+    -> nvic@11
+
+rtc1: Timers.NRF52840_RTC @ sysbus 0x40011000
+    numberOfEvents: 3
+    -> nvic@17
+
+rtc2: Timers.NRF52840_RTC @ sysbus 0x40024000
+    numberOfEvents: 4
+    -> nvic@36
+
+wdt: Timers.NRF52840_Watchdog @ sysbus 0x40010000
+    -> nvic@16
+
+ppi: Miscellaneous.NRF52840_PPI @ sysbus 0x4001F000
+
+flash: Memory.MappedMemory @ sysbus 0x0
+    size: 0x100000
+
+ram: Memory.MappedMemory @ { sysbus 0x800000; sysbus 0x20000000 }
+    size: 0x40000
+
+clock: Miscellaneous.NRF_CLOCK @ sysbus 0x40000000
+    -> nvic@0
+
+twi0: I2C.NRF52840_I2C @ sysbus 0x40003000
+    -> nvic@0x3
+
+spi2: SPI.NRF52840_SPI @ sysbus 0x40023000
+    -> nvic@0x23
+
+gpio0: GPIOPort.NRF52840_GPIO @ sysbus 0x50000500
+
+gpio1: GPIOPort.NRF52840_GPIO @ sysbus 0x50000800
+
+gpiote: GPIOPort.NRF52840_GPIOTasksEvents @ sysbus 0x40006000
+    port0: gpio0
+    port1: gpio1
+    -> nvic@6
+
+twi1: I2C.NRF52840_I2C @ sysbus 0x40004000
+    -> nvic@4
+
+timer0: Timers.NRF52840_Timer @ sysbus 0x40008000
+    numberOfEvents: 4
+    -> nvic@8
+
+timer1: Timers.NRF52840_Timer @ sysbus 0x40009000
+    numberOfEvents: 4
+    -> nvic@9
+
+timer2: Timers.NRF52840_Timer @ sysbus 0x4000A000
+    numberOfEvents: 4
+    -> nvic@10
+
+timer3: Timers.NRF52840_Timer @ sysbus 0x4001A000
+    numberOfEvents: 6
+    -> nvic@26
+
+timer4: Timers.NRF52840_Timer @ sysbus 0x4001B000
+    numberOfEvents: 6
+    -> nvic@27
+
+i2s: Sound.NRF52840_I2S @ sysbus 0x40025000
+    -> nvic@37
+
+pdm: Sound.NRF52840_PDM @ sysbus 0x4001D000
+    -> nvic@29
+
+radio: Wireless.NRF52840_Radio @ sysbus 0x40001000
+    -> nvic@1
+
+rng: Miscellaneous.NRF52840_RNG @ sysbus 0x4000D000
+    -> nvic@13
+
+ecb: Miscellaneous.NRF52840_ECB @ sysbus 0x4000E000
+    -> nvic@14
+
+egu0 : Miscellaneous.NRF52840_EGU @ sysbus 0x40014000
+    -> nvic@20
+
+egu1 : Miscellaneous.NRF52840_EGU @ sysbus 0x40015000
+    -> nvic@21
+    
+egu2 : Miscellaneous.NRF52840_EGU @ sysbus 0x40016000
+    -> nvic@22
+
+egu3 : Miscellaneous.NRF52840_EGU @ sysbus 0x40017000
+    -> nvic@23
+
+egu4 : Miscellaneous.NRF52840_EGU @ sysbus 0x40018000
+    -> nvic@24
+
+egu5 : Miscellaneous.NRF52840_EGU @ sysbus 0x40019000
+    -> nvic@25
+
+sysbus:
+    init:
+        ApplySVD @https://dl.antmicro.com/projects/renode/svd/NRF52840.svd.gz
+        Tag <0x10001200, 0x10001203> "PSELRESET"
+
+// --- Real-binary stubs: let a USB CDC + QSPI + BLE image boot unmodified ---
+
+// QSPI @0x40029000: nrfx_qspi busy-waits on EVENTS_READY; the stub completes
+// that wait so nordic_qspi_nor init fails gracefully (-ENODEV) instead of
+// hanging. (The external NOR is not the settings backend, so this is harmless.)
+qspi: Python.PythonPeripheral @ sysbus 0x40029000
+    size: 0x1000
+    initable: true
+    filename: "platforms/models/qspi_stub.py"
+
+// USBD @0x40027000: nrf_usbd_common busy-waits on EVENTCAUSE.READY after
+// ENABLE; the stub returns READY then reads 0 (no VBUS) so the driver idles
+// like an unplugged cable. Studio-over-USB is therefore not reachable yet.
+usbd: Python.PythonPeripheral @ sysbus 0x40027000
+    size: 0x1000
+    initable: true
+    filename: "platforms/models/usbd_stub.py"
+
+// FICR @0x10000000: serves real flash geometry + BLE identity so settings_nvs
+// and the BT host init succeed. Replaces the FICR/DEVICEADDR* Tags that the
+// default repl's init block carries (removed above -- a Tag may not overlap
+// this registered peripheral).
+ficr: Python.PythonPeripheral @ sysbus 0x10000000
+    size: 0x1000
+    initable: true
+    filename: "platforms/models/ficr.py"
+
+// NVMC @0x4001E000: flash controller. Renode has no NVMC model, so the region
+// reads 0 and a BLE-enabled image can spin-poll NVMC.READY forever the first
+// time it touches flash (observed silent hang in two-machine runs). This model
+// serves READY/READYNEXT=1 and implements real page erase (ERASEPAGE fills the
+// 4 KiB page with 0xFF) so NVS garbage collection works once a settings sector
+// fills. See platforms/models/nvmc.py for the register-level rationale.
+nvmc: Python.PythonPeripheral @ sysbus 0x4001E000
+    size: 0x1000
+    initable: true
+    filename: "platforms/models/nvmc.py"
