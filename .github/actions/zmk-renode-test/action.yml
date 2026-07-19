@@ -18,10 +18,25 @@ description: >-
 inputs:
   elf-path:
     description: >-
-      Path to the already-built firmware ELF to test (relative paths are
-      resolved against $GITHUB_WORKSPACE). The caller builds this -- typically
-      a `build.yaml` artifact built with the `renode-studio-uart` snippet.
+      Path to the already-built DUT firmware ELF to test (relative paths are
+      resolved against $GITHUB_WORKSPACE). The caller builds this -- for uart
+      mode a `build.yaml` artifact built with the `renode-studio-uart` snippet;
+      for ble mode the real `studio-rpc-usb-uart` hardware image.
     required: true
+  mode:
+    description: >-
+      Test mode: `uart` (default -- snippet-built DUT, Studio over emulated
+      UARTs) or `ble` (real hardware image; Studio over emulated BLE, with
+      `host-elf`, else a boot-liveness check). See README.md.
+    required: false
+    default: "uart"
+  host-elf:
+    description: >-
+      ble mode only: path to the built renode-ble-host app ELF (relative paths
+      resolve against $GITHUB_WORKSPACE). Given -> full S4/S5 Studio-over-BLE
+      smoke; omitted -> boot-liveness only.
+    required: false
+    default: ""
   tests:
     description: >-
       Path (relative to $GITHUB_WORKSPACE) to a directory of the module's own
@@ -84,6 +99,8 @@ runs:
       # expression (see the header note).
       env:
         IN_ELF_PATH: ${{ inputs.elf-path }}
+        IN_MODE: ${{ inputs.mode }}
+        IN_HOST_ELF: ${{ inputs.host-elf }}
         IN_TESTS: ${{ inputs.tests }}
         IN_RENODE_VERSION: ${{ inputs.renode-version }}
         IN_BOOT_TIMEOUT: ${{ inputs.boot-timeout-seconds }}
@@ -100,7 +117,10 @@ runs:
           exit 1
         fi
 
-        args=(--elf "$elf_path" --renode-version "$IN_RENODE_VERSION" --boot-timeout "$IN_BOOT_TIMEOUT")
+        args=(--elf "$elf_path" --mode "$IN_MODE" --renode-version "$IN_RENODE_VERSION" --boot-timeout "$IN_BOOT_TIMEOUT")
+        if [ -n "$IN_HOST_ELF" ]; then
+          args+=(--host-elf "$(abspath "$IN_HOST_ELF")")
+        fi
         if [ -n "$IN_TESTS" ]; then
           west zmk-renode-test "$(abspath "$IN_TESTS")" "${args[@]}"
         else

@@ -2,8 +2,10 @@
 
 Thin wrapper around the `west zmk-renode-test` command (provided by
 `zmk-west-commands`). It boots an **already-built** ZMK firmware ELF in the
-[Renode](https://renode.io/) emulator, runs a generic boot + core Studio RPC
-smoke test, and optionally the module's own `tests/renode/*_test.py` files.
+[Renode](https://renode.io/) emulator, runs a boot + Studio smoke test, and
+optionally the module's own `tests/renode/*_test.py` files. Two modes
+(`mode: uart` default, `mode: ble`) — see the repo README's `west
+zmk-renode-test` section and `docs/renode-testing.md`.
 
 ## Contract
 
@@ -26,10 +28,12 @@ smoke test, and optionally the module's own `tests/renode/*_test.py` files.
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `elf-path` | yes | – | Path to the built firmware ELF (relative paths resolve against `$GITHUB_WORKSPACE`). |
+| `elf-path` | yes | – | Path to the built DUT firmware ELF (relative paths resolve against `$GITHUB_WORKSPACE`). |
+| `mode` | no | `uart` | `uart` (snippet-built DUT over emulated UARTs) or `ble` (real hardware image over emulated BLE). |
+| `host-elf` | no | `""` | ble mode only: the built `renode-ble-host` app ELF. Given → full S4/S5 smoke; omitted → boot-liveness only. |
 | `tests` | no | `""` | Directory of the module's own `*_test.py` files, run after the smoke test. |
 | `renode-version` | no | `1.16.1` | Renode portable release to install (must match the checked-in `.repl`). |
-| `boot-timeout-seconds` | no | `20` | Seconds to wait for the ZMK boot banner. |
+| `boot-timeout-seconds` | no | `20` | uart mode: seconds to wait for the ZMK boot banner. |
 
 ## Usage
 
