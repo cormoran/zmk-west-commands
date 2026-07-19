@@ -1,0 +1,215 @@
+---
+title: GitHub Actions
+description: Two thin composite actions that run the west zmk-renode-test and zmk-ble-test suites in CI — install deps, cache the emulators, and run.
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard, Badge } from '@astrojs/starlight/components';
+
+This repository ships two thin **composite actions** that wrap the
+[`west zmk-renode-test`](/zmk-west-commands/guides/zmk-renode-test/) and
+[`west zmk-ble-test`](/zmk-west-commands/guides/zmk-ble-test/) commands for CI.
+Each action does only environment setup — install the python `protobuf` runtime
+and `protoc`, cache the emulator, and invoke the west command. **Neither action
+builds firmware, and neither ships the test logic**: the commands come from
+`zmk-west-commands`, which the caller must already have in its west manifest.
+
+<Aside type="note">
+Both actions assume the calling job has **already run checkout +
+`west init`/`west update`** with `zmk-west-commands` in the manifest. The action
+ref (`@main`) and your west pin of `zmk-west-commands` move independently — the
+actions deliberately do not reference their own checkout's scripts.
+</Aside>
+
+## Common setup
+
+Every job that uses these actions shares the same caller-side prerequisites:
+check out your repository and initialize the west workspace so that
+`west zmk-renode-test` / `west zmk-ble-test` are available as extension commands.
+
+<Steps>
+
+1. **Check out** your module (or `zmk-config`) repository.
+
+2. **Initialize the west workspace** from a test manifest that lists
+   `zmk-west-commands` (that is where the extension commands come from), then
+   `west update` and export the Zephyr CMake package:
+
+   ```yaml
+   - uses: actions/checkout@v4
+   - name: Init west workspace
+     run: |
+       west init -l . --mf <your-test-manifest>.yml
+       west update --narrow
+       west zephyr-export
+   ```
+
+3. **Build any firmware** the test needs (Renode mode only — the BLE action
+   builds the DUT itself), then invoke the action.
+
+</Steps>
+
+## The two actions
+
+<Tabs>
+  <TabItem label="zmk-renode-test">
+
+`cormoran/zmk-west-commands/.github/actions/zmk-renode-test@main` boots an
+**already-built** ZMK firmware ELF in the [Renode](https://renode.io/) emulator,
+runs a boot + Studio smoke test, and optionally the module's own
+`tests/renode/*_test.py` files. It caches the Renode install (`~/.renode`, keyed
+on the Renode version) and installs `protobuf`/`protoc`.
+
+The default `mode` is **`ble`**, which boots the exact `studio-rpc-usb-uart`
+hardware image (the same one you flash — no extra config). Provide `host-elf`
+for a full pairing + encrypted Studio read; omit it for a boot-liveness check.
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `elf-path` | yes | – | Path to the already-built DUT firmware ELF (relative paths resolve against `$GITHUB_WORKSPACE`). For the default `ble` mode this is the real `studio-rpc-usb-uart` image; for `uart` mode a `renode-studio-uart` snippet build. |
+| `mode` | no | `ble` | `ble` (real hardware image over emulated BLE, no extra config) or `uart` (snippet-built DUT over emulated UARTs). |
+| `host-elf` | no | `""` | ble mode only: the built `renode-ble-host` app ELF. Given → full S4/S5 Studio-over-BLE smoke; omitted → boot-liveness only. |
+| `tests` | no | `""` | Directory of the module's own `*_test.py` files (e.g. `tests/renode`), run after the smoke test. Empty → smoke test only. |
+| `renode-version` | no | `1.16.1` | Renode portable release to install. |
+| `boot-timeout-seconds` | no | `20` | Seconds to wait for the ZMK boot banner in the smoke test. |
+
+#### Example workflow
+
+```yaml title=".github/workflows/renode.yml"
+name: Renode
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  renode:
+    runs-on: ubuntu-latest
+    container: zmkfirmware/zmk-build-arm:stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init west workspace
+        run: |
+          west init -l . --mf <your-test-manifest>.yml
+          west update --narrow
+          west zephyr-export
+
+      - name: Build the real (studio-rpc-usb-uart) firmware
+        run: west zmk-build tests/zmk-config -af ble
+
+      - name: Build the renode-ble-host app
+        # Match the target-name prefix to your DUT's CONFIG_ZMK_KEYBOARD_NAME.
+        run: >-
+          west build -b nrf52840dk/nrf52840 -d build/ble-host
+          -s <zmk-west-commands checkout>/renode-ble-host
+          -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your DUT name>"'
+
+      - uses: cormoran/zmk-west-commands/.github/actions/zmk-renode-test@main
+        with:
+          # default mode is `ble`
+          elf-path: build/ble/zephyr/zmk.elf
+          host-elf: build/ble-host/zephyr/zephyr.elf  # optional (else liveness)
+          tests: tests/renode                         # optional
+```
+
+<Aside type="tip">
+The action caches `~/.renode` keyed on `renode-version`, so the Renode tarball is
+downloaded only on the first run (or when you bump the version).
+</Aside>
+
+For the full contract, see
+[`.github/actions/zmk-renode-test/README.md`](https://github.com/cormoran/zmk-west-commands/blob/main/.github/actions/zmk-renode-test/README.md).
+
+  </TabItem>
+  <TabItem label="zmk-ble-test">
+
+`cormoran/zmk-west-commands/.github/actions/zmk-ble-test@main` fetches and builds
+[BabbleSim](https://babblesim.github.io/), caches the built tree, and runs a
+module's bsim **BLE tests**. It enables the `+babblesim` west group,
+`west update --narrow`s to fetch the sources, `make everything` in the resolved
+bsim tree (caching it keyed on the `bsim` project revision), installs
+`protobuf`/`protoc`, exports `BSIM_OUT_PATH` / `BSIM_COMPONENTS_PATH`, and calls
+`west zmk-ble-test`.
+
+<Aside type="caution">
+This action must run in the **`zmkfirmware/zmk-build-arm:4.1`** container
+(BabbleSim is Linux-only; the `4.1` tag matches the Zephyr the bsim board
+targets). The bsim BLE tests also need two ZMK fixes not yet upstream — until
+they land, pin `cormoran/zmk@fffa339…` in your test manifest (see the README).
+</Aside>
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `tests` | no | `tests/ble` | BLE tests directory or a single case (relative paths resolve against `$GITHUB_WORKSPACE`). |
+| `module` | no | `.` | Module repo root added via `ZMK_EXTRA_MODULES`. |
+| `extra-args` | no | `""` | Extra arguments passed through to `west zmk-ble-test` (e.g. `--sim-prefix mymod -j 2 -v`). |
+
+#### Example workflow
+
+```yaml title=".github/workflows/ble.yml"
+name: BLE
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ble:
+    runs-on: ubuntu-latest
+    container: zmkfirmware/zmk-build-arm:4.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init west workspace
+        run: |
+          west init -l . --mf <your-test-manifest>.yml
+          west update --narrow
+          west zephyr-export
+
+      - uses: cormoran/zmk-west-commands/.github/actions/zmk-ble-test@main
+        with:
+          tests: tests/ble
+          module: .
+
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ble-test-logs
+          path: build/ble/**/*.log
+```
+
+<Aside type="tip">
+The action caches the built bsim tree keyed on the `bsim` project revision, so
+`make everything` is a fast no-op on cache hits. Log upload is left to the caller
+— the example uploads `build/ble/**/*.log` under the west topdir.
+</Aside>
+
+For the full contract, see
+[`.github/actions/zmk-ble-test/README.md`](https://github.com/cormoran/zmk-west-commands/blob/main/.github/actions/zmk-ble-test/README.md).
+
+  </TabItem>
+</Tabs>
+
+<Aside type="tip">
+Run the same commands **locally first** — the actions only wrap the west commands
+documented in these guides:
+
+- [`west zmk-renode-test`](/zmk-west-commands/guides/zmk-renode-test/)
+- [`west zmk-ble-test`](/zmk-west-commands/guides/zmk-ble-test/)
+
+If a test passes locally, the action runs the identical command in CI.
+</Aside>
+
+## Related
+
+<CardGrid>
+  <LinkCard title="west zmk-renode-test" href="/zmk-west-commands/guides/zmk-renode-test/" description="Boot a built firmware ELF in the Renode emulator — no hardware." />
+  <LinkCard title="west zmk-ble-test" href="/zmk-west-commands/guides/zmk-ble-test/" description="Run split + Studio-over-BLE integration tests on BabbleSim." />
+  <LinkCard title="Getting started" href="/zmk-west-commands/getting-started/" description="Add zmk-west-commands to your west manifest and set up a workspace." />
+</CardGrid>

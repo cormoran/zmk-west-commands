@@ -1,0 +1,347 @@
+---
+title: west zmk-ble-test
+description: スプリットと Studio-over-BLE の統合テストを BabbleSim 上で実行し、チェックイン済みのスナップショットと照合します。ハードウェアも J-Link も不要です。
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard, FileTree, Badge } from '@astrojs/starlight/components';
+
+`west zmk-ble-test` は、モジュールの **BabbleSim (bsim) BLE テスト** をハードウェア
+なしで実行します。各テストケースについて、次の処理を行います。
+
+1. ワークスペースの ZMK アプリに、`ZMK_EXTRA_MODULES` 経由でモジュールを追加した
+   **DUT** をビルドし、
+2. ケースが参照する **split peripheral** と **host**（「コンピュータ」）アプリを
+   ビルドし、
+3. それらすべてを bsim の **2G4 phy** 上で起動し、
+4. **フィルタ済み** のデバイス出力を、チェックイン済みの `events.snapshot` と
+   diff します。
+
+これはテンプレートリポジトリの `tests/ble/run-ble-test.sh` を Python に移植した
+ものであり、その `sort | sed | diff` による合否パイプラインと **バイト単位で
+互換** に保たれています。したがって、シェルスクリプトで pass していたケースは、
+ここでもそのまま pass します。
+
+<Aside type="note">
+これはハードウェア不要のテストの梯子の最上段です。純粋なキーマップ／ビヘイビアの
+ユニットテストには [`west zmk-test`](/zmk-west-commands/ja/guides/zmk-test/) を、
+実際にフラッシュ可能なイメージをエミュレータで起動するには
+[`west zmk-renode-test`](/zmk-west-commands/ja/guides/zmk-renode-test/) を使います。
+これらの関係については [コンセプト](/zmk-west-commands/ja/concepts/) を参照してください。
+</Aside>
+
+## 前提条件
+
+<Steps>
+
+1. **`zmk` プロジェクトを含む west ワークスペース。** 本コマンドはマニフェストから
+   `zmk` を読み取り、ZMK アプリの場所を特定します。詳しくは
+   [はじめに](/zmk-west-commands/ja/getting-started/) を参照してください。
+
+2. **コンパイル済みの BabbleSim ツリー。** bsim は **Linux 専用** で、ZMK の
+   マニフェストから取得します。一度だけ取得・ビルドし、コマンドにその場所を
+   指定します。
+
+   ```bash
+   west config manifest.group-filter -- +babblesim
+   west update --narrow
+   make -C "$(west topdir)/dependencies/tools/bsim" everything -j"$(nproc)"
+   export BSIM_OUT_PATH="$(west topdir)/dependencies/tools/bsim"
+   export BSIM_COMPONENTS_PATH="$BSIM_OUT_PATH/components"
+   ```
+
+   `BSIM_OUT_PATH` / `BSIM_COMPONENTS_PATH`（または `--bsim PATH`）でコンパイル済み
+   ツリーを選択します。存在しないか未コンパイルの場合、コマンドはこの手順を
+   そのまま表示して終了します。
+
+3. **Python のテスト依存パッケージ**（`studio_requests.json` を使う場合のみ）:
+   `protobuf` パッケージと `protoc` コンパイラです。
+   `pip install -r requirements-test.txt` でインストールします（`protoc` は
+   システムパッケージです。例: `apt-get install protobuf-compiler`）。CI アクションは
+   両方をインストールします。
+
+</Steps>
+
+<Aside type="caution" title="ZMK リビジョンの前提">
+bsim BLE テストには、**まだ `zmkfirmware/zmk` main に入っていない** 2 つの修正が
+必要です。
+
+- **書き込み可能** な behavior local-id マップセクション（さもないと native/POSIX
+  ビルドが最初の settings コミットで SIGSEGV します）、および
+- 動的な BLE ハンドラ登録より **前** の `settings_subsys_init`（さもないと、
+  settings NONE バックエンドを使う `nrf52_bsim` ビルド、すなわち
+  `CONFIG_BT_SETTINGS` なしの `CONFIG_ZMK_STUDIO=y` では、split central が
+  advertise/scan を一切行いません）。
+
+これらが upstream に入るまでは、テスト用マニフェストで
+`cormoran/zmk@fffa339cf6f5c45366ab332d2b512f1c3c300753` を pin してください。
+本リポジトリの `scripts/west-test-ble.yml` はまさにそれを行っています（unpin する
+ための TODO 付き）。
+
+```yaml
+- name: zmk
+  remote: cormoran
+  revision: fffa339cf6f5c45366ab332d2b512f1c3c300753
+  import:
+    file: app/west.yml
+```
+</Aside>
+
+## テストを実行する
+
+コマンドにディレクトリを指定します。ディレクトリが **テストケース** であるのは、
+`nrf52_bsim.keymap` を含む場合に限られます。探索は `tests_path`（デフォルト:
+カレントディレクトリ）から再帰的に行われます。
+
+```bash
+# Run every case under tests/ble, with this module added via ZMK_EXTRA_MODULES
+west zmk-ble-test tests/ble -m .
+
+# A single case
+west zmk-ble-test tests/ble/split/basic -m .
+
+# Regenerate snapshots on mismatch (also honors ZMK_TESTS_AUTO_ACCEPT=y)
+west zmk-ble-test tests/ble -m . --auto-accept
+
+# Run cases concurrently; each case's sim id isolates its phy
+west zmk-ble-test tests/ble -m . -j 4
+```
+
+ビルドは `<west topdir>/build/ble/` 以下に生成されます。各ケースの `output.log`、
+`filtered_output.log`、および集約された `tests/pass-fail.log` もそこに保持されます。
+
+### 使い方とオプション
+
+```text
+usage: west zmk-ble-test [-h] [-m MODULE] [--auto-accept] [--sim-prefix NAME]
+                         [--bsim PATH] [-j PARALLEL] [-v] [tests_path]
+```
+
+| 引数 | デフォルト | 用途 |
+|---|---|---|
+| `tests_path` | カレントディレクトリ | テストケース、または再帰的に探索する親ディレクトリ（`nrf52_bsim.keymap` を含むものがケース）。 |
+| `-m`, `--module` | cwd を含む git リポジトリ、なければ cwd | `ZMK_EXTRA_MODULES` 経由で追加するモジュールのリポジトリルート。モジュールルートで `-m .` を使います。 |
+| `--auto-accept` | off | 不一致時に `events.snapshot` を再生成します。`ZMK_TESTS_AUTO_ACCEPT=y` でも有効になります。 |
+| `--sim-prefix NAME` | サニタイズしたモジュールのディレクトリ名 | bsim のシミュレーション ID／実行ファイル名の prefix。`siblings.txt` 内の `{prefix}` プレースホルダも展開します。 |
+| `--bsim PATH` | `$BSIM_OUT_PATH`、なければ `<topdir>/dependencies/tools/bsim` | コンパイル済み BabbleSim ツリーへのパス。 |
+| `-j`, `--parallel` | `1` | ケースを並行実行します。ケースごとの sim id が phy を分離します。 |
+| `-v`, `--verbose` | off | デバイス出力をコンソールにストリームします（ログは常にディスクに書き込まれます）。 |
+
+## テストケースの構造
+
+ケースとは `nrf52_bsim.keymap` を含むディレクトリです。それ以外はすべて任意で、
+その上に積み重なります。例として、リポジトリ内の split ケースを示します。
+
+<FileTree>
+- tests/ble/split/basic/
+  - nrf52_bsim.keymap    ケースを表す。DUT のキーマップ
+  - nrf52_bsim.conf      DUT + peripheral 共有の Kconfig
+  - peripheral.overlay   split peripheral 1 台分のビルド
+  - siblings.txt         追加の擬似デバイス（1 行 1 台）
+  - events.patterns      結合ログに対する sed フィルタ
+  - events.snapshot      期待されるフィルタ済み出力
+</FileTree>
+
+| ファイル | 意味 |
+|---|---|
+| `nrf52_bsim.keymap` | ケースを表す。DUT のキーマップ。Studio ケースでは keys 付きの physical layout が必要です。 |
+| `nrf52_bsim.conf` | DUT と peripheral が共有する Kconfig（`ZMK_CONFIG` 経由）。 |
+| `central.conf` | DUT（central）だけに適用する追加 Kconfig（`EXTRA_CONF_FILE` 経由）。 |
+| `peripheral.conf` | peripheral ビルドだけに適用する追加 Kconfig。 |
+| `peripheral*.overlay` | それぞれが split peripheral 1 台分のビルド。存在すると DUT は split central（`-DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y`）としてビルドされます。 |
+| `siblings.txt` | 追加の擬似デバイスごとに 1 行のコマンドライン（`-d=2…`。`-d=0` が DUT、`-d=1` が handbrake）。 |
+| `studio_requests.json` | 宣言的な `zmk.studio.Request` のリスト（JSON DSL）。存在すると、共有の `ble-studio-host` アプリがこのケース用にこれらのペイロードを埋め込んでビルドされます。 |
+| `studio_requests.hex` | 同じ内容のバイト厳密なエスケープハッチ（1 行 1 framed request）。`.json` とは排他です。 |
+| `events.patterns` | 結合された出力ログをフィルタする `sed -E -n` スクリプト。 |
+| `events.snapshot` | 期待されるフィルタ済み出力。 |
+| `pending` | 存在すると、スナップショット不一致が **FAILED** ではなく **PENDING** になります。 |
+
+## モジュールに BLE テストを追加する
+
+<Steps>
+
+1. **ケースディレクトリとマーカーとなるキーマップを作成します。**
+   `tests/ble/<group>/<case>/` の下に `nrf52_bsim.keymap` を書きます。Studio ケース
+   では keys 付きの `zmk,physical-layout` を **必ず** 定義します。例:
+
+   ```c
+   #include <behaviors.dtsi>
+   #include <dt-bindings/zmk/keys.h>
+   #include <dt-bindings/zmk/matrix_transform.h>
+   #include <physical_layouts.dtsi>
+
+   / {
+       physical_layout: physical_layout {
+           compatible = "zmk,physical-layout";
+           display-name = "Test layout";
+           transform = <&test_transform>;
+           keys /* w h x y rot rx ry */
+               = <&key_physical_attrs 100 100   0   0 0 0 0>
+               , <&key_physical_attrs 100 100 100   0 0 0 0>
+               , <&key_physical_attrs 100 100   0 100 0 0 0>
+               , <&key_physical_attrs 100 100 100 100 0 0 0>
+               ;
+       };
+       // ... matrix-transform + keymap ...
+   };
+   ```
+
+2. **Kconfig と overlay を追加します。** 共有設定は `nrf52_bsim.conf` に置きます
+   （例: `CONFIG_ZMK_SPLIT=y` や `CONFIG_ZMK_STUDIO=y`）。split ケースでは
+   peripheral ごとに `peripheral*.overlay` を 1 つ追加します。その存在によって
+   DUT が split central になります。peripheral の overlay は通常、mock kscan を
+   駆動します。
+
+   ```c
+   #include <dt-bindings/zmk/kscan_mock.h>
+
+   &kscan {
+       events =
+       <ZMK_MOCK_PRESS(0,0,5000)
+       ZMK_MOCK_RELEASE(0,0,200)>;
+   };
+   ```
+
+3. **`siblings.txt` を書きます。** DUT（`-d=0`）と handbrake（`-d=1`）以外の追加
+   擬似デバイスごとに 1 行を書きます。各デバイスには `-d=2` から始めて `-d=N` で
+   番号を振ります。
+
+   ```text
+   ./ble_test_central.exe -d=2
+   ./{prefix}_split_basic_peripheral.exe -d=3
+   ```
+
+4. **`events.patterns` を追加してスナップショットを生成します。** `sed -E -n`
+   フィルタを書き（[プレースホルダとデバイス番号](#プレースホルダとデバイス番号)
+   を参照）、最初の実行から `events.snapshot` を生成します。
+
+   ```bash
+   west zmk-ble-test tests/ble/<group>/<case> -m . --auto-accept
+   ```
+
+   スナップショットを確認してからコミットします。以降の実行はこれと diff します。
+
+</Steps>
+
+## C も Python も書かない Studio-over-BLE
+
+Studio RPC を BLE 上で（split リンクがアクティブな間も含めて）動かすには、ケースは
+**データファイルを 1 つ** 用意します。`studio_requests.json` は、protobuf の正準
+JSON マッピングで表した `zmk.studio.Request` メッセージの順序付きリストです。
+共有の [`ble-studio-host`](https://github.com/cormoran/zmk-west-commands/tree/main/ble-studio-host)
+アプリはリポジトリが所有・ビルドします。**モジュールは C コードを一切コピーしません**。
+
+```json
+[
+  { "custom": { "listCustomSubsystems": {} } },
+  { "custom": { "call": {
+      "subsystemIndex": 0,
+      "payload": { "$type": "your_name.template.Request",
+                   "sample": { "value": 42 } } } } }
+]
+```
+
+- **`$type`（ネスト・エンコードされる bytes）。** *bytes* フィールド（例:
+  カスタムサブシステムの `Call.payload`）は `{"$type": "<full.message.name>", ...fields}`
+  として書けます。この名前はワークスペースの Studio proto **に加えて、モジュール
+  自身の `proto/` ディレクトリ** に対して解決され、メッセージがエンコードされて
+  bytes 値として差し込まれます。`$type` オブジェクトは再帰的にネストできます。
+  生のペイロードには従来どおり base64 文字列も使えます。
+- **`request_id`** は、省略時（または 0 のとき）に配列内での 1 始まりの位置が
+  自動的に割り当てられます。
+
+ランナーはテスト時に JSON を変換し（`protobuf` + `protoc` が必要）、ペイロードを
+埋め込んだ `ble-studio-host` を自動的にビルドし、ケースごとに配置します。
+`siblings.txt` からは `{studio_host}` プレースホルダで参照します。
+
+```text
+./{studio_host} -d=2
+```
+
+host は scan・connect・pairing（Just Works）を行い、より大きな ATT MTU を交換し、
+ZMK Studio GATT サービスを discover し、その indication を subscribe し、各 request
+を書き込み（受信レスポンスごとに 1 件）、de-frame した各レスポンスを hexdump
+します。これらの hexdump は `<dbg> ble_studio_host: ...` という行として現れます。
+`events.patterns` / `events.snapshot` はそのログ名に対して書いてください。
+
+<Aside type="tip" title="エスケープハッチ">
+JSON マッピングでは足りない場合:
+
+- `studio_requests.hex` — 1 行につき 1 件の、hex エンコードされた framed
+  `zmk.studio.Request`（`#` コメント可）。バイト厳密で、`.json` とは **排他** です。
+- 共有アプリでは表現できない host 側ロジック（カスタム assert、notification 内容
+  への反応、複数接続シナリオ）には、`tests/ble/<name>_host/` としてカスタム host
+  アプリを用意します（レガシーの `tests/ble/<name>_central/` も引き続き自動検出
+  されます）。
+
+「順番に request を送り、レスポンスの hexdump をスナップショットする」で十分な
+ときは、常に `studio_requests.json` + 共有アプリを優先してください。DSL の完全な
+仕様は
+[`ble-studio-host/README.md`](https://github.com/cormoran/zmk-west-commands/blob/main/ble-studio-host/README.md)
+を参照してください。
+</Aside>
+
+## プレースホルダとデバイス番号
+
+**`siblings.txt` 内のプレースホルダ。** `--sim-prefix NAME`（デフォルト: サニタイズ
+したモジュールのディレクトリ名）は、bsim のシミュレーション ID（`<prefix>_<case>`）
+と、配置される実行ファイル名の prefix を設定します。ケースごとに 2 つのプレース
+ホルダが展開されます。
+
+- `{prefix}` — 有効な prefix。プレースホルダを含まない行はそのまま実行されるため、
+  既存のケースデータは動き続けます。
+- `{studio_host}` — そのケースに配置される共有 host の実行ファイル名
+  （`<sim id>_studio_host.exe`。`studio_requests.json` / `.hex` を持つケースでのみ
+  意味を持ちます）。
+
+モジュール独自の host アプリ（`tests/ble/*_host/`、またはレガシーの
+`tests/ble/*_central/`）は、`<prefix>_<appname>.exe` と、素の `<appname>.exe`
+エイリアスの両方として配置されます。
+
+**デバイス番号。** ランナーは DUT に `-d=0`、bsim の handbrake に `-d=1` を割り
+当てます。**それ以外のデバイスは、各自の `siblings.txt` の行から ID を得ます**
+（そこに書かれたとおり `-d=2`、`-d=3`、…）。split peripheral は通常の sibling
+です。ランナーが `<sim id>_<peripheral>.exe` を配置し、ケースがそれを起動します。
+各デバイスは stdout の先頭に `d_NN: @<sim time>` を付けます。結合された
+`output.log` は DUT とすべての sibling を捕捉します（handbrake は捕捉されません）。
+
+**グルーピングと任意デバイスのアサート。** 評価パイプラインの安定な
+`sort -t: -k1,1` は、行をデバイスごとにグループ化し（ID 昇順: `d_00` ブロック、
+次に `d_02`、`d_03`、…）、各デバイス自身の時系列順は保持します。したがって
+スナップショットには、アサート対象のデバイスごとに 1 つの決定的なブロックが
+並び、DUT や host に限らず **どのデバイスの行もアサートできます**。デバイスの行を
+ラベル付けし直すには、キーワードでガードした substitution を使い、意図した行だけを
+print します（substitution はマッチしたときだけ print するので、同じキーワードが
+別デバイスの行に現れても無害です）。これは `split/basic` の peripheral ルールです。
+
+```sed
+/Welcome to ZMK!|security_changed: Security changed|kscan_process_msgq/s/^d_03: @[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}  .{19}/peripheral /p
+```
+
+<Aside type="caution" title="決定性">
+bsim の実行はファームウェアのビルドごとに決定的ですが、依存の更新をまたいでも
+安定な行を優先してください。次は避けます。
+
+- `*** Booting Zephyr OS build <hash> ***`（Zephyr/ZMK のリビジョンごとに変わる）、
+- 生の kscan-mock イベントエンコーディング（`ev <number> …`。デコード済みの
+  `…kscan_process_msgq: Row: …, pressed: …` の行を優先）、
+- HCI のバージョン／ビルドバナー行。
+
+意味のある行（接続／セキュリティの変化、CCC の subscribe、ポジションイベント）は
+安定していて有用です。迷ったら、ケースを最低 2 回（できれば異なる `--sim-prefix`
+で）実行し、`filtered_output.log` が一致することを確認してください。
+</Aside>
+
+## 次のステップ
+
+<CardGrid>
+  <LinkCard
+    title="west zmk-renode-test"
+    href="/zmk-west-commands/ja/guides/zmk-renode-test/"
+    description="実際のファームウェア ELF を Renode エミュレータで起動し、起動 + Studio のスモークテストを行います。こちらもハードウェア不要です。"
+  />
+  <LinkCard
+    title="GitHub Actions"
+    href="/zmk-west-commands/ja/guides/github-actions/"
+    description="bsim をビルドして CI 用にキャッシュする composite アクションで zmk-ble-test をラップします。"
+  />
+</CardGrid>

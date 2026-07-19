@@ -1,0 +1,55 @@
+---
+title: zmk-west-commands
+description: ZMK ファームウェアのビルドと、ZMK モジュールのハードウェア不要テスト（ユニット・Renode・BabbleSim BLE）を提供する west モジュール。
+template: splash
+hero:
+  tagline: ZMK ファームウェアをビルドし、あなたの ZMK モジュールをハードウェアなしでテスト — ユニットテスト・Renode エミュレーション・BabbleSim BLE を、すべて <code>west</code> から。
+  image:
+    file: ../../../assets/logo.svg
+  actions:
+    - text: はじめる
+      link: /zmk-west-commands/ja/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: GitHub を見る
+      link: https://github.com/cormoran/zmk-west-commands
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## できること
+
+west マニフェストに 1 行追加するだけで、4 つのコマンドが `west` に現れます。2 つは
+`zmk-config` ファームウェアのビルドを手軽にし、残り 2 つは **ハードウェアを 1 台も使わずに**
+あなたのモジュールのテストを実行します。
+
+<CardGrid stagger>
+  <Card title="west zmk-build" icon="seti:cpp">
+    `build.yaml` を読み取り、ターゲットを対話的に選び、フラッシュまで行う
+    `west build` ラッパー。`--reset`・`--debug-jlink`・`--vscode` などの
+    便利なショートカット付き。
+  </Card>
+  <Card title="west zmk-test" icon="approve-check">
+    ZMK の native-posix ユニットテストを、環境変数を自動設定して実行。
+    ディレクトリを指定し `-m .` で自分のモジュールを含めるだけ。
+  </Card>
+  <Card title="west zmk-renode-test" icon="rocket">
+    実ファームウェア ELF を Renode エミュレータで起動し、boot + Studio の
+    スモークテストを実行。BLE ペアリングまたは UART、J-Link も実機も不要。
+  </Card>
+  <Card title="west zmk-ble-test" icon="random">
+    Split と Studio-over-BLE の結合テストを BabbleSim 上で実行し、出力を
+    リポジトリ内スナップショットと照合。完全にソフトウェアのみ。
+  </Card>
+</CardGrid>
+
+## 目的別ガイド
+
+<CardGrid>
+  <LinkCard title="はじめる" href="/zmk-west-commands/ja/getting-started/" description="モジュールをマニフェストに追加し、最初のコマンドを実行。" />
+  <LinkCard title="コンセプト" href="/zmk-west-commands/ja/concepts/" description="各コマンドの関係と、どのテスト手法を選ぶべきか。" />
+  <LinkCard title="ファームウェアをビルド" href="/zmk-west-commands/ja/guides/zmk-build/" description="ビルド・ターゲット絞り込み・フラッシュ・デバッグを順を追って。" />
+  <LinkCard title="CI でテスト" href="/zmk-west-commands/ja/guides/github-actions/" description="Renode と BLE テスト用のそのまま使える GitHub Actions。" />
+</CardGrid>

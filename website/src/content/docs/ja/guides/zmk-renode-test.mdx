@@ -1,0 +1,231 @@
+---
+title: west zmk-renode-test
+description: ビルド済みの ZMK ファームウェア ELF を Renode エミュレータで起動し、起動 + Studio のスモークテストを実行します（J-Link 不要、実機不要）。
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+`west zmk-renode-test` は、**ビルド済み**の ZMK ファームウェア ELF を
+[Renode](https://renode.io/) エミュレータで起動し、起動 + Studio のスモークテストを実行し、
+その後（任意で）モジュール自身の `tests/renode/*_test.py` ファイルを実行します。完全に
+**ハードウェア不要**です — J-Link も物理ボードも要りません。
+
+このコマンドは**ファームウェアをビルドしません**。ELF は
+[`west zmk-build`](/zmk-west-commands/ja/guides/zmk-build/) または `west build` でビルドし、
+`--elf` で渡します。コマンドはそれをエミュレーション上で実行するだけです。
+
+Renode 本体は初回実行時に自動でダウンロードされます — ポータブル tarball が
+`$RENODE_ROOT`（デフォルト `~/.renode`）以下にキャッシュされるため、2 回目以降はすぐに起動します。
+
+## 2 つのモード
+
+**2 つのモード**があります（`--mode`、デフォルトは `ble`）。どちらのモードでも
+`--elf` が DUT（テスト対象デバイス）です。
+
+| モード | ビルドする DUT | スモークが証明すること | 実行時間 |
+|---|---|---|---|
+| **`ble`**（デフォルト） | フラッシュするのとまったく同じ `studio-rpc-usb-uart` の**ハードウェア**イメージ — **追加設定なし** | `--host-elf` あり: LE ペアリング + 暗号化された Studio GATT リード（S4/S5）。なし: イメージが起動して生存し続ける（Zephyr fatal でない）こと。 | 約 35〜90 秒 |
+| **`uart`** | 本リポジトリの `renode-studio-uart` スニペットでビルドした ELF | 起動（ZMK バナー）し、エミュレートされた UART 上でコアの Studio `GetDeviceInfo` に応答する | 約 15 秒 |
+
+`ble` がデフォルトなのは、**フラッシュするのとまったく同じイメージ**を起動するからです —
+プラットフォームスタブがそのイメージを Renode 上で動かすため、モジュール側に Renode 専用の
+ビルド成果物は**不要**です。`uart` モードはより高速で UART 経由の直接的な Studio ラウンドトリップを
+行いますが、`renode-studio-uart` スニペットのビルドを追加する必要があります。
+
+<Tabs>
+  <TabItem label="ble mode">
+
+DUT は**実際にフラッシュ可能なイメージ**（ZMK 自身の `studio-rpc-usb-uart` スニペット:
+USB CDC + QSPI NOR + BLE）であり、**ファームウェア側の変更は一切ありません** —
+プラットフォームスタブがそのイメージをそのまま Renode 上で起動させるため、モジュール固有に
+ビルドするものはありません。
+
+<Steps>
+
+1. まったく同じハードウェアイメージをビルドします（`renode-studio-uart` スニペットなし）:
+
+   ```bash
+   west zmk-build <your-zmk-config> -af <your studio-rpc-usb-uart artifact>
+   ```
+
+2. [`renode-ble-host`](https://github.com/cormoran/zmk-west-commands/tree/main/renode-ble-host)
+   アプリを一度だけビルドします — これはシミュレートされたコンピュータです。ターゲット名の
+   プレフィックスを DUT がアドバタイズする `CONFIG_ZMK_KEYBOARD_NAME` に合わせます。デフォルトの
+   プレフィックスは `"Module"` です（テンプレートのデフォルトのキーボード名 `"Module Test"` に一致します）:
+
+   ```bash
+   west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host \
+       -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your DUT name>"'
+   ```
+
+3. 2 マシンの BLE スモークを実行します:
+
+   ```bash
+   west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf \
+       --host-elf build/zephyr/zephyr.elf
+   ```
+
+</Steps>
+
+ホストは DUT のアドバタイズをスキャンし、接続し、ペアリングし（LE Secure Connections、
+Just Works）、リンクをセキュリティレベル 2 に昇格させ、**暗号化された** Studio GATT リードを
+行います — これは実機の Studio-over-BLE セッションとまったく同じコードパスです。ホストが
+`STAGE:S4-SECURITY-CHANGED OK`（暗号化リンク確立）と `STAGE:S5-GATT-READ OK`（暗号化リード）を
+報告した時点でスモークは成功します。
+
+### 縮退した生存確認（ホストなし）
+
+**`--host-elf` を指定しない場合**、`ble` モードは**起動生存確認**に縮退します。実際の DUT
+イメージのみを起動し（ホストなし、BLE ピアなし）、`--min-virtual` 仮想秒後もまだ実行中である
+こと — Zephyr fatal でパークしていないこと — を証明します。ホストアプリがない状態で実機イメージを
+スモークするのに便利です:
+
+```bash
+west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
+```
+
+内部的には、しきい値までエミュレーションを実行し、CPU の `PC` を数回サンプリングし、いずれかの
+サンプルが fatal フレーム（`arch_system_halt` / `z_fatal_error` /
+`k_sys_fatal_error_handler`）に着地したら失敗とします。
+
+<Aside type="caution" title="機能テストであり、暗号テストではありません">
+`ble` モードの暗号化リードは**機能**テストであり、**暗号**テストではありません。Renode には
+AES-CCM エンジンがないため、両マシンは*偽の*恒等変換 CCM を共有します（ダミーの 4 バイト MIC を
+付加/除去し、MIC-OK を報告するだけです）。両側の暗号化コードパスは実際に実行されますが、暗号の
+正しさは何も検証されません — 暗号の正しさを確認する用途には**使わないでください**。
+</Aside>
+
+  </TabItem>
+  <TabItem label="uart mode">
+
+DUT は、本リポジトリが Zephyr モジュールとして提供する `renode-studio-uart` スニペットで
+ビルドします。実機は Studio RPC を USB-CDC 経由で運びますが、Renode の nRF52840 USBD モデルは
+これを提示できないため、スニペットは Studio RPC + コンソールを Renode が駆動できる実際の UART
+ペリフェラルに再バインドします。これは（`ble` モードのフラッシュ可能なイメージに対して）追加の
+ビルド設定ですが、UART 経由の高速な直接 Studio ラウンドトリップが得られます。
+
+<Steps>
+
+1. `renode-studio-uart` スニペットを使う `build.yaml` の artifact を追加します:
+
+   ```yaml
+   include:
+     - artifact: renode
+       board: xiao_ble//zmk           # an nRF52840 board (the checked-in .repl)
+       shield: renode_tester
+       cmake-args: -DCONFIG_ZMK_STUDIO=y   # for the core Studio RPC smoke check
+       snippets:
+         - renode-studio-uart
+   ```
+
+2. ビルドします:
+
+   ```bash
+   west zmk-build <your-zmk-config> -af renode
+   ```
+
+3. スモークとモジュール自身のカスタム RPC テストを実行します:
+
+   ```bash
+   west zmk-renode-test tests/renode --mode uart --elf build/renode/zephyr/zmk.elf
+   ```
+
+</Steps>
+
+Studio RPC を有効にしないモジュールでは、`--no-rpc` で起動バナーのみを確認します:
+
+```bash
+west zmk-renode-test --mode uart --elf build/renode/zephyr/zmk.elf --no-rpc
+```
+
+<Aside type="note" title="CONFIG_ZMK_STUDIO の physical-layout 要件">
+`CONFIG_ZMK_STUDIO=y` は `zmk,physical-layout`（`key_physical_attrs` を持つもの）の存在
+**および** 選択された `zmk,matrix-transform` が存在しないことをビルド時にアサートします。
+transform を直接参照する keys 付き physical layout を shield/board に与えてください —
+リポジトリ内の例
+`tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay` を参照してください。
+</Aside>
+
+  </TabItem>
+</Tabs>
+
+## 必要なもの
+
+`uart` モードの Studio RPC チェックはワークスペースの `zmk-studio-messages` プロトを
+コンパイルするため、python の `protobuf` ランタイム**と** `protoc` コンパイラが必要です:
+
+```bash
+pip install -r requirements-test.txt
+apt-get install protobuf-compiler   # protoc is a system package
+```
+
+`--no-rpc` を渡すと起動バナーのみを確認し、この要件を完全にスキップできます。（`ble` モードは
+プロトを必要としません。）
+
+## モジュール自身の Renode テストを実行する
+
+`tests_dir` の位置引数を渡すと、その**直下**にある各 `*_test.py` ファイル（非再帰）が
+スモークテストの後に `python3 <file> -v` として実行されます。ハーネス
+（`scripts/lib/renode/`）が `PYTHONPATH` に置かれ、`ZMK_RENODE_*` の環境変数コントラクトが
+設定されます:
+
+| 変数 | いつ | 意味 |
+|---|---|---|
+| `ZMK_RENODE_MODE` | 常に | `uart` または `ble` — テストがどのハーネスをビルドすべきか。 |
+| `ZMK_RENODE_ELF` | 常に | DUT ELF の絶対パス。 |
+| `ZMK_RENODE_STORAGE_ADDR` / `ZMK_RENODE_STORAGE_SIZE` | ble | NVS `storage_partition` のオーバーライド（16 進）。 |
+| `ZMK_RENODE_HOST_ELF` | ble、`--host-elf` あり | `renode-ble-host` アプリ ELF の絶対パス。 |
+
+テストファイルは `renode_harness` を直接 `import` し、例えば
+`renode_harness.boot_single(...)`（uart）、`boot_single_real(...)`（ble 生存確認）、
+`boot_ble_pair(dut_elf, host_elf)`（2 マシン ble）を呼び出します。`--skip-smoke` を使うと
+汎用スモークをスキップし、`tests_dir` のみを実行できます。
+
+<Aside type="tip">
+ハーネス API の全体像、環境変数コントラクトの詳細、トラブルシューティング表は、リポジトリの
+[docs/renode-testing.md](https://github.com/cormoran/zmk-west-commands/blob/main/docs/renode-testing.md)
+に記載されています。
+</Aside>
+
+## さらに詳しく
+
+ごくまれにしか必要としないつまみとして、いくつかの高度なフラグがあります:
+
+| フラグ | 対象 | 概要 |
+|---|---|---|
+| `--rtt` | ble（生存確認） | Zephyr の SEGGER RTT ログ出力をキャプチャし、RTT fatal 行で失敗する（`CONFIG_LOG` + `CONFIG_USE_SEGGER_RTT` + `CONFIG_LOG_BACKEND_RTT` が必要）。 |
+| `--min-virtual` | ble（生存確認） | PC サンプリング前に実行する仮想秒数（デフォルト `20`）。 |
+| `--virtual-budget` | ble（ホストあり） | 失敗する前に暗号化リードへ到達するまでの仮想秒数（デフォルト `20`。約 3.3 秒が典型）。 |
+| `--steady-quantum` | ble（ホストあり） | S4 の後、グローバルな時刻同期の量子を（例 `0.001` に）引き上げ、定常状態フェーズを高速化する（約 7 倍。主にモジュール自身の長い BLE テスト向け）。 |
+| `--storage-addr` / `--storage-size` | ble | 消去済み `0xFF` としてプリロードする NVS `storage_partition` のアドレス/サイズ（デフォルト `0xec000`/`0x8000`、xiao_ble）。 |
+| `--boot-timeout` | uart | ZMK 起動バナーを待つ秒数（デフォルト `20`）。 |
+| `--renode-version` | 両方 | インストール/使用する Renode ポータブルリリース（デフォルト `1.16.1`。チェックインされた `.repl` と一致している必要があります）。 |
+
+内部的には、実機のハードウェアイメージが Renode 上で起動できるのは、プラットフォームがイメージが
+期待するペリフェラルを肩代わりするからです: **QSPI/USBD/FICR/NVMC スタブ**、**NVS の `0xFF`
+プリロード**、そして共有される**偽 CCM** の恒等変換です。コマンドを*使う*だけならこれらの知識は
+不要です — リポジトリの
+[docs/renode-internals.md](https://github.com/cormoran/zmk-west-commands/blob/main/docs/renode-internals.md)
+にある背景資料です。
+
+## 継続的インテグレーション
+
+薄いコンポジット GitHub Action がこのコマンドを CI 向けにラップします（protobuf/protoc の
+インストール、Renode のキャッシュ、`west zmk-renode-test` の呼び出しを行います）。詳しい
+ワークフローは [GitHub Actions ガイド](/zmk-west-commands/ja/guides/github-actions/)
+を参照してください。
+
+## 関連
+
+<CardGrid>
+  <LinkCard
+    title="west zmk-ble-test"
+    href="/zmk-west-commands/ja/guides/zmk-ble-test/"
+    description="プロトコル精度の高い BabbleSim による split + Studio-over-BLE テスト — ble モードの実バイナリ Renode 実行を補完します。"
+  />
+  <LinkCard
+    title="GitHub Actions"
+    href="/zmk-west-commands/ja/guides/github-actions/"
+    description="用意されたコンポジットアクションで zmk-renode-test を CI で実行します。"
+  />
+</CardGrid>

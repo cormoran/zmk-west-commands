@@ -1,0 +1,154 @@
+---
+title: Getting started
+description: Add zmk-west-commands to your west manifest and run your first zmk-build in an existing ZMK workspace.
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+`zmk-west-commands` is a [west](https://docs.zephyrproject.org/latest/develop/west/index.html)
+module that adds four extension commands to any ZMK workspace: **`west zmk-build`**
+(a `build.yaml`-aware `west build` wrapper), **`west zmk-test`** (ZMK's
+native-posix unit tests), **`west zmk-renode-test`** (boot a real firmware ELF in
+the Renode emulator), and **`west zmk-ble-test`** (BabbleSim split + Studio-over-BLE
+integration tests). The last three run with **no hardware** — no J-Link, no board.
+
+## Prerequisites
+
+- An existing **west / ZMK workspace** — typically a `zmk-config` repository or a
+  ZMK module. If you build ZMK firmware today, you already have one.
+- **Python** (already present in ZMK dev environments) for the optional interactive
+  target picker (`zmk-build -i`) and for the testing commands.
+
+## Install
+
+<Steps>
+
+1. Add the module to your west manifest so `west` imports its commands.
+
+   ```yaml title="west.yml"
+   manifest:
+     remotes:
+       - name: cormoran
+         url-base: https://github.com/cormoran
+     projects:
+       - name: zmk-west-commands
+         remote: cormoran
+         revision: main # or latest commit hash
+         import: true
+   ```
+
+2. Pull the module into your workspace.
+
+   ```bash
+   west update
+   ```
+
+3. Verify the commands are registered. `west -h` lists them under the manifest's
+   extension commands.
+
+   ```bash
+   west -h
+   ```
+
+   ```text
+   extension commands from project manifest (path: zmk-west-commands):
+     zmk-test:             Run ZMK unit tests
+     zmk-build:            Build ZMK firmware for given zmk-config
+   ```
+
+4. (Optional) Install the Python dependency for the interactive `-i` target
+   picker. Skip this if you always pass targets explicitly.
+
+   ```bash
+   pip install -r <path to zmk-west-commands>/requirements.txt
+   ```
+
+</Steps>
+
+<Aside type="tip" title="Testing commands need more">
+`zmk-renode-test` and `zmk-ble-test` have their own runtime setup (the protobuf
+runtime, and BabbleSim for BLE). Their guides walk through it — see the next-steps
+cards below.
+</Aside>
+
+## Your first command
+
+From inside your `zmk-config`, build the targets declared in its `build.yaml`:
+
+```bash
+cd <path to your zmk-config>
+west zmk-build
+```
+
+That reads `build.yaml`, configures `west build` for each target, and drops the
+firmware under `build/`. From here, pick the command you need:
+
+<CardGrid>
+  <LinkCard title="west zmk-build" href="/zmk-west-commands/guides/zmk-build/" description="Filter targets, flash, and generate VSCode config." />
+  <LinkCard title="west zmk-test" href="/zmk-west-commands/guides/zmk-test/" description="Run ZMK's native-posix unit tests with the env wired up." />
+  <LinkCard title="west zmk-renode-test" href="/zmk-west-commands/guides/zmk-renode-test/" description="Boot a real ELF in Renode and run a Studio smoke test." />
+  <LinkCard title="west zmk-ble-test" href="/zmk-west-commands/guides/zmk-ble-test/" description="Split + Studio-over-BLE integration tests under BabbleSim." />
+</CardGrid>
+
+## Developing this repository
+
+Contributing to `zmk-west-commands` itself? Set up a standalone workspace, then run
+the repo's own tests against the `tests/` fixtures.
+
+There are two west workspace layout options:
+
+<Tabs>
+  <TabItem label="Dependencies alongside">
+
+  west's standard layout — dependencies land next to the repo. Choose this to
+  share checkouts with other Zephyr module work.
+
+  ```bash
+  mkdir west-workspace
+  cd west-workspace
+  git clone https://github.com/cormoran/zmk-west-commands.git
+  west init -l . --mf scripts/west-test.yml
+  west update --narrow
+  west zephyr-export
+  ```
+
+  </TabItem>
+  <TabItem label="Dependencies bundled (dev container)">
+
+  Dependencies land under `./dependencies` (like `node_modules`) — easier to
+  isolate and to cache in CI. This is what the dev container uses.
+
+  ```bash
+  mkdir west-workspace
+  cd west-workspace
+  west init -l . --mf scripts/west-test-standalone.yml
+  west update --narrow
+  west zephyr-export
+  ```
+
+  </TabItem>
+</Tabs>
+
+A **dev container** (`.devcontainer/`) is configured for the bundled layout and
+runs the `west init` step automatically on create.
+
+Run the repository's tests against the checked-in `tests/` zmk-config:
+
+```bash
+# exercise the commands against the fixtures
+west zmk-test tests
+west zmk-build tests/build_yaml
+
+# regression-check their output
+python -m unittest
+
+# lint & format (pip install -r requirements-dev.txt)
+ruff format .
+ruff check .
+```
+
+<Aside type="note">
+Full layout diagrams, dev-container volume details, and the BabbleSim / Renode
+test manifests live in the repository
+[README](https://github.com/cormoran/zmk-west-commands#development-guide).
+</Aside>

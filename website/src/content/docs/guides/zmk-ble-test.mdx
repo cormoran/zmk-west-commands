@@ -1,0 +1,341 @@
+---
+title: west zmk-ble-test
+description: Run split and Studio-over-BLE integration tests under BabbleSim against checked-in snapshots — no hardware, no J-Link.
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard, FileTree, Badge } from '@astrojs/starlight/components';
+
+`west zmk-ble-test` runs a module's **BabbleSim (bsim) BLE tests** with no
+hardware. For each test case it:
+
+1. builds the **DUT** from the workspace ZMK app with your module added via
+   `ZMK_EXTRA_MODULES`,
+2. builds any **split peripherals** and **host** ("computer") apps the case
+   references,
+3. launches them all under the bsim **2G4 phy**, and
+4. diffs the **filtered** device output against a checked-in
+   `events.snapshot`.
+
+It is a Python port of the template repo's `tests/ble/run-ble-test.sh`, kept
+**byte-compatible** with its `sort | sed | diff` pass/fail pipeline — so a case
+that passed under the shell script passes here unchanged.
+
+<Aside type="note">
+This is the top rung of the hardware-free testing ladder. For pure keymap /
+behavior unit tests use [`west zmk-test`](/zmk-west-commands/guides/zmk-test/);
+for a real flashable image booted in an emulator use
+[`west zmk-renode-test`](/zmk-west-commands/guides/zmk-renode-test/). See
+[Concepts](/zmk-west-commands/concepts/) for how they fit together.
+</Aside>
+
+## Prerequisites
+
+<Steps>
+
+1. **A west workspace containing the `zmk` project.** The command reads it from
+   your manifest to locate the ZMK app. See
+   [Getting started](/zmk-west-commands/getting-started/).
+
+2. **A compiled BabbleSim tree.** bsim is **Linux-only** and comes from ZMK's
+   manifest. Fetch and build it once, then point the command at it:
+
+   ```bash
+   west config manifest.group-filter -- +babblesim
+   west update --narrow
+   make -C "$(west topdir)/dependencies/tools/bsim" everything -j"$(nproc)"
+   export BSIM_OUT_PATH="$(west topdir)/dependencies/tools/bsim"
+   export BSIM_COMPONENTS_PATH="$BSIM_OUT_PATH/components"
+   ```
+
+   `BSIM_OUT_PATH` / `BSIM_COMPONENTS_PATH` (or `--bsim PATH`) select the
+   compiled tree. If it is missing or uncompiled, the command exits with these
+   exact instructions.
+
+3. **The Python test dependencies** (only if you use `studio_requests.json`):
+   the `protobuf` package plus the `protoc` compiler —
+   `pip install -r requirements-test.txt` (`protoc` is a system package, e.g.
+   `apt-get install protobuf-compiler`). The CI action installs both.
+
+</Steps>
+
+<Aside type="caution" title="ZMK revision prerequisite">
+The bsim BLE tests need two fixes **not yet on `zmkfirmware/zmk` main**:
+
+- a **writable** behavior local-id map section (the native/POSIX build
+  SIGSEGVs on the first settings commit otherwise), and
+- `settings_subsys_init` **before** dynamic BLE handler registration (without
+  it the split central never advertises/scans on `nrf52_bsim` builds that use
+  the settings NONE backend — i.e. `CONFIG_ZMK_STUDIO=y` without
+  `CONFIG_BT_SETTINGS`).
+
+Until they land upstream, pin
+`cormoran/zmk@fffa339cf6f5c45366ab332d2b512f1c3c300753` in your test manifest.
+This repo's `scripts/west-test-ble.yml` does exactly that (with a TODO to
+unpin):
+
+```yaml
+- name: zmk
+  remote: cormoran
+  revision: fffa339cf6f5c45366ab332d2b512f1c3c300753
+  import:
+    file: app/west.yml
+```
+</Aside>
+
+## Running tests
+
+Point the command at a directory. A directory is a **test case** iff it
+contains `nrf52_bsim.keymap`; discovery recurses from `tests_path` (default:
+the current directory).
+
+```bash
+# Run every case under tests/ble, with this module added via ZMK_EXTRA_MODULES
+west zmk-ble-test tests/ble -m .
+
+# A single case
+west zmk-ble-test tests/ble/split/basic -m .
+
+# Regenerate snapshots on mismatch (also honors ZMK_TESTS_AUTO_ACCEPT=y)
+west zmk-ble-test tests/ble -m . --auto-accept
+
+# Run cases concurrently; each case's sim id isolates its phy
+west zmk-ble-test tests/ble -m . -j 4
+```
+
+Builds land under `<west topdir>/build/ble/`; each case's `output.log`,
+`filtered_output.log` and the aggregate `tests/pass-fail.log` are kept there.
+
+### Usage & options
+
+```text
+usage: west zmk-ble-test [-h] [-m MODULE] [--auto-accept] [--sim-prefix NAME]
+                         [--bsim PATH] [-j PARALLEL] [-v] [tests_path]
+```
+
+| Argument | Default | Purpose |
+|---|---|---|
+| `tests_path` | current directory | A test case, or a parent directory searched recursively (a case iff it holds `nrf52_bsim.keymap`). |
+| `-m`, `--module` | enclosing git repo of cwd, else cwd | Module repo root added via `ZMK_EXTRA_MODULES`. Use `-m .` from your module root. |
+| `--auto-accept` | off | Regenerate `events.snapshot` on mismatch. Also honored via `ZMK_TESTS_AUTO_ACCEPT=y`. |
+| `--sim-prefix NAME` | sanitized module dir name | bsim simulation-id / exe-name prefix; also expands the `{prefix}` placeholder in `siblings.txt`. |
+| `--bsim PATH` | `$BSIM_OUT_PATH`, else `<topdir>/dependencies/tools/bsim` | Path to a compiled BabbleSim tree. |
+| `-j`, `--parallel` | `1` | Run cases concurrently. Per-case sim ids isolate the phys. |
+| `-v`, `--verbose` | off | Stream device output to the console (logs are always written to disk). |
+
+## Anatomy of a test case
+
+A case is a directory that contains `nrf52_bsim.keymap`. Everything else is
+optional and layers on top of it. For example, the in-repo split case:
+
+<FileTree>
+- tests/ble/split/basic/
+  - nrf52_bsim.keymap    marks the case; DUT keymap
+  - nrf52_bsim.conf      Kconfig shared by DUT + peripherals
+  - peripheral.overlay   one split-peripheral build
+  - siblings.txt         extra simulated devices, one per line
+  - events.patterns      sed filter over the combined log
+  - events.snapshot      expected filtered output
+</FileTree>
+
+| File | Meaning |
+|---|---|
+| `nrf52_bsim.keymap` | Marks the case; the DUT keymap. Needs a keys'd physical layout for Studio cases. |
+| `nrf52_bsim.conf` | Kconfig shared by the DUT and peripherals (via `ZMK_CONFIG`). |
+| `central.conf` | Extra Kconfig applied to the DUT (central) only (via `EXTRA_CONF_FILE`). |
+| `peripheral.conf` | Extra Kconfig applied to peripheral builds only. |
+| `peripheral*.overlay` | One split-peripheral build each; presence ⇒ the DUT is built as a split central (`-DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y`). |
+| `siblings.txt` | One command line per extra simulated device (`-d=2…`; `-d=0` is the DUT, `-d=1` the handbrake). |
+| `studio_requests.json` | Declarative `zmk.studio.Request` list (JSON DSL). If present, the shared `ble-studio-host` app is built for this case with these payloads embedded. |
+| `studio_requests.hex` | Byte-exact escape hatch for the same (one framed request per hex line). Mutually exclusive with the `.json`. |
+| `events.patterns` | `sed -E -n` script that filters the combined output log. |
+| `events.snapshot` | Expected filtered output. |
+| `pending` | If present, a snapshot mismatch is **PENDING** instead of **FAILED**. |
+
+## Add a BLE test to your module
+
+<Steps>
+
+1. **Create the case directory and the marker keymap.** Under
+   `tests/ble/<group>/<case>/`, write `nrf52_bsim.keymap`. For Studio cases it
+   **must** define a keys'd `zmk,physical-layout`, e.g.:
+
+   ```c
+   #include <behaviors.dtsi>
+   #include <dt-bindings/zmk/keys.h>
+   #include <dt-bindings/zmk/matrix_transform.h>
+   #include <physical_layouts.dtsi>
+
+   / {
+       physical_layout: physical_layout {
+           compatible = "zmk,physical-layout";
+           display-name = "Test layout";
+           transform = <&test_transform>;
+           keys /* w h x y rot rx ry */
+               = <&key_physical_attrs 100 100   0   0 0 0 0>
+               , <&key_physical_attrs 100 100 100   0 0 0 0>
+               , <&key_physical_attrs 100 100   0 100 0 0 0>
+               , <&key_physical_attrs 100 100 100 100 0 0 0>
+               ;
+       };
+       // ... matrix-transform + keymap ...
+   };
+   ```
+
+2. **Add Kconfig and overlays.** Put shared config in `nrf52_bsim.conf`
+   (e.g. `CONFIG_ZMK_SPLIT=y` or `CONFIG_ZMK_STUDIO=y`). Split cases add one
+   `peripheral*.overlay` per peripheral — its presence makes the DUT a split
+   central. A peripheral overlay typically drives a mock kscan:
+
+   ```c
+   #include <dt-bindings/zmk/kscan_mock.h>
+
+   &kscan {
+       events =
+       <ZMK_MOCK_PRESS(0,0,5000)
+       ZMK_MOCK_RELEASE(0,0,200)>;
+   };
+   ```
+
+3. **Write `siblings.txt`.** One line per extra simulated device beyond the DUT
+   (`-d=0`) and the handbrake (`-d=1`). Number each device with its own `-d=N`,
+   starting at `-d=2`:
+
+   ```text
+   ./ble_test_central.exe -d=2
+   ./{prefix}_split_basic_peripheral.exe -d=3
+   ```
+
+4. **Add `events.patterns` and generate the snapshot.** Write the `sed -E -n`
+   filter (see [Placeholders & device numbering](#placeholders--device-numbering)),
+   then generate `events.snapshot` from a first run:
+
+   ```bash
+   west zmk-ble-test tests/ble/<group>/<case> -m . --auto-accept
+   ```
+
+   Review the snapshot, then commit it. Subsequent runs diff against it.
+
+</Steps>
+
+## Studio-over-BLE without C or Python
+
+To exercise Studio RPC over BLE (including while the split link is active), your
+case ships **one data file**: `studio_requests.json`, an ordered list of
+`zmk.studio.Request` messages in protobuf's canonical JSON mapping. The repo
+owns and builds the shared [`ble-studio-host`](https://github.com/cormoran/zmk-west-commands/tree/main/ble-studio-host)
+app — **modules copy no C code**.
+
+```json
+[
+  { "custom": { "listCustomSubsystems": {} } },
+  { "custom": { "call": {
+      "subsystemIndex": 0,
+      "payload": { "$type": "your_name.template.Request",
+                   "sample": { "value": 42 } } } } }
+]
+```
+
+- **`$type` (nested-encoded bytes).** A *bytes* field (e.g. a custom-subsystem
+  `Call.payload`) may be written as `{"$type": "<full.message.name>", ...fields}`.
+  The name resolves against the workspace's Studio protos **plus your module's
+  own `proto/` directory**; the message is encoded and substituted as the bytes
+  value. `$type` objects nest recursively; plain base64 strings still work for
+  raw payloads.
+- **`request_id`** is auto-assigned the request's 1-based position in the array
+  when omitted (or 0).
+
+The runner converts the JSON at test time (needs `protobuf` + `protoc`),
+automatically builds `ble-studio-host` with the payloads embedded, and stages
+it per case. Reference it from `siblings.txt` with the `{studio_host}`
+placeholder:
+
+```text
+./{studio_host} -d=2
+```
+
+The host scans, connects, pairs (Just Works), exchanges a larger ATT MTU,
+discovers the ZMK Studio GATT service, subscribes to its indications, writes
+each request (one per received response), and hexdumps every de-framed
+response. Those hexdumps appear as `<dbg> ble_studio_host: ...` lines — write
+your `events.patterns` / `events.snapshot` against that log name.
+
+<Aside type="tip" title="Escape hatches">
+When the JSON mapping is not enough:
+
+- `studio_requests.hex` — one hex-encoded, framed `zmk.studio.Request` per line
+  (`#` comments allowed). Byte-exact; **mutually exclusive** with the `.json`.
+- A custom host app as `tests/ble/<name>_host/` (legacy `tests/ble/<name>_central/`
+  is still auto-discovered) for host-side logic the shared app cannot express
+  (custom asserts, reacting to notification content, multi-connection).
+
+Prefer `studio_requests.json` + the shared app whenever "send requests in
+order, snapshot the response hexdumps" is enough. See
+[`ble-studio-host/README.md`](https://github.com/cormoran/zmk-west-commands/blob/main/ble-studio-host/README.md)
+for the full DSL spec.
+</Aside>
+
+## Placeholders & device numbering
+
+**Placeholders in `siblings.txt`.** `--sim-prefix NAME` (default: the sanitized
+module directory name) sets the bsim simulation id (`<prefix>_<case>`) and the
+staged executable-name prefix. Two placeholders expand per case:
+
+- `{prefix}` — the active prefix. Lines without placeholders run unchanged, so
+  existing case data keeps working.
+- `{studio_host}` — the case's staged shared-host executable name
+  (`<sim id>_studio_host.exe`; only meaningful for cases with a
+  `studio_requests.json` / `.hex`).
+
+Custom module host apps (`tests/ble/*_host/`, or the legacy `tests/ble/*_central/`)
+are staged as both `<prefix>_<appname>.exe` and a plain `<appname>.exe` alias.
+
+**Device numbering.** The runner assigns `-d=0` to the DUT and `-d=1` to the
+bsim handbrake; **every other device gets its id from its own `siblings.txt`
+line** (`-d=2`, `-d=3`, … as written there). Split peripherals are ordinary
+siblings: the runner stages `<sim id>_<peripheral>.exe` and the case launches
+it. Each device prefixes its stdout with `d_NN: @<sim time>`; the combined
+`output.log` captures the DUT and all siblings (the handbrake is not captured).
+
+**Grouping & asserting any device.** The evaluation pipeline's stable
+`sort -t: -k1,1` groups lines per device (ascending id: the `d_00` block, then
+`d_02`, `d_03`, …) while preserving each device's own chronological order. So a
+snapshot lists one deterministic block per asserted device, and **any device's
+lines can be asserted** — not just the DUT or host. Relabel a device's lines
+with a keyword-guarded substitution so only the intended lines print (a
+substitution only prints when it matches, so the same keyword on another
+device's line is harmless). This is `split/basic`'s peripheral rule:
+
+```sed
+/Welcome to ZMK!|security_changed: Security changed|kscan_process_msgq/s/^d_03: @[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}  .{19}/peripheral /p
+```
+
+<Aside type="caution" title="Determinism">
+bsim runs are deterministic per firmware build, but prefer lines that stay
+stable across dependency bumps. Avoid:
+
+- `*** Booting Zephyr OS build <hash> ***` (changes with every Zephyr/ZMK
+  revision),
+- raw kscan-mock event encodings (`ev <number> …` — prefer the decoded
+  `…kscan_process_msgq: Row: …, pressed: …` lines),
+- HCI version/build banner lines.
+
+Semantic lines (connection/security changes, CCC subscriptions, position
+events) are stable and meaningful. When in doubt, run the case at least twice
+(ideally with different `--sim-prefix`) and confirm identical
+`filtered_output.log`.
+</Aside>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard
+    title="west zmk-renode-test"
+    href="/zmk-west-commands/guides/zmk-renode-test/"
+    description="Boot a real firmware ELF in the Renode emulator — a boot + Studio smoke test, still no hardware."
+  />
+  <LinkCard
+    title="GitHub Actions"
+    href="/zmk-west-commands/guides/github-actions/"
+    description="Wrap zmk-ble-test in the composite action that builds bsim and caches it for CI."
+  />
+</CardGrid>

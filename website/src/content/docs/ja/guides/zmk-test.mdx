@@ -1,0 +1,140 @@
+---
+title: west zmk-test
+description: ZMK の native-posix ユニットテストを環境変数のセットアップ込みで実行します。ハードウェア不要。ディレクトリを指定して -m で自分のモジュールを追加するだけです。
+---
+
+import { Steps, Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+`west zmk-test` は ZMK 本体の `run-test.sh` をラップし、そのスクリプトが必要とする
+環境変数（`ZMK_SRC_DIR`、`ZMK_BUILD_DIR`、`ZMK_EXTRA_MODULES`、
+`ZMK_TESTS_VERBOSE`）を自動で設定します。実行するのは ZMK の
+**native-posix ユニットテスト** で、これはキーマップとビヘイビアを
+`native_posix_64` ターゲット向けにコンパイルし、その出力を検証する純粋な
+ソフトウェアテストです。**フラッシュ対象もハードウェアも一切不要** です。
+
+<Aside type="note">
+これらは ZMK のスナップショット形式のユニットテストです。エミュレートした
+ファームウェアや BLE の統合テストについては
+[`west zmk-renode-test`](/zmk-west-commands/ja/guides/zmk-renode-test/) と
+[`west zmk-ble-test`](/zmk-west-commands/ja/guides/zmk-ble-test/) を参照してください。
+</Aside>
+
+## 前提条件
+
+- `zmk` プロジェクトを含む west ワークスペース（本コマンドはマニフェストから
+  `zmk` を読み取り、`run-test.sh` の場所を特定します）。詳しくは
+  [はじめに](/zmk-west-commands/ja/getting-started/) を参照してください。
+- 以上です。ボードも J-Link もフラッシュも不要です。
+
+## テストを実行する
+
+<Steps>
+
+1. テストを含むディレクトリを指定してコマンドを実行します。
+
+   ```bash
+   west zmk-test <path to test directory>
+   ```
+
+   引数を省略すると、カレントディレクトリが使われます。
+
+   ```bash
+   cd tests
+   west zmk-test
+   ```
+
+2. `Running:` / `PASS:` / `FAILED:` / `PENDING:` の行が流れていくのを確認します。
+   プロセスは `run-test.sh` 自身のリターンコードで終了するため、CI に適しています。
+
+</Steps>
+
+**テストの探索。** *テスト* とは、指定したパスを再帰的に検索して
+`native_posix_64.keymap` ファイルが見つかったディレクトリのことです。
+`test_path` 以下にあるそのようなディレクトリがすべて実行されます。
+`test_path` のデフォルトはカレントディレクトリです。
+
+## 自分のモジュールをテストする
+
+モジュール用のユニットテストはモジュール自身のリポジトリ内に置きますが、
+ビルドするにはそのモジュールのソースを ZMK のモジュールパスに載せる必要が
+あります。`-m` / `--extra-modules` で追加してください。
+
+```bash
+west zmk-test <tests dir> -m <path to your module or zmk-config>
+```
+
+よく使うのが `-m .` です。モジュールのリポジトリルートで実行し、その同じ
+リポジトリを追加モジュールとして含めることで、ツリー内のソースに対して
+テストをビルドできます。
+
+```bash
+cd <your zmk module repo>
+west zmk-test tests -m .
+```
+
+`-m` は複数のパスを受け付けます（例: `-m . ../another-module`）。各パスは
+絶対パスに解決され、`ZMK_EXTRA_MODULES` を通じて `run-test.sh` に渡されます。
+
+## オプション
+
+```bash
+usage: west zmk-test [-h] [-d BUILD_DIR] [-m [EXTRA_MODULES ...]] [-v] [test_path]
+
+Run the ZMK test suite with zmk's run-test.sh script.
+
+positional arguments:
+  test_path             Specify the (parent) test directory to run. The command finds tests recursively by searching `native_posix_64.keymap`. Current directory by default.
+
+options:
+  -h, --help            show this help message and exit
+  -d BUILD_DIR, --build-dir BUILD_DIR
+                        Path to the ZMK build directory to output test artifacts. <west workspace root>/build by default.
+  -m [EXTRA_MODULES ...], --extra-modules [EXTRA_MODULES ...]
+                        Additional ZMK modules to include during testing. Useful when running test under your zmk-module to include your module itself by specifying zmk-module repository root.
+  -v, --verbose         Enable verbose output for west itself and tests.
+```
+
+| 引数 | デフォルト | 用途 |
+|---|---|---|
+| `test_path` | カレントディレクトリ | 再帰的にテスト（`native_posix_64.keymap`）を探索する親ディレクトリ。 |
+| `-d`, `--build-dir` | `<west topdir>/build` | テストのビルド成果物とログの出力先。 |
+| `-m`, `--extra-modules` | *(なし)* | ビルドに追加する ZMK モジュール（1 つ以上）。自分のモジュールを含めるには `-m .` を使います。 |
+| `-v`, `--verbose` | off | west とテスト自体の詳細出力を有効にします。 |
+
+## 結果の読み方
+
+探索された各テストは `PASS:`、`FAILED:`、`PENDING:` のいずれかの行を出力します。
+結合された stdout/stderr の全出力は、常に
+`<build-dir>/stdout_and_stderr.log` に保存されます。実行が失敗し、かつ `-v` を
+指定していなかった場合は、コマンドがそのログの場所を示したうえで内容を再表示するため、
+再実行せずに原因を調査できます。いずれかのテストが失敗すると、コマンドは
+非ゼロで終了します。
+
+<Aside type="tip">
+1 つのテストだけを実行するには、`test_path` にそのテストディレクトリ（または
+それだけを含む親ディレクトリ）を直接指定します。
+
+```bash
+west zmk-test tests/my-feature -m .
+```
+</Aside>
+
+## 次のステップ
+
+<CardGrid>
+  <LinkCard
+    title="west zmk-renode-test"
+    href="/zmk-west-commands/ja/guides/zmk-renode-test/"
+    description="実際のファームウェア ELF を Renode エミュレータで起動し、起動 + Studio のスモークテストを実行します。こちらもハードウェア不要です。"
+  />
+  <LinkCard
+    title="west zmk-ble-test"
+    href="/zmk-west-commands/ja/guides/zmk-ble-test/"
+    description="スプリット + Studio-over-BLE の統合テストを BabbleSim 上で実行し、チェックイン済みのスナップショットと照合します。"
+  />
+  <LinkCard
+    title="コンセプト"
+    href="/zmk-west-commands/ja/concepts/"
+    description="各コマンドの関係と、どのテスト手段を選ぶべきかを解説します。"
+  />
+</CardGrid>

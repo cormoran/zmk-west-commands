@@ -1,0 +1,136 @@
+---
+title: west zmk-test
+description: Run ZMK's native-posix unit tests with the environment wired up for you — no hardware, just point it at a directory and add your module with -m.
+---
+
+import { Steps, Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+`west zmk-test` wraps ZMK's own `run-test.sh` and sets the environment variables
+that script expects (`ZMK_SRC_DIR`, `ZMK_BUILD_DIR`, `ZMK_EXTRA_MODULES`,
+`ZMK_TESTS_VERBOSE`) for you. It runs ZMK's **native-posix unit tests** — pure
+software that compiles the keymap and behaviors for the `native_posix_64` target
+and checks their output. There is **nothing to flash and no hardware involved**.
+
+<Aside type="note">
+These are ZMK's snapshot-style unit tests. For emulated-firmware and BLE
+integration tests, see [`west zmk-renode-test`](/zmk-west-commands/guides/zmk-renode-test/)
+and [`west zmk-ble-test`](/zmk-west-commands/guides/zmk-ble-test/).
+</Aside>
+
+## Prerequisites
+
+- A west workspace containing the `zmk` project (the command reads it from your
+  manifest to locate `run-test.sh`). See [Getting started](/zmk-west-commands/getting-started/).
+- That's it — no board, no J-Link, no flashing.
+
+## Run the tests
+
+<Steps>
+
+1. Point the command at a directory that contains tests:
+
+   ```bash
+   west zmk-test <path to test directory>
+   ```
+
+   With no argument, the current directory is used:
+
+   ```bash
+   cd tests
+   west zmk-test
+   ```
+
+2. Watch the `Running:` / `PASS:` / `FAILED:` / `PENDING:` lines stream by. The
+   process exits with `run-test.sh`'s own return code, so it is CI-friendly.
+
+</Steps>
+
+**Test discovery.** A *test* is any directory found by recursively searching the
+given path for a `native_posix_64.keymap` file. Every such directory under
+`test_path` is run. The default `test_path` is the current directory.
+
+## Testing your own module
+
+Unit tests for your module live inside your module's own repository, but they
+need the module's source on the ZMK module path to build. Use `-m` /
+`--extra-modules` to add it:
+
+```bash
+west zmk-test <tests dir> -m <path to your module or zmk-config>
+```
+
+The common idiom is `-m .` — run from your module's repository root and include
+that same repository as an extra module, so the tests build against your
+in-tree source:
+
+```bash
+cd <your zmk module repo>
+west zmk-test tests -m .
+```
+
+`-m` accepts multiple paths (e.g. `-m . ../another-module`). Each path is
+resolved to an absolute path and passed to `run-test.sh` via
+`ZMK_EXTRA_MODULES`.
+
+## Options
+
+```bash
+usage: west zmk-test [-h] [-d BUILD_DIR] [-m [EXTRA_MODULES ...]] [-v] [test_path]
+
+Run the ZMK test suite with zmk's run-test.sh script.
+
+positional arguments:
+  test_path             Specify the (parent) test directory to run. The command finds tests recursively by searching `native_posix_64.keymap`. Current directory by default.
+
+options:
+  -h, --help            show this help message and exit
+  -d BUILD_DIR, --build-dir BUILD_DIR
+                        Path to the ZMK build directory to output test artifacts. <west workspace root>/build by default.
+  -m [EXTRA_MODULES ...], --extra-modules [EXTRA_MODULES ...]
+                        Additional ZMK modules to include during testing. Useful when running test under your zmk-module to include your module itself by specifying zmk-module repository root.
+  -v, --verbose         Enable verbose output for west itself and tests.
+```
+
+| Argument | Default | Purpose |
+|---|---|---|
+| `test_path` | current directory | Parent directory searched recursively for tests (`native_posix_64.keymap`). |
+| `-d`, `--build-dir` | `<west topdir>/build` | Where test build artifacts and logs are written. |
+| `-m`, `--extra-modules` | *(none)* | One or more extra ZMK modules to add to the build — use `-m .` to include your own module. |
+| `-v`, `--verbose` | off | Verbose output for west and the tests themselves. |
+
+## Interpreting results
+
+Each discovered test prints a `PASS:`, `FAILED:`, or `PENDING:` line. The full
+combined stdout/stderr is always saved to `<build-dir>/stdout_and_stderr.log`.
+When a run fails and you did **not** pass `-v`, the command points you at that
+log and replays it, so you can diagnose without re-running. The command exits
+non-zero if any test fails.
+
+<Aside type="tip">
+To run just one test, point `test_path` straight at that test directory (or a
+parent containing only it):
+
+```bash
+west zmk-test tests/my-feature -m .
+```
+</Aside>
+
+## Next steps
+
+<CardGrid>
+  <LinkCard
+    title="west zmk-renode-test"
+    href="/zmk-west-commands/guides/zmk-renode-test/"
+    description="Boot a real firmware ELF in the Renode emulator — a boot + Studio smoke test, still no hardware."
+  />
+  <LinkCard
+    title="west zmk-ble-test"
+    href="/zmk-west-commands/guides/zmk-ble-test/"
+    description="Run split + Studio-over-BLE integration tests under BabbleSim against checked-in snapshots."
+  />
+  <LinkCard
+    title="Concepts"
+    href="/zmk-west-commands/concepts/"
+    description="How the commands fit together and which testing rung to reach for."
+  />
+</CardGrid>

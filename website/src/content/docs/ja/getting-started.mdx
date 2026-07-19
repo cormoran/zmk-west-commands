@@ -1,0 +1,155 @@
+---
+title: Getting started
+description: 既存の ZMK ワークスペースに zmk-west-commands を追加し、最初の zmk-build を実行するまで。
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+`zmk-west-commands` は、任意の ZMK ワークスペースに 4 つの拡張コマンドを追加する
+[west](https://docs.zephyrproject.org/latest/develop/west/index.html) モジュールです。
+**`west zmk-build`**（`build.yaml` を解釈する `west build` ラッパー）、
+**`west zmk-test`**（ZMK の native-posix ユニットテスト）、
+**`west zmk-renode-test`**（実際のファームウェア ELF を Renode エミュレータで起動）、
+**`west zmk-ble-test`**（BabbleSim による split・Studio-over-BLE の統合テスト）を提供します。
+後半 3 つは **ハードウェア不要** で動作します。J-Link も実機も必要ありません。
+
+## 前提条件
+
+- 既存の **west / ZMK ワークスペース**。通常は `zmk-config` リポジトリか
+  ZMK モジュールです。すでに ZMK ファームウェアをビルドしているなら、そのまま使えます。
+- 対話的なターゲット選択（`zmk-build -i`）やテストコマンドのための **Python**
+  （ZMK の開発環境には既に含まれています）。
+
+## インストール
+
+<Steps>
+
+1. west がコマンドを import できるように、モジュールをマニフェストへ追加します。
+
+   ```yaml title="west.yml"
+   manifest:
+     remotes:
+       - name: cormoran
+         url-base: https://github.com/cormoran
+     projects:
+       - name: zmk-west-commands
+         remote: cormoran
+         revision: main # or latest commit hash
+         import: true
+   ```
+
+2. モジュールをワークスペースに取り込みます。
+
+   ```bash
+   west update
+   ```
+
+3. コマンドが登録されたことを確認します。`west -h` はマニフェストの拡張コマンドとして
+   これらを一覧表示します。
+
+   ```bash
+   west -h
+   ```
+
+   ```text
+   extension commands from project manifest (path: zmk-west-commands):
+     zmk-test:             Run ZMK unit tests
+     zmk-build:            Build ZMK firmware for given zmk-config
+   ```
+
+4. （任意）対話的な `-i` ターゲット選択のための Python 依存関係をインストールします。
+   ターゲットを常に明示的に指定する場合は不要です。
+
+   ```bash
+   pip install -r <path to zmk-west-commands>/requirements.txt
+   ```
+
+</Steps>
+
+<Aside type="tip" title="テストコマンドには追加のセットアップが必要です">
+`zmk-renode-test` と `zmk-ble-test` には独自のランタイムセットアップ（protobuf
+ランタイム、BLE 向けの BabbleSim）が必要です。各コマンドのガイドで手順を説明しています。
+下の Next steps カードを参照してください。
+</Aside>
+
+## 最初のコマンド
+
+`zmk-config` の中で、`build.yaml` に定義されたターゲットをビルドします。
+
+```bash
+cd <path to your zmk-config>
+west zmk-build
+```
+
+これは `build.yaml` を読み取り、各ターゲット向けに `west build` を構成し、
+ファームウェアを `build/` 以下に出力します。ここから、必要なコマンドを選んでください。
+
+<CardGrid>
+  <LinkCard title="west zmk-build" href="/zmk-west-commands/ja/guides/zmk-build/" description="ターゲットの絞り込み、フラッシュ、VSCode 設定の生成。" />
+  <LinkCard title="west zmk-test" href="/zmk-west-commands/ja/guides/zmk-test/" description="環境設定込みで ZMK の native-posix ユニットテストを実行。" />
+  <LinkCard title="west zmk-renode-test" href="/zmk-west-commands/ja/guides/zmk-renode-test/" description="実際の ELF を Renode で起動し Studio スモークテストを実行。" />
+  <LinkCard title="west zmk-ble-test" href="/zmk-west-commands/ja/guides/zmk-ble-test/" description="BabbleSim による split・Studio-over-BLE 統合テスト。" />
+</CardGrid>
+
+## このリポジトリの開発
+
+`zmk-west-commands` 自体に貢献する場合は、standalone ワークスペースをセットアップし、
+`tests/` フィクスチャに対してリポジトリ独自のテストを実行します。
+
+west ワークスペースのレイアウトには 2 つの選択肢があります。
+
+<Tabs>
+  <TabItem label="依存関係を隣に配置">
+
+  west の標準レイアウトで、依存関係はリポジトリの隣に置かれます。他の Zephyr
+  モジュール開発とチェックアウトを共有したい場合はこちらを選びます。
+
+  ```bash
+  mkdir west-workspace
+  cd west-workspace
+  git clone https://github.com/cormoran/zmk-west-commands.git
+  west init -l . --mf scripts/west-test.yml
+  west update --narrow
+  west zephyr-export
+  ```
+
+  </TabItem>
+  <TabItem label="依存関係を同梱（dev container）">
+
+  依存関係は `./dependencies` 以下（`node_modules` のように）に置かれます。分離が容易で、
+  CI でのキャッシュもしやすくなります。dev container はこちらを使用します。
+
+  ```bash
+  mkdir west-workspace
+  cd west-workspace
+  west init -l . --mf scripts/west-test-standalone.yml
+  west update --narrow
+  west zephyr-export
+  ```
+
+  </TabItem>
+</Tabs>
+
+**dev container**（`.devcontainer/`）は同梱レイアウト向けに構成されており、作成時に
+`west init` ステップを自動で実行します。
+
+チェックイン済みの `tests/` zmk-config に対して、リポジトリのテストを実行します。
+
+```bash
+# フィクスチャに対してコマンドを実行
+west zmk-test tests
+west zmk-build tests/build_yaml
+
+# それらの出力をリグレッションチェック
+python -m unittest
+
+# lint & format（pip install -r requirements-dev.txt）
+ruff format .
+ruff check .
+```
+
+<Aside type="note">
+レイアウト図、dev container のボリューム詳細、BabbleSim / Renode のテストマニフェストは、
+リポジトリの [README](https://github.com/cormoran/zmk-west-commands#development-guide)
+にあります。
+</Aside>

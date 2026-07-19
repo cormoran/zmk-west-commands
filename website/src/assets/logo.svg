@@ -1,0 +1,5 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="zmk-west-commands logo">
+  <rect x="1.5" y="4.5" width="29" height="23" rx="4" fill="#1e293b" stroke="#38bdf8" stroke-width="1.5"/>
+  <path d="M7 12.5L11.5 16L7 19.5" stroke="#38bdf8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="14" y1="20" x2="22" y2="20" stroke="#e2e8f0" stroke-width="2" stroke-linecap="round"/>
+</svg>

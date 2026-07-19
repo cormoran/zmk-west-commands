@@ -1,0 +1,55 @@
+---
+title: zmk-west-commands
+description: A west module with commands for building ZMK firmware and testing ZMK modules with no hardware — unit, Renode, and BabbleSim BLE tests.
+template: splash
+hero:
+  tagline: Build ZMK firmware and test your ZMK modules with zero hardware — unit tests, Renode emulation, and BabbleSim BLE, all from <code>west</code>.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get started
+      link: /zmk-west-commands/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/cormoran/zmk-west-commands
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What you get
+
+Add one entry to your west manifest and four commands appear in `west`. Two make
+building `zmk-config` firmware effortless; two run your module's tests **without a
+single piece of hardware**.
+
+<CardGrid stagger>
+  <Card title="west zmk-build" icon="seti:cpp">
+    A `west build` wrapper that reads your `build.yaml`, picks targets
+    interactively, flashes, and ships handy shortcuts (`--reset`,
+    `--debug-jlink`, `--vscode`).
+  </Card>
+  <Card title="west zmk-test" icon="approve-check">
+    Run ZMK's native-posix unit tests with the environment wired up for you —
+    point it at a directory and pass `-m .` to include your own module.
+  </Card>
+  <Card title="west zmk-renode-test" icon="rocket">
+    Boot a real firmware ELF in the Renode emulator and run a boot + Studio
+    smoke test — BLE pairing or UART, no J-Link, no board.
+  </Card>
+  <Card title="west zmk-ble-test" icon="random">
+    Run split + Studio-over-BLE integration tests under BabbleSim, asserting
+    output against checked-in snapshots. Pure software.
+  </Card>
+</CardGrid>
+
+## Pick your path
+
+<CardGrid>
+  <LinkCard title="Getting started" href="/zmk-west-commands/getting-started/" description="Add the module to your manifest and run your first command." />
+  <LinkCard title="Concepts" href="/zmk-west-commands/concepts/" description="How the commands fit together and which testing approach to reach for." />
+  <LinkCard title="Build firmware" href="/zmk-west-commands/guides/zmk-build/" description="Step-by-step: build, filter targets, flash, and debug." />
+  <LinkCard title="Test in CI" href="/zmk-west-commands/guides/github-actions/" description="Drop-in GitHub Actions for Renode and BLE tests." />
+</CardGrid>

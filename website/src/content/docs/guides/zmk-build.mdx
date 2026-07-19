@@ -1,0 +1,232 @@
+---
+title: west zmk-build
+description: A west build wrapper that reads your zmk-config build.yaml, auto-configures targets, flashes, and ships handy debug shortcuts.
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard, FileTree, Badge } from '@astrojs/starlight/components';
+
+`west zmk-build` is a small wrapper around `west build` for ZMK modules and
+`zmk-config` repositories. It reads your `build.yaml`, works out the boards,
+shields, snippets and cmake args for each target, and runs the builds for you —
+in parallel when there is more than one. It can also flash the result and set up
+common debug configurations with a single flag.
+
+## Prerequisites
+
+<Steps>
+
+1. A configured west workspace with a `zmk` project in the manifest. If you have
+   not set one up yet, see [Getting started](/zmk-west-commands/getting-started/).
+
+2. For the interactive target picker (`-i`), install the extra dependency:
+
+   ```bash
+   pip install -r <path to zmk-west-commands>/requirements.txt
+   ```
+
+</Steps>
+
+## Build your firmware
+
+<Steps>
+
+1. Change into your `zmk-config` (or module) directory:
+
+   ```bash
+   cd <path to your zmk-config>
+   ```
+
+2. Run the command:
+
+   ```bash
+   west zmk-build
+   ```
+
+</Steps>
+
+With no arguments, the command looks for your `config` directory and reads the
+`build.yaml` next to it. By default it searches, in order:
+
+1. `<config_path>/../build.yaml` (or `.yml`) — ZMK's official location, and
+2. `<config_path>/build.yaml` (or `.yml`) — this command's extension.
+
+You can point it at a specific file with `--build-yaml <path>`, or at a different
+config directory by passing it as the first positional argument
+(`west zmk-build <path to your zmk-config>`). Each artifact is built into
+`<build dir>/<artifact name>/`, and the firmware lands at
+`<build dir>/<artifact name>/zephyr/zmk.uf2`. The build directory defaults to
+`<west workspace root>/build` and can be overridden with `-d`/`--build-dir`.
+
+<Aside type="tip">
+Pass <code>-n</code>/<code>--no-run</code> to list the build targets detected in
+your <code>build.yaml</code> without building anything — a quick way to check
+which artifacts and filters resolve.
+</Aside>
+
+## Selecting targets
+
+When your `build.yaml` contains several targets, narrow down what gets built:
+
+<Tabs>
+  <TabItem label="Interactive">
+    ```bash
+    # Choose targets from a checkbox list (requires requirements.txt)
+    west zmk-build -i
+    ```
+  </TabItem>
+  <TabItem label="Exact artifact">
+    ```bash
+    # Build only the target whose artifact name equals "mykbd"
+    west zmk-build -a mykbd
+    ```
+  </TabItem>
+  <TabItem label="Regex filter">
+    ```bash
+    # Build every target whose artifact name matches the pattern (substring match)
+    west zmk-build -af 'mykbd-*'
+    ```
+  </TabItem>
+</Tabs>
+
+`-a`/`--artifact` matches an exact artifact name and is also used for build
+directory naming. `-af`/`--artifact-filter` takes a regex and matches against the
+artifact name as a substring. You can also filter by hardware with `-b`/`--board`
+and `-s`/`--shield`; when a `build.yaml` is present these act as filters,
+otherwise they define the target directly.
+
+## Flashing
+
+Add `--flash` to flash after a successful build. Internally this runs
+`west flash -d <build dir> --skip-rebuild`, so the firmware already in the build
+directory is used.
+
+```bash
+# Flash with the target board's default runner (e.g. UF2 for XIAO nRF52840)
+west zmk-build --flash
+```
+
+To pass arguments through to `west flash`, prefix them with `+` (becomes `-`) or
+`++` (becomes `--`):
+
+```bash
+# Equivalent to: west flash ... -r jlink
+west zmk-build --flash +r jlink
+```
+
+Combine with `-sb`/`--skip-build` to flash an existing build without rebuilding:
+
+```bash
+# Skip the build step, just flash
+west zmk-build --flash -sb
+```
+
+<Aside type="caution">
+You cannot flash when multiple build targets match — the command exits with an
+error. Narrow to a single target first (for example with <code>-a</code> or
+<code>-af</code>).
+</Aside>
+
+## Handy shortcuts
+
+These flags expand to common cmake args and snippets so you do not have to type
+them out. Each also tags the artifact name so debug and normal builds live in
+separate directories.
+
+| Flag | Effect | Artifact suffix |
+|---|---|---|
+| `--reset` | Adds `-DCONFIG_ZMK_SETTINGS_RESET_ON_START=y` to erase persistent settings (e.g. BLE pairings) on startup | `_reset` |
+| `--debug-print` | Adds the `-S zmk-usb-logging` snippet to enable USB logging | `_debug_print` |
+| `--debug-jlink` | Builds in debug mode with a Segger J-Link RTT console + shell (see below) | `_debug_jlink` |
+
+```bash
+# Erase persistent settings on the next boot
+west zmk-build --reset
+
+# Enable USB logging output
+west zmk-build --debug-print
+
+# Debug build with J-Link + RTT console
+west zmk-build --debug-jlink
+```
+
+`--debug-jlink` enables a debug build (`CMAKE_BUILD_TYPE=Debug`), the Segger RTT
+console and shell (`CONFIG_USE_SEGGER_RTT`, `CONFIG_RTT_CONSOLE`,
+`CONFIG_SHELL_BACKEND_RTT`, …), and thread/debug info, matching the J-Link
+`launch.json` produced by `--vscode`.
+
+## VSCode integration
+
+Generate editor settings for IntelliSense and debugging:
+
+```bash
+west zmk-build --vscode
+```
+
+This writes, into a `.vscode/` directory in the current folder, one entry per
+build target:
+
+<FileTree>
+- .vscode/
+  - c_cpp_properties.json  IntelliSense config (uses each build's compile_commands.json)
+  - launch.json  Cortex-Debug (J-Link) launch config with a Zephyr RTOS + RTT setup
+</FileTree>
+
+Existing configurations with a matching name are left untouched, so it is safe to
+re-run as you add targets.
+
+<Aside type="note">
+The generated debug settings currently target <strong>nRF52840</strong> boards
+only (the launch config hard-codes <code>nRF52840_xxAA</code> / the nRF52840 SVD).
+</Aside>
+
+## Extended behavior: multiple snippets
+
+Alongside ZMK's official single `snippet:` field, this command also recognizes a
+`snippets:` list in `build.yaml`, so a target can apply several snippets at once:
+
+```yaml title="build.yaml"
+include:
+  - artifact: foo
+    # snippet: zmk-usb-logging   # ZMK's official single-snippet field
+    snippets:
+      - zmk-usb-logging
+      - studio-rpc-usb-uart
+```
+
+Snippets from `build.yaml` are merged with any passed on the command line via
+`-S`/`--snippet`.
+
+## Other options
+
+The command exposes a number of additional flags. The most useful:
+
+| Flag | Description |
+|---|---|
+| `config_path` (positional) | Path to your `zmk-config`/`config` directory. Defaults to `./config`. If a `config/` subdirectory exists it is used automatically. |
+| `west_args` (positional) | Extra arguments forwarded to `west build`, e.g. `-- -p -n`. |
+| `-d`, `--build-dir <dir>` | Output directory; the artifact name is appended. Defaults to `<west workspace root>/build`. |
+| `-m`, `--extra-modules <path...>` | Additional ZMK modules to include in the build. |
+| `--extra-module-auto-discovery <strategy...>` | How extra modules are auto-detected: `zmk-config`, `current`, `walk-up`, or `none`. Defaults to `zmk-config current walk-up`. |
+| `--build-yaml <path>` | Explicit path to a `build.yaml` file. |
+| `-b`, `--board <board...>` | Target boards. Prioritized over `build.yaml` (acts as a filter when one is found). |
+| `-s`, `--shield <shield...>` | Target shields. Prioritized over `build.yaml` (acts as a filter when one is found). |
+| `-S`, `--snippet <snippet...>` | Snippets to build with. Merged with the `build.yaml` setting. |
+| `-a`, `--artifact <name>` | Exact artifact name; also used for build directory naming. |
+| `-af`, `--artifact-filter <regex>` | Filter targets by a regex on the artifact name (substring match). |
+| `-as`, `--artifact-suffix <suffix>` | Suffix appended to each artifact name for build directory naming. |
+| `--cmake-args '<args>'` | Extra cmake args, merged with `build.yaml`. Pass as a string with a leading space, e.g. `--cmake-args ' -D foo -D bar'`. |
+| `-q`, `--quiet` | Reduce output when the build succeeds. |
+| `-n`, `--no-run` | Skip building; just list the detected targets. |
+| `-i`, `--interactive` | Interactively select targets (requires `requirements.txt`). |
+| `-P`, `--parallelism <n>` | Number of parallel build jobs. Defaults to the CPU count. |
+| `-p`, `--pristine <auto\|always\|never>` | Pristine build folder setting (same as `west build`). Defaults to `always`. |
+| `-sb`, `--skip-build` | Skip the build and only do follow-up actions like flashing. |
+| `--flash [args...]` | Flash after a successful build. `+`/`++` in args become `-`/`--` and are forwarded to `west flash`. |
+| `--vscode` | Generate `.vscode/` IntelliSense + debug settings (nRF52840 only). |
+
+## Related
+
+<CardGrid>
+  <LinkCard title="Concepts" href="/zmk-west-commands/concepts/" description="How the commands fit together and which testing approach to reach for." />
+  <LinkCard title="west zmk-renode-test" href="/zmk-west-commands/guides/zmk-renode-test/" description="Boot a built firmware ELF in the Renode emulator — no hardware." />
+</CardGrid>

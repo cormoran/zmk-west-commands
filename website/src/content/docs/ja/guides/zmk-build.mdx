@@ -1,0 +1,235 @@
+---
+title: west zmk-build
+description: zmk-config の build.yaml を読み取ってターゲットを自動構成し、フラッシュや便利なデバッグ用ショートカットも備えた west build ラッパーです。
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard, FileTree, Badge } from '@astrojs/starlight/components';
+
+`west zmk-build` は、ZMK モジュールや `zmk-config` リポジトリ向けの小さな
+`west build` ラッパーです。`build.yaml` を読み取り、各ターゲットのボード・
+シールド・スニペット・cmake 引数を解決してビルドを実行します。ターゲットが
+複数ある場合は並列にビルドします。ビルド結果のフラッシュや、よく使うデバッグ
+構成のセットアップもフラグ 1 つで行えます。
+
+## 前提条件
+
+<Steps>
+
+1. マニフェストに `zmk` プロジェクトを含む、構成済みの west ワークスペース。
+   まだ用意していない場合は
+   [はじめに](/zmk-west-commands/ja/getting-started/) を参照してください。
+
+2. インタラクティブなターゲット選択（`-i`）を使う場合は、追加の依存関係を
+   インストールします。
+
+   ```bash
+   pip install -r <path to zmk-west-commands>/requirements.txt
+   ```
+
+</Steps>
+
+## ファームウェアをビルドする
+
+<Steps>
+
+1. `zmk-config`（またはモジュール）ディレクトリに移動します。
+
+   ```bash
+   cd <path to your zmk-config>
+   ```
+
+2. コマンドを実行します。
+
+   ```bash
+   west zmk-build
+   ```
+
+</Steps>
+
+引数なしで実行すると、コマンドは `config` ディレクトリを探し、その隣にある
+`build.yaml` を読み取ります。デフォルトでは次の順で検索します。
+
+1. `<config_path>/../build.yaml`（または `.yml`）— ZMK 公式の場所
+2. `<config_path>/build.yaml`（または `.yml`）— 本コマンドの拡張
+
+`--build-yaml <path>` で特定のファイルを指定したり、第 1 位置引数に別の config
+ディレクトリを渡したり（`west zmk-build <path to your zmk-config>`）できます。
+各アーティファクトは `<build dir>/<artifact name>/` にビルドされ、ファームウェアは
+`<build dir>/<artifact name>/zephyr/zmk.uf2` に生成されます。ビルドディレクトリは
+デフォルトで `<west workspace root>/build` で、`-d`/`--build-dir` で変更できます。
+
+<Aside type="tip">
+<code>-n</code>/<code>--no-run</code> を渡すと、実際にはビルドせずに
+<code>build.yaml</code> から検出されたビルドターゲットを一覧表示します。
+どのアーティファクトやフィルタが解決されるかを素早く確認できます。
+</Aside>
+
+## ターゲットを選択する
+
+`build.yaml` に複数のターゲットが含まれる場合、ビルド対象を絞り込めます。
+
+<Tabs>
+  <TabItem label="インタラクティブ">
+    ```bash
+    # チェックボックスのリストからターゲットを選択（requirements.txt が必要）
+    west zmk-build -i
+    ```
+  </TabItem>
+  <TabItem label="アーティファクト指定">
+    ```bash
+    # アーティファクト名が "mykbd" と一致するターゲットのみビルド
+    west zmk-build -a mykbd
+    ```
+  </TabItem>
+  <TabItem label="正規表現フィルタ">
+    ```bash
+    # アーティファクト名がパターンに一致するターゲットをすべてビルド（部分一致）
+    west zmk-build -af 'mykbd-*'
+    ```
+  </TabItem>
+</Tabs>
+
+`-a`/`--artifact` はアーティファクト名の完全一致で、ビルドディレクトリの命名にも
+使われます。`-af`/`--artifact-filter` は正規表現を受け取り、アーティファクト名に
+対して部分一致で照合します。`-b`/`--board` や `-s`/`--shield` でハードウェアによる
+絞り込みもできます。`build.yaml` がある場合はフィルタとして働き、ない場合は
+ターゲットを直接定義します。
+
+## フラッシュする
+
+ビルド成功後にフラッシュするには `--flash` を追加します。内部では
+`west flash -d <build dir> --skip-rebuild` を実行するため、ビルドディレクトリに
+すでにあるファームウェアが使われます。
+
+```bash
+# ターゲットボードのデフォルトランナーでフラッシュ（例: XIAO nRF52840 では UF2）
+west zmk-build --flash
+```
+
+`west flash` へ引数を渡すには、`+`（`-` に置換）または `++`（`--` に置換）を
+先頭に付けます。
+
+```bash
+# west flash ... -r jlink と同等
+west zmk-build --flash +r jlink
+```
+
+`-sb`/`--skip-build` と組み合わせれば、再ビルドせずに既存のビルドをフラッシュ
+できます。
+
+```bash
+# ビルド手順をスキップしてフラッシュのみ
+west zmk-build --flash -sb
+```
+
+<Aside type="caution">
+複数のビルドターゲットが一致する場合はフラッシュできず、コマンドはエラーで
+終了します。まず（<code>-a</code> や <code>-af</code> などで）単一のターゲットに
+絞り込んでください。
+</Aside>
+
+## 便利なショートカット
+
+これらのフラグはよく使う cmake 引数やスニペットに展開されるため、手入力せずに
+済みます。それぞれアーティファクト名にもタグを付けるので、デバッグビルドと
+通常ビルドは別々のディレクトリに配置されます。
+
+| フラグ | 効果 | アーティファクトの接尾辞 |
+|---|---|---|
+| `--reset` | `-DCONFIG_ZMK_SETTINGS_RESET_ON_START=y` を追加し、起動時に永続設定（BLE ペアリングなど）を消去 | `_reset` |
+| `--debug-print` | `-S zmk-usb-logging` スニペットを追加して USB ロギングを有効化 | `_debug_print` |
+| `--debug-jlink` | Segger J-Link の RTT コンソールとシェルを備えたデバッグモードでビルド（下記参照） | `_debug_jlink` |
+
+```bash
+# 次回起動時に永続設定を消去
+west zmk-build --reset
+
+# USB ロギング出力を有効化
+west zmk-build --debug-print
+
+# J-Link + RTT コンソール付きのデバッグビルド
+west zmk-build --debug-jlink
+```
+
+`--debug-jlink` はデバッグビルド（`CMAKE_BUILD_TYPE=Debug`）、Segger RTT
+コンソールとシェル（`CONFIG_USE_SEGGER_RTT`、`CONFIG_RTT_CONSOLE`、
+`CONFIG_SHELL_BACKEND_RTT` など）、およびスレッド/デバッグ情報を有効にします。
+これは `--vscode` が生成する J-Link 用 `launch.json` と対応しています。
+
+## VSCode との連携
+
+IntelliSense とデバッグ用のエディタ設定を生成します。
+
+```bash
+west zmk-build --vscode
+```
+
+これはカレントフォルダの `.vscode/` ディレクトリに、ビルドターゲットごとに
+1 エントリを書き込みます。
+
+<FileTree>
+- .vscode/
+  - c_cpp_properties.json  IntelliSense 設定（各ビルドの compile_commands.json を使用）
+  - launch.json  Cortex-Debug（J-Link）用の起動設定。Zephyr RTOS + RTT を構成
+</FileTree>
+
+名前が一致する既存の設定はそのまま残されるため、ターゲットを追加しながら
+再実行しても安全です。
+
+<Aside type="note">
+生成されるデバッグ設定は現在 <strong>nRF52840</strong> ボードのみを対象としています
+（起動設定に <code>nRF52840_xxAA</code> や nRF52840 の SVD がハードコードされています）。
+</Aside>
+
+## 拡張機能: 複数スニペット
+
+ZMK 公式の単一 `snippet:` フィールドに加えて、本コマンドは `build.yaml` の
+`snippets:` リストも認識します。これにより 1 つのターゲットに複数のスニペットを
+一度に適用できます。
+
+```yaml title="build.yaml"
+include:
+  - artifact: foo
+    # snippet: zmk-usb-logging   # ZMK 公式の単一スニペットフィールド
+    snippets:
+      - zmk-usb-logging
+      - studio-rpc-usb-uart
+```
+
+`build.yaml` のスニペットは、コマンドラインで `-S`/`--snippet` を使って渡した
+ものとマージされます。
+
+## その他のオプション
+
+本コマンドには他にも多くのフラグがあります。よく使うものを挙げます。
+
+| フラグ | 説明 |
+|---|---|
+| `config_path`（位置引数） | `zmk-config`/`config` ディレクトリへのパス。デフォルトは `./config`。`config/` サブディレクトリがあれば自動的に使用されます。 |
+| `west_args`（位置引数） | `west build` へ転送する追加引数。例: `-- -p -n`。 |
+| `-d`, `--build-dir <dir>` | 出力ディレクトリ。アーティファクト名が末尾に付加されます。デフォルトは `<west workspace root>/build`。 |
+| `-m`, `--extra-modules <path...>` | ビルドに含める追加の ZMK モジュール。 |
+| `--extra-module-auto-discovery <strategy...>` | 追加モジュールの自動検出方法: `zmk-config`、`current`、`walk-up`、`none`。デフォルトは `zmk-config current walk-up`。 |
+| `--build-yaml <path>` | `build.yaml` ファイルへの明示的なパス。 |
+| `-b`, `--board <board...>` | 対象ボード。`build.yaml` より優先（見つかった場合はフィルタとして働く）。 |
+| `-s`, `--shield <shield...>` | 対象シールド。`build.yaml` より優先（見つかった場合はフィルタとして働く）。 |
+| `-S`, `--snippet <snippet...>` | ビルドに使うスニペット。`build.yaml` の設定とマージされます。 |
+| `-a`, `--artifact <name>` | アーティファクト名の完全一致。ビルドディレクトリの命名にも使用。 |
+| `-af`, `--artifact-filter <regex>` | アーティファクト名に対する正規表現でターゲットを絞り込み（部分一致）。 |
+| `-as`, `--artifact-suffix <suffix>` | ビルドディレクトリ命名のため各アーティファクト名に付加する接尾辞。 |
+| `--cmake-args '<args>'` | 追加の cmake 引数。`build.yaml` とマージされます。先頭にスペースを付けた文字列で渡します。例: `--cmake-args ' -D foo -D bar'`。 |
+| `-q`, `--quiet` | ビルド成功時の出力を抑制します。 |
+| `-n`, `--no-run` | ビルドせず、検出されたターゲットを一覧表示するだけ。 |
+| `-i`, `--interactive` | ターゲットをインタラクティブに選択（`requirements.txt` が必要）。 |
+| `-P`, `--parallelism <n>` | 並列ビルドジョブ数。デフォルトは CPU コア数。 |
+| `-p`, `--pristine <auto\|always\|never>` | pristine ビルドフォルダ設定（`west build` と同じ）。デフォルトは `always`。 |
+| `-sb`, `--skip-build` | ビルドをスキップし、フラッシュなどの後続処理のみ実行。 |
+| `--flash [args...]` | ビルド成功後にフラッシュ。引数中の `+`/`++` は `-`/`--` に変換され `west flash` へ転送されます。 |
+| `--vscode` | `.vscode/` の IntelliSense + デバッグ設定を生成（nRF52840 のみ）。 |
+
+## 関連ページ
+
+<CardGrid>
+  <LinkCard title="コンセプト" href="/zmk-west-commands/ja/concepts/" description="各コマンドの関係と、どのテスト手法を選ぶべきか。" />
+  <LinkCard title="west zmk-renode-test" href="/zmk-west-commands/ja/guides/zmk-renode-test/" description="ビルド済みファームウェア ELF を Renode エミュレータで起動 — ハードウェア不要。" />
+</CardGrid>

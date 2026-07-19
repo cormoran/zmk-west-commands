@@ -1,0 +1,94 @@
+---
+title: Concepts
+description: zmk-west-commands の考え方 — 4 つのコマンドと 2 つの役割、そしてユニットテストから BLE まで続くハードウェア不要のテストのはしご。
+---
+
+import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## 4 つのコマンド、2 つの役割
+
+`zmk-west-commands` は 4 つの `west` 拡張コマンドを追加し、それらは 2 つの役割に分かれます。
+
+- **ビルド** — `west zmk-build` は `zmk-config` の `build.yaml` を `west build`
+  の呼び出しに変換します（ターゲット選択、フラッシュ、VSCode 設定、便利な cmake ショートカット）。
+- **ハードウェア不要のテスト** — `west zmk-test`、`west zmk-renode-test`、
+  `west zmk-ble-test` は、J-Link や実機なしでファームウェアとモジュールを検証します。
+
+以降はこの 2 番目の役割についての説明です。
+
+## ハードウェア不要のテストのはしご
+
+3 つのテストコマンドは「はしご」を形成します。上の段ほど実システムをより多く動かし、
+より多くを証明できますが、その分実行時間も増えます。一番下から始め、証明したい振る舞いに
+必要な段まで登りましょう。
+
+- **ユニット — `west zmk-test`。** ZMK 自身の `run-test.sh` スイートを
+  `native_posix_64` 向けにコンパイルして実行します。ディレクトリに
+  `native_posix_64.keymap` があればテストとみなされ、コマンドが環境を整えて実行します。
+  高速で決定的なロジック検証（behavior、キーマップ処理）に向いています。
+  **証明できること:** C のロジックが単体で正しく動くこと。
+  **できないこと:** 実際の起動、USB/BLE トランスポート、Studio の検証。
+
+- **Renode エミュレーション — `west zmk-renode-test`。** **ビルド済み** のファームウェア
+  ELF を [Renode](https://renode.io/) エミュレータで起動し、起動 + Studio スモークテストと、
+  モジュールが同梱する `tests/renode/*_test.py` を実行します。デフォルトの `ble` モードでは、
+  DUT は **実際にフラッシュする `studio-rpc-usb-uart` イメージそのもの** で、Renode 専用の
+  ビルドは不要です。**証明できること:** 実イメージが起動する（Zephyr fatal が起きない）こと、
+  そして `--host-elf` があれば LE ペアリングと暗号化された Studio GATT リードが通ること。
+  **できないこと:** 暗号の検証。Renode には AES-CCM エンジンがないため、両側で *偽の*
+  恒等変換 CCM を共有します。
+
+- **BabbleSim BLE — `west zmk-ble-test`。** DUT に加えて split ペリフェラルとホストアプリを
+  ビルドし、bsim 2G4 phy 上ですべて起動して、フィルタ済みのデバイス出力をチェックイン済みの
+  スナップショットと diff します。ディレクトリに `nrf52_bsim.keymap` があればテストケースと
+  みなされます。**証明できること:** 複数デバイスの split の振る舞いと、Studio-over-BLE の統合
+  （split リンクが有効な間も含む）。*任意の* デバイスの出力をアサートできます。
+  **できないこと:** コンパイル済みの BabbleSim ツリーがないと動かず、Linux 専用です。
+
+<Aside type="note" title="Renode の偽 CCM">
+Renode の `ble` モードの暗号化リードは **機能的な** チェックであり、暗号としての検証では
+ありません。実際の BLE プロトコル統合には BabbleSim を、実フラッシュイメージが起動し Studio
+に応答することの証明には Renode を使ってください。
+</Aside>
+
+## テストコマンドの比較
+
+3 つとも **ハードウェア不要** です。違いは、何を動かし何を証明するかにあります。
+
+| コマンド | おおよその実行時間 | 証明できること | できないこと |
+|---|---|---|---|
+| `zmk-test` | 数秒 | `native_posix_64` 上での C ロジックの単体検証 | 実起動・トランスポート・Studio は不可 |
+| `zmk-renode-test` | ~15 秒（`uart`）/ ~35–90 秒（`ble`） | 実 ELF が起動；Studio スモーク（UART ラウンドトリップ、または LE ペアリング + 暗号化 GATT リード） | 実際の暗号は不可（偽 CCM）；単一デバイス |
+| `zmk-ble-test` | 最長（ケースごとにビルド + シミュレーション） | 複数デバイスにまたがる split・Studio-over-BLE 統合をスナップショットでアサート | Linux 専用；コンパイル済み BabbleSim ツリーが必要 |
+
+<Aside type="tip">
+必要な高さまでだけ登りましょう。ロジックは `zmk-test` で、実イメージが起動し Studio を話すことは
+`zmk-renode-test` で、複数デバイスの BLE の振る舞いは `zmk-ble-test` で証明します。
+</Aside>
+
+## 誰が実行するか: config 利用者とモジュール開発者
+
+- **`zmk-config` の利用者。** 主にビルドを行います。`west zmk-build` は `build.yaml` を
+  読み取り、フラッシュするのと同じファームウェアを生成します。
+- **ZMK モジュールの開発者。** テストコマンドはあなたのモジュールを *extra module* として
+  取り込み、あなたのコードを含めた DUT をビルドします。`zmk-test` / `zmk-ble-test` には
+  **`-m .`**（またはモジュールのパス）を渡し、`zmk-renode-test` のハーネスはモジュール独自の
+  `tests/renode/*_test.py` を実行します。これにより、ZMK を vendoring せずに、実際の ZMK
+  ビルドに対してモジュール自身をテストできます。
+
+## ローカルから CI へ
+
+各テストコマンドには薄い **GitHub Actions** の composite action ラッパーがあり、依存関係
+（protobuf/protoc、BabbleSim）のインストール、キャッシュの処理を行い、同じ `west` コマンドを
+呼び出します。CI はローカルで実行するものとまったく同じものを実行します。
+
+<LinkCard title="GitHub Actions で CI 実行" href="/zmk-west-commands/ja/guides/github-actions/" description="Renode と BabbleSim BLE テスト向けの composite action。" />
+
+## 次に読むもの
+
+<CardGrid>
+  <LinkCard title="west zmk-build" href="/zmk-west-commands/ja/guides/zmk-build/" description="ビルド、ターゲット絞り込み、フラッシュ、VSCode 設定の生成。" />
+  <LinkCard title="west zmk-test" href="/zmk-west-commands/ja/guides/zmk-test/" description="環境設定込みの ZMK native-posix ユニットテスト。" />
+  <LinkCard title="west zmk-renode-test" href="/zmk-west-commands/ja/guides/zmk-renode-test/" description="実 ELF を Renode で起動；ble・uart モード。" />
+  <LinkCard title="west zmk-ble-test" href="/zmk-west-commands/ja/guides/zmk-ble-test/" description="BabbleSim による split・Studio-over-BLE テスト。" />
+</CardGrid>

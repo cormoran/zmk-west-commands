@@ -1,0 +1,237 @@
+---
+title: west zmk-renode-test
+description: Boot an already-built ZMK firmware ELF in the Renode emulator and run a boot + Studio smoke test — no J-Link, no board.
+---
+
+import { Steps, Tabs, TabItem, Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+`west zmk-renode-test` boots an **already-built** ZMK firmware ELF in the
+[Renode](https://renode.io/) emulator, runs a boot + Studio smoke test, and then
+(optionally) the module's own `tests/renode/*_test.py` files. It is completely
+**hardware-free** — no J-Link, no physical board.
+
+This command **never builds firmware**. You build the ELF (with
+[`west zmk-build`](/zmk-west-commands/guides/zmk-build/) or `west build`) and
+pass it in with `--elf`; the command only runs it under emulation.
+
+Renode itself is downloaded automatically on first use — a portable tarball,
+cached under `$RENODE_ROOT` (default `~/.renode`), so subsequent runs start
+instantly.
+
+## The two modes
+
+There are **two modes** (`--mode`, default `ble`). `--elf` is the DUT
+(device-under-test) in both:
+
+| Mode | DUT you build | What the smoke proves | Runtime |
+|---|---|---|---|
+| **`ble`** (default) | the exact `studio-rpc-usb-uart` **hardware** image you would flash — **no extra config** | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
+| **`uart`** | an ELF built with this repo's `renode-studio-uart` snippet | Boots (ZMK banner) and answers a core Studio `GetDeviceInfo` over an emulated UART | ~15 s |
+
+`ble` is the default because it boots the **exact image you flash** — platform
+stubs make that image run under Renode, so a module needs **no** Renode-specific
+build artifact. `uart` mode is faster and does a direct UART Studio round trip,
+but it requires you to add a `renode-studio-uart` snippet build.
+
+<Tabs>
+  <TabItem label="ble mode">
+
+The DUT is the **real flashable image** (ZMK's own `studio-rpc-usb-uart`
+snippet: USB CDC + QSPI NOR + BLE), with **zero firmware-side deviation** —
+platform stubs make that exact image boot under Renode, so there is nothing
+module-specific to build.
+
+<Steps>
+
+1. Build the exact hardware image (no `renode-studio-uart` snippet):
+
+   ```bash
+   west zmk-build <your-zmk-config> -af <your studio-rpc-usb-uart artifact>
+   ```
+
+2. Build the [`renode-ble-host`](https://github.com/cormoran/zmk-west-commands/tree/main/renode-ble-host)
+   app once — this is the simulated computer. Match its target-name prefix to
+   your DUT's advertised `CONFIG_ZMK_KEYBOARD_NAME`; the default prefix is
+   `"Module"` (which matches the template's default keyboard name
+   `"Module Test"`):
+
+   ```bash
+   west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host \
+       -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your DUT name>"'
+   ```
+
+3. Run the two-machine BLE smoke:
+
+   ```bash
+   west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf \
+       --host-elf build/zephyr/zephyr.elf
+   ```
+
+</Steps>
+
+The host scans for the DUT's advertisement, connects, pairs (LE Secure
+Connections, Just Works), elevates the link to security level 2, and does an
+**encrypted** Studio GATT read — the same code paths as a hardware
+Studio-over-BLE session. The smoke passes once the host reports
+`STAGE:S4-SECURITY-CHANGED OK` (encrypted link up) and `STAGE:S5-GATT-READ OK`
+(encrypted read).
+
+### Degraded liveness check (no host)
+
+**Without `--host-elf`**, `ble` mode degrades to a **boot-liveness check**: it
+boots just the real DUT image (no host, no BLE peer) and proves it is still
+running — not parked in a Zephyr fatal — after `--min-virtual` virtual seconds.
+This is handy for smoking a real image when you have no host app:
+
+```bash
+west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
+```
+
+Under the hood it runs the emulation to the threshold, samples the CPU `PC` a
+few times, and fails if any sample lands in a fatal frame
+(`arch_system_halt` / `z_fatal_error` / `k_sys_fatal_error_handler`).
+
+<Aside type="caution" title="Functional check, not cryptographic">
+`ble` mode's encrypted read is a **functional** check, **not** a cryptographic
+one. Renode has no AES-CCM engine, so both machines share a *fake*
+identity-transform CCM (it just appends/strips 4 dummy MIC bytes and reports
+MIC-OK). The encrypted code paths on both sides execute for real, but nothing
+here validates cryptography — do **not** use it to check crypto correctness.
+</Aside>
+
+  </TabItem>
+  <TabItem label="uart mode">
+
+The DUT is built with the `renode-studio-uart` snippet this repo ships as a
+Zephyr module. Real hardware carries Studio RPC over USB-CDC, which Renode's
+nRF52840 USBD model cannot present, so the snippet re-binds Studio RPC + the
+console to real UART peripherals Renode can drive. This is extra build config
+(vs. `ble` mode's flashable image), but it gives a fast direct UART Studio round
+trip.
+
+<Steps>
+
+1. Add a `build.yaml` artifact that uses the `renode-studio-uart` snippet:
+
+   ```yaml
+   include:
+     - artifact: renode
+       board: xiao_ble//zmk           # an nRF52840 board (the checked-in .repl)
+       shield: renode_tester
+       cmake-args: -DCONFIG_ZMK_STUDIO=y   # for the core Studio RPC smoke check
+       snippets:
+         - renode-studio-uart
+   ```
+
+2. Build it:
+
+   ```bash
+   west zmk-build <your-zmk-config> -af renode
+   ```
+
+3. Run the smoke plus your module's own custom-RPC tests:
+
+   ```bash
+   west zmk-renode-test tests/renode --mode uart --elf build/renode/zephyr/zmk.elf
+   ```
+
+</Steps>
+
+For a module that does not enable Studio RPC, check only the boot banner with
+`--no-rpc`:
+
+```bash
+west zmk-renode-test --mode uart --elf build/renode/zephyr/zmk.elf --no-rpc
+```
+
+<Aside type="note" title="CONFIG_ZMK_STUDIO physical-layout requirement">
+`CONFIG_ZMK_STUDIO=y` build-asserts on a `zmk,physical-layout` (with
+`key_physical_attrs`) **and** the absence of a chosen `zmk,matrix-transform`.
+Give your shield/board a keys'd physical layout that references the transform
+directly — see the in-repo example
+`tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`.
+</Aside>
+
+  </TabItem>
+</Tabs>
+
+## Requirements
+
+`uart` mode's Studio RPC check compiles the workspace's `zmk-studio-messages`
+protos, so it needs the python `protobuf` runtime **and** the `protoc` compiler:
+
+```bash
+pip install -r requirements-test.txt
+apt-get install protobuf-compiler   # protoc is a system package
+```
+
+Pass `--no-rpc` to check only the boot banner and skip this requirement
+entirely. (`ble` mode does not need the protos.)
+
+## Running your module's own Renode tests
+
+Pass a `tests_dir` positional argument and each `*_test.py` file **directly
+under** it (non-recursive) runs after the smoke test, as `python3 <file> -v`,
+with the harness (`scripts/lib/renode/`) on `PYTHONPATH` and the `ZMK_RENODE_*`
+env contract set:
+
+| Variable | When | Meaning |
+|---|---|---|
+| `ZMK_RENODE_MODE` | always | `uart` or `ble` — which harness the test should build. |
+| `ZMK_RENODE_ELF` | always | absolute path to the DUT ELF. |
+| `ZMK_RENODE_STORAGE_ADDR` / `ZMK_RENODE_STORAGE_SIZE` | ble | NVS `storage_partition` overrides (hex). |
+| `ZMK_RENODE_HOST_ELF` | ble, with `--host-elf` | absolute path to the `renode-ble-host` app ELF. |
+
+Test files `import renode_harness` directly and call, e.g.,
+`renode_harness.boot_single(...)` (uart), `boot_single_real(...)` (ble
+liveness), or `boot_ble_pair(dut_elf, host_elf)` (two-machine ble). Use
+`--skip-smoke` to run only your `tests_dir` and skip the generic smoke.
+
+<Aside type="tip">
+The full harness API, the env contract in detail, and a troubleshooting table
+are documented in the repository's
+[docs/renode-testing.md](https://github.com/cormoran/zmk-west-commands/blob/main/docs/renode-testing.md).
+</Aside>
+
+## Going deeper
+
+A handful of advanced flags cover rarely-needed knobs:
+
+| Flag | Applies to | One line |
+|---|---|---|
+| `--rtt` | ble (liveness) | capture Zephyr SEGGER RTT log output and fail on RTT fatal lines (needs `CONFIG_LOG` + `CONFIG_USE_SEGGER_RTT` + `CONFIG_LOG_BACKEND_RTT`). |
+| `--min-virtual` | ble (liveness) | virtual seconds to run before PC sampling (default `20`). |
+| `--virtual-budget` | ble (with host) | virtual seconds to reach the encrypted read before failing (default `20`; ~3.3 s is typical). |
+| `--steady-quantum` | ble (with host) | after S4, raise the global time-sync quantum (e.g. `0.001`) for the steady-state phase (~7× faster; mainly for a module's own long BLE tests). |
+| `--storage-addr` / `--storage-size` | ble | NVS `storage_partition` address/size preloaded as erased `0xFF` (defaults `0xec000`/`0x8000`, xiao_ble). |
+| `--boot-timeout` | uart | seconds to wait for the ZMK boot banner (default `20`). |
+| `--renode-version` | both | Renode portable release to install/use (default `1.16.1`; must match the checked-in `.repl`). |
+
+Behind the scenes, a real hardware image only boots under Renode because the
+platform stands in for peripherals it expects: **QSPI/USBD/FICR/NVMC stubs**, an
+**NVS `0xFF` preload**, and the shared **fake-CCM** identity transform. You do
+not need any of this to *use* the command — it is background reading in the
+repository's
+[docs/renode-internals.md](https://github.com/cormoran/zmk-west-commands/blob/main/docs/renode-internals.md).
+
+## Continuous integration
+
+A thin composite GitHub Action wraps this command for CI (it installs
+protobuf/protoc, caches Renode, and calls `west zmk-renode-test`). See the
+[GitHub Actions guide](/zmk-west-commands/guides/github-actions/) for the full
+workflow.
+
+## Related
+
+<CardGrid>
+  <LinkCard
+    title="west zmk-ble-test"
+    href="/zmk-west-commands/guides/zmk-ble-test/"
+    description="Protocol-accurate BabbleSim split + Studio-over-BLE tests — complementary to ble mode's real-binary Renode run."
+  />
+  <LinkCard
+    title="GitHub Actions"
+    href="/zmk-west-commands/guides/github-actions/"
+    description="Run zmk-renode-test in CI with the ready-made composite action."
+  />
+</CardGrid>

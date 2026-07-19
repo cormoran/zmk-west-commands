@@ -2,6 +2,8 @@
 
 A west module that provides useful commands for zmk-config build and zmk-module development.
 
+📖 **Documentation site (EN / 日本語): <https://cormoran.github.io/zmk-west-commands/>** — step-by-step guides for every command. Source lives in [`website/`](website/).
+
 ## How to use
 
 Add the following items to your west manifest.

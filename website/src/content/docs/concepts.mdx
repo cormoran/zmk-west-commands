@@ -1,0 +1,95 @@
+---
+title: Concepts
+description: The mental model behind zmk-west-commands — four commands, two jobs, and a hardware-free testing ladder from unit tests to BLE.
+---
+
+import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Four commands, two jobs
+
+`zmk-west-commands` adds four `west` extension commands that split into two jobs:
+
+- **Build** — `west zmk-build` turns a `zmk-config`'s `build.yaml` into `west build`
+  invocations (target selection, flashing, VSCode config, handy cmake shortcuts).
+- **Test with no hardware** — `west zmk-test`, `west zmk-renode-test`, and
+  `west zmk-ble-test` verify your firmware and modules without a J-Link or a
+  physical board.
+
+Everything below is about that second job.
+
+## The hardware-free testing ladder
+
+The three test commands form a ladder. Each rung runs more of the real system and
+proves more, at the cost of more runtime. Start at the bottom and climb only as far
+as the behavior you need to prove.
+
+- **Unit — `west zmk-test`.** ZMK's own `run-test.sh` suite compiled for
+  `native_posix_64`. A directory is a test if it contains `native_posix_64.keymap`;
+  the command wires the environment and runs them. Fast, deterministic logic checks
+  (behaviors, keymap processing). **Proves:** your C logic does the right thing in
+  isolation. **Doesn't:** exercise a real boot, USB/BLE transports, or Studio.
+
+- **Renode emulation — `west zmk-renode-test`.** Boots an **already-built** firmware
+  ELF in the [Renode](https://renode.io/) emulator and runs a boot + Studio smoke
+  test, plus any `tests/renode/*_test.py` the module ships. In the default `ble`
+  mode the DUT is the **exact `studio-rpc-usb-uart` image you would flash** — no
+  Renode-specific build. **Proves:** a real image boots (no Zephyr fatal) and, with
+  `--host-elf`, LE pairing plus an encrypted Studio GATT read. **Doesn't:** validate
+  crypto — Renode has no AES-CCM engine, so both sides share a *fake* identity-transform
+  CCM.
+
+- **BabbleSim BLE — `west zmk-ble-test`.** Builds the DUT plus split peripherals and
+  host apps, launches them all under the bsim 2G4 phy, and diffs filtered device
+  output against a checked-in snapshot. A directory is a case if it contains
+  `nrf52_bsim.keymap`. **Proves:** multi-device split behavior and Studio-over-BLE
+  integration (including while the split link is active), asserting *any* device's
+  output. **Doesn't:** run without the compiled BabbleSim tree, and it's Linux-only.
+
+<Aside type="note" title="Renode's fake CCM">
+Renode's `ble` mode encrypted read is a **functional** check, not a cryptographic
+one. Use BabbleSim for real BLE protocol integration; use Renode to prove the actual
+flashable image boots and answers Studio.
+</Aside>
+
+## Comparing the test commands
+
+All three need **no hardware**. They differ in what they run and prove:
+
+| Command | Rough runtime | What it proves | Can't do |
+|---|---|---|---|
+| `zmk-test` | seconds | C logic on `native_posix_64` in isolation | No real boot, transports, or Studio |
+| `zmk-renode-test` | ~15 s (`uart`) / ~35–90 s (`ble`) | Real ELF boots; Studio smoke (UART round trip, or LE pairing + encrypted GATT read) | No real crypto (fake CCM); single device |
+| `zmk-ble-test` | longest (builds + sim per case) | Split + Studio-over-BLE integration across devices, snapshot-asserted | Linux-only; needs a compiled BabbleSim tree |
+
+<Aside type="tip">
+Climb only as high as you must. Prove logic with `zmk-test`, prove a real image boots
+and speaks Studio with `zmk-renode-test`, and prove multi-device BLE behavior with
+`zmk-ble-test`.
+</Aside>
+
+## Who runs these: config user vs module developer
+
+- **`zmk-config` user.** You mostly build. `west zmk-build` reads your `build.yaml`
+  and produces the same firmware you flash.
+- **ZMK module developer.** The test commands take your module as an *extra module*
+  so the DUT is built with your code included. Pass **`-m .`** (or the module's path)
+  to `zmk-test` / `zmk-ble-test`, and `zmk-renode-test`'s harness runs your
+  module's own `tests/renode/*_test.py`. That's how a module tests itself against a
+  real ZMK build without vendoring ZMK.
+
+## From local to CI
+
+Each testing command has a thin **GitHub Actions** composite-action wrapper that
+installs its dependencies (protobuf/protoc, BabbleSim), handles caching, and calls
+the same `west` command. Your CI runs exactly what you run locally.
+
+<LinkCard title="Run in CI with GitHub Actions" href="/zmk-west-commands/guides/github-actions/" description="Drop-in composite actions for Renode and BabbleSim BLE tests." />
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="west zmk-build" href="/zmk-west-commands/guides/zmk-build/" description="Build, filter targets, flash, and generate VSCode config." />
+  <LinkCard title="west zmk-test" href="/zmk-west-commands/guides/zmk-test/" description="ZMK's native-posix unit tests with the env wired up." />
+  <LinkCard title="west zmk-renode-test" href="/zmk-west-commands/guides/zmk-renode-test/" description="Boot a real ELF in Renode; ble and uart modes." />
+  <LinkCard title="west zmk-ble-test" href="/zmk-west-commands/guides/zmk-ble-test/" description="Split + Studio-over-BLE tests under BabbleSim." />
+</CardGrid>
