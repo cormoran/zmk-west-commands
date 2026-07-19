@@ -141,6 +141,98 @@ def run_uart_smoke(
         session.stop()
 
 
+# Wired-split smoke defaults. The peripheral's kscan-gpio-direct first input
+# (renode_split shield: xiao_d 0 == gpio0 pin 2) maps to keymap position 0, so
+# toggling gpio0 pin 2 low presses that key; the central logs the relayed press
+# as "position: 0" (keymap.c LOG_DBG, on at ZMK's default DBG log level). This
+# is the same injection the historical test-zmk-renode T2 case used.
+SPLIT_KEYPRESS_GPIO_PORT = "gpio0"
+SPLIT_KEYPRESS_GPIO_PIN = 2
+SPLIT_RELAYED_EVENT_MARKER = "position: 0"
+
+
+def run_split_smoke(
+    central_elf: Path,
+    peripheral_elf: Path,
+    renode_path: str,
+    boot_timeout: float = 20.0,
+    settle: float = 3.0,
+    event_timeout: float = 10.0,
+) -> None:
+    """Wired-split smoke: boot a central + peripheral pair on a Renode UART hub
+    (renode_harness.boot_split_wired) and assert (1) BOTH halves reach the ZMK
+    boot banner on their console UART, and (2) the wired split link is up -- a
+    synthetic keypress injected on the peripheral is relayed over the split UART
+    and processed by the central (its keymap logs the relayed key position).
+
+    This is the correct, valuable smoke for a WIRED split: there is no third UART
+    left for a Studio RPC transport (console = uart0, split link = uart1 exhaust
+    the nRF52840's two UARTEs), so it proves the split pairing/relay rather than a
+    Studio round trip.
+
+    Injection: after both banners appear, settle `settle` seconds (the split
+    boot-order race -- see boot_split_wired), then pulse the peripheral's first
+    kscan GPIO low over the monitor and wait up to `event_timeout` for the
+    central console to show the relayed event marker."""
+    session, central_console, peripheral_console = renode_harness.boot_split_wired(
+        renode_path,
+        central_elf=central_elf,
+        peripheral_elf=peripheral_elf,
+    )
+    assert session.mon is not None
+    mon = session.mon
+    try:
+        print("waiting for both ZMK boot banners...", file=sys.stderr)
+        central_banner = renode_harness.wait_for_text(
+            central_console._sock, "Welcome to ZMK", timeout=boot_timeout
+        )
+        if "Welcome to ZMK" not in central_banner:
+            raise AssertionError(f"central never saw the ZMK boot banner; got:\n{central_banner}")
+        peripheral_banner = renode_harness.wait_for_text(
+            peripheral_console._sock, "Welcome to ZMK", timeout=boot_timeout
+        )
+        if "Welcome to ZMK" not in peripheral_banner:
+            raise AssertionError(
+                f"peripheral never saw the ZMK boot banner; got:\n{peripheral_banner}"
+            )
+        print("both boot banners OK", file=sys.stderr)
+
+        # Let both sides fully settle (UART RX-enable on both ends, kscan init)
+        # before injecting an event -- an event fired too early races the
+        # central's RX-enable and gets silently dropped (boot-order race).
+        time.sleep(settle)
+        renode_harness.drain_text(central_console._sock, timeout=0.2)  # discard buffered
+
+        print(
+            f"injecting keypress on peripheral ({SPLIT_KEYPRESS_GPIO_PORT} pin "
+            f"{SPLIT_KEYPRESS_GPIO_PIN})...",
+            file=sys.stderr,
+        )
+        mon.execute('mach set "peripheral"')
+        mon.execute(f"sysbus.{SPLIT_KEYPRESS_GPIO_PORT} OnGPIO {SPLIT_KEYPRESS_GPIO_PIN} true")
+        time.sleep(0.3)
+        mon.execute(f"sysbus.{SPLIT_KEYPRESS_GPIO_PORT} OnGPIO {SPLIT_KEYPRESS_GPIO_PIN} false")
+
+        central_log = renode_harness.wait_for_text(
+            central_console._sock, SPLIT_RELAYED_EVENT_MARKER, timeout=event_timeout
+        )
+        if SPLIT_RELAYED_EVENT_MARKER not in central_log:
+            print("--- central console tail ---", file=sys.stderr)
+            print("\n".join(central_log.splitlines()[-25:]), file=sys.stderr)
+            raise AssertionError(
+                "central never processed a key event relayed from the peripheral "
+                f"(expected {SPLIT_RELAYED_EVENT_MARKER!r}) -- wired split link not up"
+            )
+        print(
+            f"wired split relay OK (central saw {SPLIT_RELAYED_EVENT_MARKER!r})",
+            file=sys.stderr,
+        )
+    finally:
+        peripheral_console.close()
+        central_console.close()
+        session.stop()
+
+
 def run_liveness_smoke(
     elf: Path,
     renode_path: str,
@@ -407,14 +499,26 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("--elf", required=True, type=Path, help="DUT firmware ELF (both modes).")
+    ap.add_argument(
+        "--elf",
+        required=True,
+        type=Path,
+        help="DUT firmware ELF (all modes; the CENTRAL half in split mode).",
+    )
     ap.add_argument(
         "--mode",
-        choices=("uart", "ble"),
+        choices=("uart", "ble", "split"),
         default="ble",
         help="ble (default): real hardware image; with --host-elf a full encrypted "
         "Studio-over-BLE read (S4/S5), without it a boot-liveness check. uart: "
-        "snippet-built DUT, boot banner + Studio GetDeviceInfo over emulated UARTs.",
+        "snippet-built DUT, boot banner + Studio GetDeviceInfo over emulated UARTs. "
+        "split: wired-split central (--elf) + --peripheral-elf on a Renode UART hub; "
+        "smoke = both boot banners + a peripheral keypress relayed to the central.",
+    )
+    ap.add_argument(
+        "--peripheral-elf",
+        type=Path,
+        help="split mode only: the PERIPHERAL half's firmware ELF (--elf is the central).",
     )
     ap.add_argument(
         "--host-elf",
@@ -487,14 +591,38 @@ def main(argv: list[str] | None = None) -> int:
     if not args.elf.is_file():
         print(f"ELF not found: {args.elf}", file=sys.stderr)
         return 2
-    if args.mode == "uart" and args.host_elf is not None:
+    if args.host_elf is not None and args.mode != "ble":
         print("--host-elf is only valid with --mode ble", file=sys.stderr)
+        return 2
+    if args.mode == "split":
+        if args.peripheral_elf is None:
+            print("--mode split requires --peripheral-elf", file=sys.stderr)
+            return 2
+        if not args.peripheral_elf.is_file():
+            print(f"peripheral ELF not found: {args.peripheral_elf}", file=sys.stderr)
+            return 2
+    elif args.peripheral_elf is not None:
+        print("--peripheral-elf is only valid with --mode split", file=sys.stderr)
         return 2
 
     renode_path = renode_harness.find_or_install_renode(version=args.renode_version)
     if renode_path is None:
         print("Renode is not installed and could not be auto-installed", file=sys.stderr)
         return 2
+
+    if args.mode == "split":
+        try:
+            run_split_smoke(
+                central_elf=args.elf,
+                peripheral_elf=args.peripheral_elf,
+                renode_path=renode_path,
+                boot_timeout=args.boot_timeout,
+            )
+        except AssertionError as err:
+            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
+            return 1
+        print("SMOKE TEST OK", file=sys.stderr)
+        return 0
 
     if args.mode == "ble":
         try:
