@@ -67,6 +67,7 @@ __all__ = [
     "boot_single",
     "boot_single_real",
     "boot_ble_pair",
+    "boot_split_wired",
     "STORAGE_ADDR_DEFAULT",
     "STORAGE_SIZE_DEFAULT",
     "DEFAULT_DEVICE_ADDR",
@@ -683,3 +684,63 @@ def boot_ble_pair(
             except OSError:
                 pass
     return session, dut_console, dut_rpc, host_console
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot TWO plain (snippet/overlay-built) images as a WIRED split
+# pair (platforms/split_wired.resc). The two halves' split-link UARTs (uart1)
+# are cross-connected through a Renode UART hub so the emulated central and
+# peripheral talk over a virtual wire -- ZMK's `zmk,wired-split` transport, no
+# BLE. Each half's console (uart0) is exposed on its own TCP socket. See
+# docs/renode-testing.md's split-mode section and docs/renode-internals.md.
+# --------------------------------------------------------------------------
+
+
+def boot_split_wired(
+    renode_path: str,
+    central_elf: Path,
+    peripheral_elf: Path,
+    boot_wait: float = 3.0,
+    port_base: int | None = None,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
+    """Boot a wired-split pair under Renode using platforms/split_wired.resc: two
+    machines ("central" + "peripheral"), each with its console on uart0 (own TCP
+    socket) and its split link on uart1, both uart1s cross-connected through a
+    single Renode UART hub ("split_link") so the two emulated boards form a
+    point-to-point wired link.
+
+    Returns (session, central_console, peripheral_console); as with boot_single
+    the caller owns cleanup (session.stop() + closing the sockets). Both consoles
+    are connected before `start` so no early boot-banner bytes are lost.
+
+    The plain xiao_nrf52840.repl is used (no USB/QSPI/FICR stubs): a wired-split
+    image built with a split overlay/snippet disables USB + QSPI and does not
+    enable BLE, so it needs none of the real-image platform help.
+
+    IMPORTANT boot-order gotcha (see references/renode-notes.md): there is no
+    cross-machine execution-order guarantee at t=0, so a peripheral event fired
+    in the first few ms can race the central's UART RX-enable and be dropped. A
+    caller that wants to observe a relayed event should wait for BOTH boot
+    banners and then settle ~2-3 s before generating a cross-machine event."""
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "split_wired.resc",
+        monitor_port=port_base,
+        variables={
+            "central_bin": f"@{central_elf}",
+            "peripheral_bin": f"@{peripheral_elf}",
+            "central_console_port": port_base + 1,
+            "peripheral_console_port": port_base + 2,
+        },
+        cwd=SKILL_DIR,
+    )
+    session.start(boot_wait=boot_wait)
+    central_console = session.connect_uart(port_base + 1)
+    peripheral_console = session.connect_uart(port_base + 2)
+    session.go()
+    return session, central_console, peripheral_console
