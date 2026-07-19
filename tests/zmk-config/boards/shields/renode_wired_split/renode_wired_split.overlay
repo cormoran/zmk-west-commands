@@ -1,0 +1,114 @@
+/*
+ * Minimal WIRED-split XIAO shield used only for the Renode wired-split smoke
+ * test (see the repo README's `west zmk-renode-test` section, --mode split).
+ * Both split halves (central + peripheral) build from THIS one shield; the only
+ * difference between the two artifacts is CONFIG_ZMK_SPLIT_ROLE_CENTRAL (set
+ * for the central via build-split.yaml's cmake-args), not this overlay.
+ *
+ * Layout:
+ *   - console (boot banner, relayed-event log) on uart0, each half on its own
+ *     Renode TCP socket;
+ *   - ZMK's `zmk,wired-split` transport (CONFIG_ZMK_SPLIT_WIRED) on uart1 --
+ *     both halves' uart1 are cross-connected through a Renode UART hub
+ *     (platforms/split_wired.resc), forming the virtual split wire;
+ *   - a 2x2 direct-GPIO kscan + matrix transform + keymap, so a keypress on the
+ *     peripheral's first key (xiao_d 0 == gpio0 pin 2) relays to the central as
+ *     keymap position 0 (the smoke asserts the central logs "position: 0").
+ *
+ * nRF52840 has only two hardware UARTEs (uart0, uart1): console + split link
+ * consume both, so there is NO UART left for a Studio RPC transport -- the
+ * wired-split smoke proves the split pairing/relay, not Studio (see
+ * docs/renode-testing.md). This overlay is for Renode emulation only -- the
+ * uart1 pins (P0.02/P0.03) are not verified conflict-free on a real XIAO board.
+ *
+ * Renode gotchas (identical to the renode-studio-uart snippet -- see its
+ * overlay header for the full explanation): the stock xiao_ble board enables
+ * &qspi/&p25q16h (external NOR flash) and &usbd/&board_cdc_acm_uart (USB CDC);
+ * Renode models neither peripheral's readiness events, so their drivers
+ * busy-wait forever and boot hangs silently before main(). Disable all four.
+ * Neither is ZMK's settings/keymap backend, so disabling them is safe.
+ */
+#include <dt-bindings/zmk/matrix_transform.h>
+
+&qspi {
+	status = "disabled";
+};
+
+&p25q16h {
+	status = "disabled";
+};
+
+&board_cdc_acm_uart {
+	status = "disabled";
+};
+
+&usbd {
+	status = "disabled";
+};
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 2)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 3)>;
+			bias-pull-up;
+		};
+	};
+
+	uart1_sleep: uart1_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 2)>,
+					<NRF_PSEL(UART_RX, 0, 3)>;
+			low-power-enable;
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&uart1 {
+	compatible = "nordic,nrf-uarte";
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-1 = <&uart1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/ {
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zmk,kscan = &kscan0;
+		zmk,matrix-transform = &transform0;
+	};
+
+	kscan0: kscan {
+		compatible = "zmk,kscan-gpio-direct";
+		input-gpios
+			= <&xiao_d 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			;
+	};
+
+	transform0: keymap_transform {
+		compatible = "zmk,matrix-transform";
+		columns = <2>;
+		rows = <2>;
+		map = <
+		RC(0,0)  RC(0,1)
+		RC(1,0)  RC(1,1)
+		>;
+	};
+
+	wired_split: wired_split {
+		compatible = "zmk,wired-split";
+		device = <&uart1>;
+	};
+};

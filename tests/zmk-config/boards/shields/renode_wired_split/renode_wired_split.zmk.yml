@@ -1,0 +1,5 @@
+file_format: "1"
+id: renode_wired_split
+name: Renode Wired Split Tester
+type: shield
+requires: [seeed_xiao]

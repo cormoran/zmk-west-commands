@@ -1,0 +1,6 @@
+if SHIELD_RENODE_WIRED_SPLIT
+
+config ZMK_KEYBOARD_NAME
+    default "RenodeWired"
+
+endif

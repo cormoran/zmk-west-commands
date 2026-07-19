@@ -1,0 +1,2 @@
+config SHIELD_RENODE_WIRED_SPLIT
+    def_bool $(shields_list_contains,renode_wired_split)
