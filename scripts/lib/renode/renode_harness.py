@@ -66,6 +66,7 @@ __all__ = [
     "find_studio_proto_dir",
     "boot_single",
     "boot_single_real",
+    "attach_dual_cdc_bridge",
     "boot_ble_pair",
     "boot_split_wired",
     "boot_ble_split",
@@ -610,6 +611,66 @@ def boot_single_real(
             except OSError:
                 pass
     return session, console, rpc
+
+
+# The DualCdcAcmBridge USB host external (see the .cs header and
+# docs/renode-usb-design.md gap (d)), ad-hoc-compiled at attach time like the
+# NRF_USBD_Full model it drives.
+DUAL_CDC_BRIDGE_CS = PLATFORMS_DIR / "models" / "DualCdcAcmBridge.cs"
+
+
+def attach_dual_cdc_bridge(
+    session: "RenodeSession",
+    cdc0_port: int,
+    cdc1_port: int,
+    name: str = "bridge",
+) -> tuple["RpcSocket", "RpcSocket"]:
+    """Attach the DualCdcAcmBridge USB host to a session booted with the
+    NRF_USBD_Full usb platform (boot_single_real(...,
+    repl_template="xiao_nrf52840_usb.repl")), exposing the DUT's two CDC-ACM
+    functions on two TCP server socket terminals. Returns the two connected
+    sockets (cdc0, cdc1), in the device's configuration-descriptor interface
+    order; which one is the console vs the Studio RPC channel depends on the
+    image (for a ZMK image with both board and snippet CDC enabled, the board
+    console CDC comes first; when only the Studio snippet CDC is enabled it is
+    the composite's sole -- first -- CDC function).
+
+    The setup is two-step (create + wire terminals + connect clients, THEN
+    attach, all while paused) so USB enumeration cannot start before both TCP
+    clients are connected -- otherwise the first post-enumeration device
+    output (e.g. the boot banner buffered in the console CDC's ring buffer)
+    would race the terminal hookup and could be lost. Call this only after
+    the guest has settled its USB init (a few seconds after session.go());
+    the caller owns the returned sockets' cleanup."""
+    assert session.mon is not None
+    mon = session.mon
+
+    def wait_paused(expected: str, reissue: str | None = None, timeout: float = 30.0) -> None:
+        # `pause`/`start` return before the state change completes on a busy
+        # machine (observed: a `start` issued while a slow `pause` was still in
+        # flight left the emulation frozen), so poll `machine IsPaused` until
+        # the expected state is reached, optionally re-issuing the command.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if expected in mon.execute("machine IsPaused", settle=0.3):
+                return
+            if reissue is not None:
+                mon.execute(reissue)
+        raise TimeoutError(f"emulation never reached IsPaused={expected}")
+
+    mon.execute(f"include @{DUAL_CDC_BRIDGE_CS}", settle=2.0)
+    mon.execute("pause")
+    wait_paused("True")
+    mon.execute(f'sysbus.usbd CreateDualCdcAcmBridge "{name}"')
+    sockets = []
+    for i, port in enumerate((cdc0_port, cdc1_port)):
+        mon.execute(f'emulation CreateServerSocketTerminal {port} "{name}_cdc{i}_term" false')
+        mon.execute(f"connector Connect sysbus.{name}_cdc{i} {name}_cdc{i}_term")
+        sockets.append(session.connect_uart(port))
+    mon.execute(f'sysbus.usbd AttachDualCdcAcmBridge "{name}"')
+    mon.execute("start")
+    wait_paused("False", reissue="start")
+    return sockets[0], sockets[1]
 
 
 # --------------------------------------------------------------------------
