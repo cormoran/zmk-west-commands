@@ -17,11 +17,14 @@ module's own tests (e.g. this template's tests/renode/test_renode.py)
 import renode_harness directly for anything more specific (their own custom
 RPC subsystem, etc.).
 
-Two modes (`--mode`, default `ble`); `--elf` is the DUT in both. ble mode boots
-a real hardware image and (with `--host-elf`) drives an encrypted Studio-over-BLE
-read, or without a host a boot-liveness check. uart mode boots a snippet-built
-DUT and checks the boot banner + a core Studio GetDeviceInfo. See
-docs/renode-testing.md and docs/renode-internals.md.
+Three modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
+split mode). ble mode boots a real hardware image and (with `--host-elf`) drives
+an encrypted Studio-over-BLE read, or without a host a boot-liveness check. uart
+mode boots a snippet-built DUT and checks the boot banner + a core Studio
+GetDeviceInfo. split mode boots a wired-split central (`--elf`) + peripheral
+(`--peripheral-elf`) on a Renode UART hub and checks both boot banners + a
+peripheral keypress relayed to the central. See docs/renode-testing.md and
+docs/renode-internals.md.
 
 Usage:
     # ble mode (default -- real image + host app):
@@ -33,6 +36,10 @@ Usage:
         --studio-proto-dir /path/to/zmk-studio-messages/proto/zmk
     # or let it auto-discover the proto dir under a west topdir:
     python renode_smoke.py --mode uart --elf /path/to/zmk.elf --west-topdir /path/to/module
+
+    # split mode (wired split -- central + peripheral):
+    python renode_smoke.py --mode split --elf /path/to/central.elf \\
+        --peripheral-elf /path/to/peripheral.elf
 
 Exits non-zero (with a message on stderr) on any failure.
 """
