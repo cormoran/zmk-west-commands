@@ -17,19 +17,25 @@ module's own tests (e.g. this template's tests/renode/test_renode.py)
 import renode_harness directly for anything more specific (their own custom
 RPC subsystem, etc.).
 
-Four modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
+Five modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
 split / ble-split mode). ble mode boots a real hardware image and (with `--host-elf`) drives
-an encrypted Studio-over-BLE read, or without a host a boot-liveness check. uart
-mode boots a snippet-built DUT and checks the boot banner + a core Studio
-GetDeviceInfo. split mode boots a wired-split central (`--elf`) + peripheral
-(`--peripheral-elf`) on a Renode UART hub and checks both boot banners + a
-peripheral keypress relayed to the central. See docs/renode-testing.md and
-docs/renode-internals.md.
+an encrypted Studio-over-BLE read, or without a host a boot-liveness check. usb
+mode boots the SAME real hardware image on the NRF_USBD_Full usb platform and
+drives a Studio GetDeviceInfo round trip over the emulated USB CDC (plus the
+boot banner when the image has a console CDC). uart mode boots a snippet-built
+DUT and checks the boot banner + a core Studio GetDeviceInfo. split mode boots a
+wired-split central (`--elf`) + peripheral (`--peripheral-elf`) on a Renode UART
+hub and checks both boot banners + a peripheral keypress relayed to the central.
+See docs/renode-testing.md and docs/renode-internals.md.
 
 Usage:
     # ble mode (default -- real image + host app):
     python renode_smoke.py --elf /path/to/zmk.elf \\
         --host-elf /path/to/renode-ble-host/zephyr.elf
+
+    # usb mode (same real image as ble mode; Studio RPC over emulated USB CDC):
+    python renode_smoke.py --mode usb --elf /path/to/zmk.elf \\
+        --west-topdir /path/to/module
 
     # uart mode:
     python renode_smoke.py --mode uart --elf /path/to/zmk.elf \\
@@ -89,6 +95,38 @@ def _clean_symbol(find_symbol_output: str) -> str:
     return ""
 
 
+def _assert_get_device_info(
+    studio_pb2,
+    rpc,
+    rpc_timeout: float,
+    expect_name_nonempty: bool,
+) -> str:
+    """Send a core Studio RPC GetDeviceInfo over `rpc` (a framed RpcSocket) and
+    assert a well-formed response; returns the device name."""
+    req = studio_pb2.Request()
+    req.request_id = 1
+    req.core.get_device_info = True
+    rpc.send(req.SerializeToString())
+    resp_bytes = rpc.read_frame(timeout=rpc_timeout)
+    if resp_bytes is None:
+        raise AssertionError("no Studio RPC response frame received (timeout)")
+
+    resp = studio_pb2.Response()
+    resp.ParseFromString(resp_bytes)
+    if resp.WhichOneof("type") != "request_response":
+        raise AssertionError(f"expected a request_response, got {resp.WhichOneof('type')!r}")
+    if resp.request_response.WhichOneof("subsystem") != "core":
+        raise AssertionError(
+            "expected core subsystem in response, got "
+            f"{resp.request_response.WhichOneof('subsystem')!r}"
+        )
+    name = resp.request_response.core.get_device_info.name
+    if expect_name_nonempty and not name:
+        raise AssertionError("GetDeviceInfoResponse.name was empty")
+    print(f"core Studio RPC GetDeviceInfo OK (name={name!r})", file=sys.stderr)
+    return name
+
+
 def run_uart_smoke(
     elf: Path,
     renode_path: str,
@@ -121,28 +159,200 @@ def run_uart_smoke(
             print("skipping Studio RPC check (--no-rpc)", file=sys.stderr)
             return
 
-        req = studio_pb2.Request()
-        req.request_id = 1
-        req.core.get_device_info = True
-        rpc.send(req.SerializeToString())
-        resp_bytes = rpc.read_frame(timeout=rpc_timeout)
-        if resp_bytes is None:
-            raise AssertionError("no Studio RPC response frame received (timeout)")
-
-        resp = studio_pb2.Response()
-        resp.ParseFromString(resp_bytes)
-        if resp.WhichOneof("type") != "request_response":
-            raise AssertionError(f"expected a request_response, got {resp.WhichOneof('type')!r}")
-        if resp.request_response.WhichOneof("subsystem") != "core":
-            raise AssertionError(
-                "expected core subsystem in response, got "
-                f"{resp.request_response.WhichOneof('subsystem')!r}"
-            )
-        name = resp.request_response.core.get_device_info.name
-        if expect_name_nonempty and not name:
-            raise AssertionError("GetDeviceInfoResponse.name was empty")
-        print(f"core Studio RPC GetDeviceInfo OK (name={name!r})", file=sys.stderr)
+        _assert_get_device_info(studio_pb2, rpc, rpc_timeout, expect_name_nonempty)
     finally:
+        rpc.close()
+        console.close()
+        session.stop()
+
+
+# usb-mode: the DualCdcAcmBridge external name; its two IUART channels are
+# machine-registered as sysbus.<name>_cdc0 / _cdc1 (see
+# renode_harness.attach_dual_cdc_bridge and platforms/models/DualCdcAcmBridge.cs).
+USB_BRIDGE_NAME = "bridge"
+USB_REPL_TEMPLATE = "xiao_nrf52840_usb.repl"
+
+
+def _mon_flag(mon, command: str) -> bool | None:
+    """Run a monitor command whose reply is a bare boolean property value
+    (e.g. `sysbus.bridge_cdc0 IsWired`); returns None when no True/False line
+    could be parsed from the (ANSI-colored, echo-prefixed) reply."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", mon.execute(command, settle=0.3))
+    for line in text.splitlines():
+        line = line.strip()
+        if line in ("True", "False"):
+            return line == "True"
+    return None
+
+
+def run_usb_smoke(
+    elf: Path,
+    renode_path: str,
+    studio_proto_dir: Path,
+    boot_settle: float = 8.0,
+    wiring_timeout: float = 30.0,
+    boot_timeout: float = 20.0,
+    rpc_timeout: float = 10.0,
+    expect_name_nonempty: bool = True,
+    storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
+    storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
+    max_attempts: int = 2,
+) -> None:
+    """usb-mode smoke with a bounded whole-emulation retry.
+
+    Boots the SAME real flashable `studio-rpc-usb-uart` image ble mode runs --
+    but on the NRF_USBD_Full usb platform (boot_single_real(...,
+    repl_template="xiao_nrf52840_usb.repl")), attaches the DualCdcAcmBridge USB
+    host external after the guest's USB init settles, and asserts a core Studio
+    RPC GetDeviceInfo round trip over the emulated USB CDC.
+
+    The bridge parses the image's real configuration descriptors, so the smoke
+    adapts to the composite it finds (auto-detected via the bridge channels'
+    IsWired properties -- no flag needed):
+
+      * a standard `studio-rpc-usb-uart` image has ONE CDC function (Studio) +
+        HID -- cdc0 carries Studio RPC and there is no console CDC to assert;
+      * an image that also enables `CONFIG_ZMK_USB_LOGGING` has TWO CDC
+        functions -- the board console CDC enumerates FIRST (cdc0) and the
+        Studio snippet CDC second (cdc1), so the smoke ALSO asserts the ZMK
+        boot banner on the console channel.
+
+    WHY the retry (one whole-emulation re-boot, the ble-split pattern): a usb
+    run is fast and deterministic on an idle host, but the wall-clock-paced
+    attach/settle steps can lose the race when another heavyweight emulation is
+    hogging the machine (observed only under that contention in Phase 2). A
+    genuine break fails BOTH attempts."""
+    studio_pb2 = renode_harness.load_studio_pb2(studio_proto_dir)
+
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            print(
+                f"--- usb smoke attempt {attempt}/{max_attempts} "
+                "(fresh emulation; previous attempt failed) ---",
+                file=sys.stderr,
+            )
+        try:
+            _run_usb_attempt(
+                studio_pb2,
+                elf=elf,
+                renode_path=renode_path,
+                boot_settle=boot_settle,
+                wiring_timeout=wiring_timeout,
+                boot_timeout=boot_timeout,
+                rpc_timeout=rpc_timeout,
+                expect_name_nonempty=expect_name_nonempty,
+                storage_addr=storage_addr,
+                storage_size=storage_size,
+            )
+            if attempt > 1:
+                print(f"usb smoke OK on attempt {attempt}", file=sys.stderr)
+            return
+        except (AssertionError, TimeoutError, OSError) as err:
+            # TimeoutError/OSError: a boot/monitor/socket failure under host
+            # contention (e.g. the Renode process dying mid-attach with a
+            # BrokenPipeError) -- retried like an assertion failure.
+            last_err = err
+            print(f"usb smoke attempt {attempt}/{max_attempts} FAILED: {err!r}", file=sys.stderr)
+    assert last_err is not None
+    if isinstance(last_err, AssertionError):
+        raise last_err
+    raise AssertionError(repr(last_err))
+
+
+def _run_usb_attempt(
+    studio_pb2,
+    elf: Path,
+    renode_path: str,
+    boot_settle: float,
+    wiring_timeout: float,
+    boot_timeout: float,
+    rpc_timeout: float,
+    expect_name_nonempty: bool,
+    storage_addr: int,
+    storage_size: int,
+) -> None:
+    """One usb-mode attempt: boot, attach the bridge, assert (see run_usb_smoke)."""
+    import random
+
+    port_base = random.randint(26000, 40000)
+    print(
+        "booting real image on the NRF_USBD_Full usb platform...",
+        file=sys.stderr,
+    )
+    session, console, rpc = renode_harness.boot_single_real(
+        renode_path,
+        elf,
+        storage_addr=storage_addr,
+        storage_size=storage_size,
+        port_base=port_base,
+        repl_template=USB_REPL_TEMPLATE,
+    )
+    assert session.mon is not None
+    mon = session.mon
+    cdc: list = []
+    try:
+        # Let the guest finish its USB driver bring-up (ENABLE + USBPULLUP)
+        # before the host attaches -- a SETUP fired before the guest's INTEN is
+        # set would be silently lost (see docs/renode-usb-design.md).
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < boot_settle:
+            renode_harness.drain_text(console._sock, timeout=0.5)
+
+        # Two-step attach (create bridge + wire both channel terminals while
+        # paused, THEN attach = start enumeration) so no device output is lost.
+        cdc = list(renode_harness.attach_dual_cdc_bridge(session, port_base + 4, port_base + 5))
+
+        # Wait for enumeration + descriptor parsing to wire the first CDC
+        # channel, then auto-detect whether a second CDC function exists.
+        deadline = time.monotonic() + wiring_timeout
+        while time.monotonic() < deadline:
+            if _mon_flag(mon, f"sysbus.{USB_BRIDGE_NAME}_cdc0 IsWired"):
+                break
+        else:
+            raise AssertionError(
+                "USB enumeration never wired the first CDC channel "
+                f"(no sysbus.{USB_BRIDGE_NAME}_cdc0 IsWired within {wiring_timeout:.0f}s) "
+                "-- is the ELF a studio-rpc-usb-uart (USB-CDC) image?"
+            )
+        dual_cdc = bool(_mon_flag(mon, f"sysbus.{USB_BRIDGE_NAME}_cdc1 IsWired"))
+        # Give the bridge a moment to finish its post-wiring control sequence
+        # (SET_LINE_CODING / DTR) and arm the device->host pumps.
+        time.sleep(2.0)
+
+        if dual_cdc:
+            # Both CDC functions present (CONFIG_ZMK_USB_LOGGING image): the
+            # board console CDC enumerates first, the Studio CDC second. The
+            # console CDC reliably carries the Zephyr boot banner ("*** Booting
+            # Zephyr OS build ... ***", printk -- buffered in the CDC ring from
+            # boot and flushed once the host configures the device); the "Welcome
+            # to ZMK" line is a *log* message that may be routed to another
+            # backend (e.g. RTT), so it is not asserted here.
+            print(
+                "two CDC functions found (console + Studio); waiting for the Zephyr "
+                "boot banner on the console CDC...",
+                file=sys.stderr,
+            )
+            banner = renode_harness.wait_for_text(
+                cdc[0]._sock, "Booting Zephyr", timeout=boot_timeout
+            )
+            if "Booting Zephyr" not in banner:
+                raise AssertionError(
+                    f"never saw the Zephyr boot banner on the console CDC; got:\n{banner}"
+                )
+            print("console-CDC boot banner OK", file=sys.stderr)
+            studio = cdc[1]
+        else:
+            print(
+                "single CDC function found (Studio only; no console CDC to assert)",
+                file=sys.stderr,
+            )
+            studio = cdc[0]
+
+        _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty)
+    finally:
+        for sock in cdc:
+            sock.close()
         rpc.close()
         console.close()
         session.stop()
@@ -806,10 +1016,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--mode",
-        choices=("uart", "ble", "split", "ble-split"),
+        choices=("uart", "usb", "ble", "split", "ble-split"),
         default="ble",
         help="ble (default): real hardware image; with --host-elf a full encrypted "
-        "Studio-over-BLE read (S4/S5), without it a boot-liveness check. ble-split: a "
+        "Studio-over-BLE read (S4/S5), without it a boot-liveness check. usb: the SAME "
+        "real hardware image, Studio GetDeviceInfo over the emulated USB CDC "
+        "(NRF_USBD_Full + DualCdcAcmBridge; + boot banner when the image has a console "
+        "CDC). ble-split: a "
         "wireless split -- --elf is the split CENTRAL, --peripheral-elf the split "
         "PERIPHERAL, --host-elf the host; asserts the split link secures then the host "
         "reads Studio through the central. uart: snippet-built DUT, boot banner + Studio "
@@ -880,14 +1093,14 @@ def main(argv: list[str] | None = None) -> int:
         "--storage-addr",
         type=lambda s: int(s, 0),
         default=renode_harness.STORAGE_ADDR_DEFAULT,
-        help="ble mode: NVS storage_partition address to preload as erased 0xFF "
+        help="ble / usb mode: NVS storage_partition address to preload as erased 0xFF "
         "(default: 0xec000, xiao_ble).",
     )
     adv.add_argument(
         "--storage-size",
         type=lambda s: int(s, 0),
         default=renode_harness.STORAGE_SIZE_DEFAULT,
-        help="ble mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
+        help="ble / usb mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
     )
     args = ap.parse_args(argv)
 
@@ -989,15 +1202,32 @@ def main(argv: list[str] | None = None) -> int:
         print("SMOKE TEST OK", file=sys.stderr)
         return 0
 
-    # uart mode.
+    # uart / usb mode: both need the Studio protos (usb always checks RPC).
     proto_dir = None
-    if not args.no_rpc:
+    if args.mode == "usb" or not args.no_rpc:
         proto_dir = args.studio_proto_dir
         if proto_dir is None:
             if not args.west_topdir:
                 print("either --studio-proto-dir or --west-topdir is required", file=sys.stderr)
                 return 2
             proto_dir = renode_harness.find_studio_proto_dir(args.west_topdir)
+
+    if args.mode == "usb":
+        try:
+            run_usb_smoke(
+                elf=args.elf,
+                renode_path=renode_path,
+                studio_proto_dir=proto_dir,
+                boot_timeout=args.boot_timeout,
+                rpc_timeout=args.rpc_timeout,
+                storage_addr=args.storage_addr,
+                storage_size=args.storage_size,
+            )
+        except AssertionError as err:
+            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
+            return 1
+        print("SMOKE TEST OK", file=sys.stderr)
+        return 0
 
     try:
         run_uart_smoke(

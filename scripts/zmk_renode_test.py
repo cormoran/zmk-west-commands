@@ -1,13 +1,18 @@
 """`west zmk-renode-test` -- boot a built ZMK ELF in the Renode emulator, run a
 boot + Studio smoke test, then a module's own `tests/renode/*_test.py` files.
 
-Four modes (`--mode`, default `ble`):
+Five modes (`--mode`, default `ble`):
 
   * **ble** (default) -- the DUT is the exact `studio-rpc-usb-uart` *hardware*
     image, with no extra module config; platform stubs make it boot. With
     `--host-elf`, the `renode-ble-host` app pairs over an emulated BLE medium and
     does an encrypted Studio GATT read (S4/S5). Without `--host-elf`, it degrades
     to a boot-liveness check.
+  * **usb** -- the SAME real hardware image as ble mode, but Studio RPC rides
+    the emulated USB: the NRF_USBD_Full model + DualCdcAcmBridge USB host
+    enumerate the image's real USB composite. Smoke = a core Studio
+    GetDeviceInfo round trip over the USB CDC (plus the boot banner when the
+    image also enables the board console CDC via CONFIG_ZMK_USB_LOGGING).
   * **uart** -- the DUT is built with this repo's `renode-studio-uart` snippet;
     console + Studio RPC ride emulated UARTs. Smoke = boot banner + a core
     Studio GetDeviceInfo round trip.
@@ -54,8 +59,9 @@ class ZMKRenodeTest(WestCommand):
             description=(
                 "Boot a caller-built ZMK firmware ELF in the Renode emulator, run a "
                 "boot + Studio smoke test, then the module's own tests/renode/*_test.py "
-                "files. Four modes: --mode ble (default, the real hardware image with no "
-                "extra config, Studio over emulated BLE), --mode uart (snippet-built DUT "
+                "files. Five modes: --mode ble (default, the real hardware image with no "
+                "extra config, Studio over emulated BLE), --mode usb (the same real image, "
+                "Studio over the emulated USB CDC), --mode uart (snippet-built DUT "
                 "over emulated UARTs), --mode split (wired-split central + --peripheral-elf "
                 "on a Renode UART hub), and --mode ble-split (wireless split central + "
                 "--peripheral-elf + --host-elf on one BLE medium). Does not build firmware."
@@ -83,12 +89,15 @@ class ZMKRenodeTest(WestCommand):
         )
         parser.add_argument(
             "--mode",
-            choices=("uart", "ble", "split", "ble-split"),
+            choices=("uart", "usb", "ble", "split", "ble-split"),
             default="ble",
             help=(
                 "ble (default): the real hardware image with no extra config; with "
                 "--host-elf the renode-ble-host app pairs and does an encrypted Studio "
                 "GATT read (S4/S5), without it a boot-liveness check. "
+                "usb: the SAME real hardware image, but Studio RPC over the emulated USB "
+                "CDC (NRF_USBD_Full + DualCdcAcmBridge); smoke = GetDeviceInfo over USB "
+                "(+ boot banner when the image has a console CDC). "
                 "ble-split: a WIRELESS split -- --elf is the split CENTRAL half, "
                 "--peripheral-elf the split PERIPHERAL half, --host-elf the host; the "
                 "smoke asserts the encrypted split link comes up THEN the host reads "
@@ -125,7 +134,7 @@ class ZMKRenodeTest(WestCommand):
             "--boot-timeout",
             type=float,
             default=20.0,
-            help="uart mode: seconds to wait for the ZMK boot banner (default: 20).",
+            help="uart/split/usb mode: seconds to wait for the ZMK boot banner (default: 20).",
         )
         parser.add_argument(
             "--skip-smoke",
@@ -172,14 +181,14 @@ class ZMKRenodeTest(WestCommand):
             "--storage-addr",
             type=lambda s: int(s, 0),
             default=None,
-            help="ble mode: NVS storage_partition address preloaded as erased 0xFF "
+            help="ble/usb mode: NVS storage_partition address preloaded as erased 0xFF "
             "(default: 0xec000, xiao_ble).",
         )
         adv.add_argument(
             "--storage-size",
             type=lambda s: int(s, 0),
             default=None,
-            help="ble mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
+            help="ble/usb mode: NVS storage_partition size (default: 0x8000, xiao_ble).",
         )
         adv.add_argument(
             "--renode-version",
@@ -245,6 +254,8 @@ class ZMKRenodeTest(WestCommand):
                     self._run_ble_liveness_smoke(args, elf, renode_path)
             elif args.mode == "split":
                 self._run_split_smoke(args, elf, peripheral_elf, renode_path)
+            elif args.mode == "usb":
+                self._run_usb_smoke(args, elf, renode_path)
             else:
                 self._run_uart_smoke(args, elf, renode_path)
         else:
@@ -359,6 +370,43 @@ class ZMKRenodeTest(WestCommand):
             log.die(f"smoke test FAILED: {err}")
         log.inf("[*] Smoke test OK")
 
+    def _run_usb_smoke(self, args, elf: Path, renode_path: str) -> None:
+        import renode_harness  # noqa: E402
+        import renode_smoke  # noqa: E402
+
+        # protobuf is a hard runtime dep here: usb mode always asserts the
+        # Studio RPC round trip (that is the mode's whole point).
+        try:
+            import google.protobuf  # noqa: F401
+        except ImportError:
+            log.die(
+                "the `protobuf` Python package is required for the usb-mode Studio RPC "
+                "smoke test -- install it (see requirements-test.txt) or pass --skip-smoke."
+            )
+        proto_dir = self._find_studio_proto_dir(renode_harness)
+
+        kwargs = {}
+        if args.storage_addr is not None:
+            kwargs["storage_addr"] = args.storage_addr
+        if args.storage_size is not None:
+            kwargs["storage_size"] = args.storage_size
+
+        log.inf(
+            "[*] Running usb-mode Renode smoke test (real image; Studio RPC over the "
+            "emulated USB CDC)"
+        )
+        try:
+            renode_smoke.run_usb_smoke(
+                elf=elf,
+                renode_path=renode_path,
+                studio_proto_dir=proto_dir,
+                boot_timeout=args.boot_timeout,
+                **kwargs,
+            )
+        except AssertionError as err:
+            log.die(f"usb smoke test FAILED: {err}")
+        log.inf("[*] USB smoke test OK")
+
     def _run_split_smoke(
         self, args, central_elf: Path, peripheral_elf: Path, renode_path: str
     ) -> None:
@@ -416,20 +464,22 @@ class ZMKRenodeTest(WestCommand):
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(LIB_RENODE_DIR) + (os.pathsep + existing if existing else "")
         # Module-test env contract (see docs/renode-testing.md):
-        #   ZMK_RENODE_MODE  = uart | ble  (which harness a test should build)
+        #   ZMK_RENODE_MODE  = uart | usb | ble | split | ble-split
         #   ZMK_RENODE_ELF   = the DUT ELF
-        # ble mode also exports the storage-partition overrides and, when a host
-        # was given, ZMK_RENODE_HOST_ELF for renode_harness.boot_ble_pair().
+        # The real-image modes (ble / ble-split / usb) also export the
+        # storage-partition overrides; ble modes additionally export
+        # ZMK_RENODE_HOST_ELF when a host was given.
         env["ZMK_RENODE_MODE"] = args.mode
         env["ZMK_RENODE_ELF"] = str(elf)
         if args.mode == "split":
             # split-mode tests build a wired pair via renode_harness.boot_split_wired;
             # --elf is the central, ZMK_RENODE_PERIPHERAL_ELF the peripheral half.
             env["ZMK_RENODE_PERIPHERAL_ELF"] = str(Path(args.peripheral_elf).absolute())
-        if args.mode in ("ble", "ble-split"):
-            # ble-mode tests build a real image via renode_harness.boot_single_real
-            # (liveness), boot_ble_pair (two-machine) or boot_ble_split (three-
-            # machine), honoring these overrides.
+        if args.mode in ("ble", "ble-split", "usb"):
+            # These modes boot a real image -- via renode_harness.boot_single_real
+            # (ble liveness, and usb with repl_template="xiao_nrf52840_usb.repl" +
+            # attach_dual_cdc_bridge), boot_ble_pair (two-machine) or
+            # boot_ble_split (three-machine) -- honoring these overrides.
             import renode_harness  # noqa: E402
 
             addr = (

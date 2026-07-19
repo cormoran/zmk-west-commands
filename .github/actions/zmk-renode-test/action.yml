@@ -29,7 +29,10 @@ inputs:
       Test mode: `ble` (default -- boots the exact `studio-rpc-usb-uart`
       hardware image, no extra module config; Studio over emulated BLE, with
       `host-elf` a full S4/S5 pairing + encrypted read, else a boot-liveness
-      check), `uart` (snippet-built DUT, Studio over emulated UARTs, which
+      check), `usb` (the SAME real hardware image, but Studio RPC over the
+      emulated USB CDC; smoke = a core Studio GetDeviceInfo round trip, plus
+      the boot banner when the image also enables the board console CDC),
+      `uart` (snippet-built DUT, Studio over emulated UARTs, which
       requires a `renode-studio-uart` build.yaml artifact), `split` (wired
       split -- `elf-path` is the central half, `peripheral-elf` the peripheral;
       smoke = both boot banners + a peripheral keypress relayed to the central),

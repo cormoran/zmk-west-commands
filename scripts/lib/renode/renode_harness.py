@@ -66,6 +66,7 @@ __all__ = [
     "find_studio_proto_dir",
     "boot_single",
     "boot_single_real",
+    "attach_dual_cdc_bridge",
     "boot_ble_pair",
     "boot_split_wired",
     "boot_ble_split",
@@ -466,20 +467,25 @@ def _materialize_ficr(device_addr: int) -> str:
     return path
 
 
-def _materialize_real_repl(ficr_path: str | None = None) -> str:
-    """Write a temp copy of platforms/xiao_nrf52840_real.repl with the model
+def _materialize_real_repl(
+    ficr_path: str | None = None, template_name: str = "xiao_nrf52840_real.repl"
+) -> str:
+    """Write a temp copy of platforms/<template_name> with the model
     `filename:` paths rewritten to absolute. Renode resolves PythonPeripheral
     filenames against neither the .repl dir nor its cwd, so the checked-in repl
-    keeps them repo-relative (readable) and we make them absolute here. Returns
+    keeps them repo-relative (readable) and we make them absolute here. The same
+    rewrite is applied to `include @platforms/models/...` lines (the usb
+    variant's `preinit: include` of the ad-hoc-compiled C# model). Returns
     the temp file path (caller deletes it once the platform has loaded).
 
     If `ficr_path` is given (an already-materialized per-machine ficr .py, see
     _materialize_ficr), the FICR model's filename is pointed at it instead of the
     checked-in models/ficr.py -- this is how a per-machine BLE address is injected
     without touching the other model stubs."""
-    template = (PLATFORMS_DIR / "xiao_nrf52840_real.repl").read_text()
+    template = (PLATFORMS_DIR / template_name).read_text()
     abs_models = str((PLATFORMS_DIR / "models").resolve())
     repl = template.replace('filename: "platforms/models/', f'filename: "{abs_models}/')
+    repl = repl.replace("include @platforms/models/", f"include @{abs_models}/")
     if ficr_path is not None:
         repl = repl.replace(f'filename: "{abs_models}/ficr.py"', f'filename: "{ficr_path}"')
     fd, path = tempfile.mkstemp(prefix="xiao_nrf52840_real-", suffix=".repl")
@@ -520,6 +526,7 @@ def boot_single_real(
     port_base: int | None = None,
     device_addr: int | None = None,
     rtt: bool = False,
+    repl_template: str = "xiao_nrf52840_real.repl",
 ) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
     """Boot a real flashable `elf` under Renode using platforms/single_real.resc
     (the USBD/QSPI/FICR/NVMC-stub platform) with the storage partition preloaded
@@ -543,6 +550,10 @@ def boot_single_real(
     (RTT-logging builds only -- CONFIG_LOG + CONFIG_USE_SEGGER_RTT +
     CONFIG_LOG_BACKEND_RTT; on a non-RTT build the hook install is a graceful
     no-op and the socket stays silent). session.rtt_socket is None when rtt=False.
+
+    `repl_template` selects the platform template under platforms/ (default:
+    the python-stub real platform; pass "xiao_nrf52840_usb.repl" for the
+    NRF_USBD_Full C# model variant that supports USB enumeration).
     """
     if port_base is None:
         import random
@@ -550,7 +561,7 @@ def boot_single_real(
         port_base = random.randint(26000, 40000)
 
     ficr_path = _materialize_ficr(device_addr) if device_addr is not None else None
-    repl_path = _materialize_real_repl(ficr_path)
+    repl_path = _materialize_real_repl(ficr_path, template_name=repl_template)
     ff_path = _write_ff_binary(storage_size)
     session = RenodeSession(
         renode_path,
@@ -591,6 +602,13 @@ def boot_single_real(
         # file synchronously here, so it is safe to delete afterwards).
         session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
         session.go()
+    except Exception:
+        # A half-booted session would otherwise leak its Renode process (the
+        # caller never gets a session to stop()) -- seen when a UART socket
+        # connect fails on a heavily-loaded host, where the leaked emulation
+        # then slows every subsequent boot (e.g. a smoke retry) further.
+        session.stop()
+        raise
     finally:
         for tmp in (repl_path, ff_path, ficr_path):
             if tmp is None:
@@ -600,6 +618,66 @@ def boot_single_real(
             except OSError:
                 pass
     return session, console, rpc
+
+
+# The DualCdcAcmBridge USB host external (see the .cs header and
+# docs/renode-usb-design.md gap (d)), ad-hoc-compiled at attach time like the
+# NRF_USBD_Full model it drives.
+DUAL_CDC_BRIDGE_CS = PLATFORMS_DIR / "models" / "DualCdcAcmBridge.cs"
+
+
+def attach_dual_cdc_bridge(
+    session: "RenodeSession",
+    cdc0_port: int,
+    cdc1_port: int,
+    name: str = "bridge",
+) -> tuple["RpcSocket", "RpcSocket"]:
+    """Attach the DualCdcAcmBridge USB host to a session booted with the
+    NRF_USBD_Full usb platform (boot_single_real(...,
+    repl_template="xiao_nrf52840_usb.repl")), exposing the DUT's two CDC-ACM
+    functions on two TCP server socket terminals. Returns the two connected
+    sockets (cdc0, cdc1), in the device's configuration-descriptor interface
+    order; which one is the console vs the Studio RPC channel depends on the
+    image (for a ZMK image with both board and snippet CDC enabled, the board
+    console CDC comes first; when only the Studio snippet CDC is enabled it is
+    the composite's sole -- first -- CDC function).
+
+    The setup is two-step (create + wire terminals + connect clients, THEN
+    attach, all while paused) so USB enumeration cannot start before both TCP
+    clients are connected -- otherwise the first post-enumeration device
+    output (e.g. the boot banner buffered in the console CDC's ring buffer)
+    would race the terminal hookup and could be lost. Call this only after
+    the guest has settled its USB init (a few seconds after session.go());
+    the caller owns the returned sockets' cleanup."""
+    assert session.mon is not None
+    mon = session.mon
+
+    def wait_paused(expected: str, reissue: str | None = None, timeout: float = 30.0) -> None:
+        # `pause`/`start` return before the state change completes on a busy
+        # machine (observed: a `start` issued while a slow `pause` was still in
+        # flight left the emulation frozen), so poll `machine IsPaused` until
+        # the expected state is reached, optionally re-issuing the command.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if expected in mon.execute("machine IsPaused", settle=0.3):
+                return
+            if reissue is not None:
+                mon.execute(reissue)
+        raise TimeoutError(f"emulation never reached IsPaused={expected}")
+
+    mon.execute(f"include @{DUAL_CDC_BRIDGE_CS}", settle=2.0)
+    mon.execute("pause")
+    wait_paused("True")
+    mon.execute(f'sysbus.usbd CreateDualCdcAcmBridge "{name}"')
+    sockets = []
+    for i, port in enumerate((cdc0_port, cdc1_port)):
+        mon.execute(f'emulation CreateServerSocketTerminal {port} "{name}_cdc{i}_term" false')
+        mon.execute(f"connector Connect sysbus.{name}_cdc{i} {name}_cdc{i}_term")
+        sockets.append(session.connect_uart(port))
+    mon.execute(f'sysbus.usbd AttachDualCdcAcmBridge "{name}"')
+    mon.execute("start")
+    wait_paused("False", reissue="start")
+    return sockets[0], sockets[1]
 
 
 # --------------------------------------------------------------------------
