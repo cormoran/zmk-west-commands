@@ -40,7 +40,14 @@ namespace Antmicro.Renode.Peripherals.USB
             interruptManager = new InterruptManager<Events>(this, IRQ, "UsbIrq");
             events = new IFlagRegisterField[(int)Events.EpData + 1];
             epInDataStatus = new bool[EndpointCount];
+            epOutDataStatus = new bool[EndpointCount];
             epInStatus = new bool[EndpointCount];
+            outDataQueues = new Queue<byte>[EndpointCount];
+            presentedOutChunk = new byte[EndpointCount][];
+            for(var i = 0; i < EndpointCount; i++)
+            {
+                outDataQueues[i] = new Queue<byte>();
+            }
             this.maximumPacketSize = maximumPacketSize;
             InitiateUSBCore();
             DefineRegisters();
@@ -65,6 +72,16 @@ namespace Antmicro.Renode.Peripherals.USB
             ep0SetupPayloadOffset = 0;
             ep0InAccumulator.Clear();
             Array.Clear(sizeEpOut, 0, sizeEpOut.Length);
+            Array.Clear(epInDataStatus, 0, epInDataStatus.Length);
+            Array.Clear(epOutDataStatus, 0, epOutDataStatus.Length);
+            lock(outLock)
+            {
+                for(var i = 0; i < EndpointCount; i++)
+                {
+                    outDataQueues[i].Clear();
+                    presentedOutChunk[i] = null;
+                }
+            }
         }
 
         public USBDeviceCore USBCore { get; }
@@ -147,13 +164,105 @@ namespace Antmicro.Renode.Peripherals.USB
             SetEvent(Events.Ep0DataDone);
         }
 
+        // Host->device bulk data, delivered by a USB host external writing to one
+        // of our HostToDevice framework endpoints (USBEndpoint.WriteData ->
+        // DataWritten). Bytes are queued per endpoint and presented to the guest
+        // one chunk (<= maximumPacketSize bytes) at a time, mirroring how real
+        // hardware buffers one packet in the endpoint until the driver DMAs it
+        // out: SIZE.EPOUT[n] = chunk length, EPDATASTATUS.EPOUTn = 1, EVENTS_EPDATA.
+        // The guest then programs EPOUT[n].PTR/MAXCNT + TASKS_STARTEPOUT[n]; the
+        // next chunk (if any) is presented right after that DMA completes.
+        // Called on an external (non-CPU) thread; outLock guards the queues.
+        private void HandleHostToDeviceData(int epNumber, byte[] data)
+        {
+            if(data == null || data.Length == 0)
+            {
+                // A bulk OUT ZLP carries no payload and the guest CDC byte-stream
+                // does not depend on packet boundaries -- nothing to present.
+                return;
+            }
+            this.Log(LogLevel.Noisy, "Host wrote {0} bytes to OUT EP {1}", data.Length, epNumber);
+            bool presented;
+            lock(outLock)
+            {
+                foreach(var b in data)
+                {
+                    outDataQueues[epNumber].Enqueue(b);
+                }
+                presented = TryPresentOutChunk(epNumber);
+            }
+            if(presented)
+            {
+                SetEvent(Events.EpData);
+            }
+        }
+
+        // Present the next pending chunk on OUT endpoint `epNumber` to the guest,
+        // unless one is already waiting to be DMAed. Must be called under outLock;
+        // returns true if a new chunk was presented (caller raises EVENTS_EPDATA
+        // outside the lock).
+        private bool TryPresentOutChunk(int epNumber)
+        {
+            if(presentedOutChunk[epNumber] != null || outDataQueues[epNumber].Count == 0)
+            {
+                return false;
+            }
+            var count = Math.Min((int)maximumPacketSize, outDataQueues[epNumber].Count);
+            var chunk = new byte[count];
+            for(var i = 0; i < count; i++)
+            {
+                chunk[i] = outDataQueues[epNumber].Dequeue();
+            }
+            presentedOutChunk[epNumber] = chunk;
+            sizeEpOut[epNumber] = (ulong)count;
+            epOutDataStatus[epNumber] = true;
+            return true;
+        }
+
+        private void StartBulkEpOut(ushort epNumber)
+        {
+            byte[] chunk;
+            ulong ptr;
+            int dmaCount;
+            bool presentedNext;
+            lock(outLock)
+            {
+                chunk = presentedOutChunk[epNumber];
+                if(chunk == null)
+                {
+                    this.Log(LogLevel.Warning, "TASKS_STARTEPOUT{0} with no pending OUT data", epNumber);
+                    return;
+                }
+                presentedOutChunk[epNumber] = null;
+                sizeEpOut[epNumber] = 0;
+                dmaCount = (int)Math.Min((ulong)chunk.Length, epOutMaxCnt[epNumber].Value);
+                if(dmaCount < chunk.Length)
+                {
+                    // The driver always programs MAXCNT = SIZE.EPOUT[n] (see
+                    // nrf_usbd_common's usbd_dmareq_process), so this indicates a
+                    // guest bug; drop the tail like real hardware would.
+                    this.Log(LogLevel.Warning, "EPOUT{0} DMA shorter than the pending chunk ({1} < {2}); dropping the tail",
+                        epNumber, dmaCount, chunk.Length);
+                }
+                ptr = epOutPtr[epNumber].Value;
+                epOutAmount[epNumber].Value = (ulong)dmaCount;
+                presentedNext = TryPresentOutChunk(epNumber);
+            }
+            var data = new byte[dmaCount];
+            Array.Copy(chunk, data, dmaCount);
+            machine.GetSystemBus(this).WriteBytes(data, ptr);
+            SetEvent(Events.EndEpOut0 + epNumber);
+            if(presentedNext)
+            {
+                SetEvent(Events.EpData);
+            }
+        }
+
         private void StartEpOut(ushort epNumber)
         {
             if(epNumber != 0)
             {
-                // Bulk OUT (the guest-facing host->device data path) is not
-                // implemented yet -- see docs/renode-usb-design.md, gap (b).
-                this.Log(LogLevel.Warning, "TASKS_STARTEPOUT{0}: bulk OUT endpoints are not implemented yet", epNumber);
+                StartBulkEpOut(epNumber);
                 return;
             }
             if(ep0SetupPayload == null || ep0SetupPayloadOffset >= ep0SetupPayload.Length)
@@ -302,24 +411,27 @@ namespace Antmicro.Renode.Peripherals.USB
                 .WithTaggedFlag("EPOUT8", 24)
                 .WithReservedBits(25, 7);
 
-            Registers.EndpointDataStatus.Define(this)
-                .WithReservedBits(0, 1) // Ep0 has no data status
-                .WithFlag(1, writeCallback: (_, val) => { epInDataStatus[1] = val; }, valueProviderCallback: _ => epInDataStatus[1], name: "EPIN1")
-                .WithFlag(2, writeCallback: (_, val) => { epInDataStatus[2] = val; }, valueProviderCallback: _ => epInDataStatus[2], name: "EPIN2")
-                .WithFlag(3, writeCallback: (_, val) => { epInDataStatus[3] = val; }, valueProviderCallback: _ => epInDataStatus[3], name: "EPIN3")
-                .WithFlag(4, writeCallback: (_, val) => { epInDataStatus[4] = val; }, valueProviderCallback: _ => epInDataStatus[4], name: "EPIN4")
-                .WithFlag(5, writeCallback: (_, val) => { epInDataStatus[5] = val; }, valueProviderCallback: _ => epInDataStatus[5], name: "EPIN5")
-                .WithFlag(6, writeCallback: (_, val) => { epInDataStatus[6] = val; }, valueProviderCallback: _ => epInDataStatus[6], name: "EPIN6")
-                .WithFlag(7, writeCallback: (_, val) => { epInDataStatus[7] = val; }, valueProviderCallback: _ => epInDataStatus[7], name: "EPIN7")
+            // EPDATASTATUS: both halves are write-one-to-clear flags. The guest
+            // driver's ISR does `status = EPDATASTATUS; EPDATASTATUS = status;`
+            // (read-then-write-back) to acknowledge exactly the bits it saw, so
+            // a plain read/write flag (upstream's IN bits: write-back re-SET the
+            // flag) or a tag (upstream's OUT bits) both break it. W1C also makes
+            // the ack race-free against bits set concurrently by the host side:
+            // a freshly set bit reads back as 0 in `status`, so the write-back
+            // does not clear it.
+            var epDataStatus = new DoubleWordRegister(this)
+                .WithReservedBits(0, 1) // Ep0 has no data status (EP0DATADONE instead)
                 .WithReservedBits(8, 9)
-                .WithTaggedFlag("EPOUT1", 17)
-                .WithTaggedFlag("EPOUT2", 18)
-                .WithTaggedFlag("EPOUT3", 19)
-                .WithTaggedFlag("EPOUT4", 20)
-                .WithTaggedFlag("EPOUT5", 21)
-                .WithTaggedFlag("EPOUT6", 22)
-                .WithTaggedFlag("EPOUT7", 23)
                 .WithReservedBits(24, 8);
+            for(var i = 1; i < EndpointCount; i++)
+            {
+                var idx = i;
+                epDataStatus.WithFlag(idx, valueProviderCallback: _ => epInDataStatus[idx],
+                    writeCallback: (_, val) => { if(val) { epInDataStatus[idx] = false; } }, name: $"EPIN{idx}");
+                epDataStatus.WithFlag(16 + idx, valueProviderCallback: _ => epOutDataStatus[idx],
+                    writeCallback: (_, val) => { if(val) { epOutDataStatus[idx] = false; } }, name: $"EPOUT{idx}");
+            }
+            registers.AddRegister((long)Registers.EndpointDataStatus, epDataStatus);
 
             Registers.UsbAddress.Define(this)
                 .WithValueField(0, 7, out usbAddress, FieldMode.Read)
@@ -383,29 +495,39 @@ namespace Antmicro.Renode.Peripherals.USB
                 .WithReservedBits(10, 22)
                 .WithWriteCallback((_, __) => HandleToggle());
 
+            // EPINEN/EPOUTEN: plain read/write enable bits (upstream only defined
+            // bit 0, leaving 1..8 as tags -- the driver ORs bits in and reads the
+            // register back in nrf_usbd_common_ep_enable_check). Real hardware
+            // resets these to 0x1 (EP0 enabled); modelling reset as 0 keeps the
+            // driver's explicit-EP0-enable path (and thus boot timing) identical
+            // to the pre-fork python-stub platform -- the driver always enables
+            // EP0 itself, so the difference is unobservable beyond timing.
             Registers.EndpointInEnable.Define(this)
-                .WithFlag(0, out ep0InEnabled, name: "IN0")
-                .WithTaggedFlag("IN1", 1)
-                .WithTaggedFlag("IN2", 2)
-                .WithTaggedFlag("IN3", 3)
-                .WithTaggedFlag("IN4", 4)
-                .WithTaggedFlag("IN5", 5)
-                .WithTaggedFlag("IN6", 6)
-                .WithTaggedFlag("IN7", 7)
-                .WithTaggedFlag("ISOIN", 8)
+                .WithFlags(0, 9, out epInEnabled, name: "IN")
                 .WithReservedBits(9, 23);
 
             Registers.EndpointOutEnable.Define(this)
-                .WithFlag(0, out ep0OutEnabled, name: "OUT0")
-                .WithTaggedFlag("OUT1", 1)
-                .WithTaggedFlag("OUT2", 2)
-                .WithTaggedFlag("OUT3", 3)
-                .WithTaggedFlag("OUT4", 4)
-                .WithTaggedFlag("OUT5", 5)
-                .WithTaggedFlag("OUT6", 6)
-                .WithTaggedFlag("OUT7", 7)
-                .WithTaggedFlag("ISOOUT", 8)
+                .WithFlags(0, 9, out epOutEnabled, name: "OUT")
                 .WithReservedBits(9, 23);
+
+            // HALTED.EPIN[n]/EPOUT[n]: the model never stalls a bulk endpoint on
+            // its own, so these read as 0 ("NotHalted"); defined so the driver's
+            // stall checks don't hit unimplemented-register warnings.
+            for(var i = 0; i < EndpointCount; i++)
+            {
+                registers.AddRegister((long)Registers.HaltedEndpointIn0 + 4 * i, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, valueProviderCallback: _ => 0, name: $"HALTED_EPIN{i}")
+                    .WithReservedBits(16, 16));
+                registers.AddRegister((long)Registers.HaltedEndpointOut0 + 4 * i, new DoubleWordRegister(this)
+                    .WithValueField(0, 16, FieldMode.Read, valueProviderCallback: _ => 0, name: $"HALTED_EPOUT{i}")
+                    .WithReservedBits(16, 16));
+            }
+
+            // LOWPOWER: the driver polls it in its suspend check; this model
+            // never enters low power, so a plain stored flag (reset 0) suffices.
+            Registers.LowPower.Define(this)
+                .WithFlag(0, name: "LOWPOWER")
+                .WithReservedBits(1, 31);
 
             Registers.EndpointStall.Define(this)
                 .WithValueField(0, 3, out epstallEndpoint, name: "EP")
@@ -471,10 +593,29 @@ namespace Antmicro.Renode.Peripherals.USB
             {
                 var idx = i;
                 // SIZE.EPOUT[n]: number of received bytes waiting in the endpoint
-                // buffer; writing any value clears it (accepts the next packet).
+                // buffer; writing any value drops that buffered packet and accepts
+                // the next one (the driver's nrf_usbd_common_transfer_out_drop,
+                // called e.g. when it enables an OUT endpoint) -- so for bulk
+                // endpoints, discard the presented chunk and present the next.
                 registers.AddRegister((long)Registers.SizeEpOut0 + 4 * idx, new DoubleWordRegister(this)
                     .WithValueField(0, 7, valueProviderCallback: _ => sizeEpOut[idx],
-                        writeCallback: (_, __) => { sizeEpOut[idx] = 0; }, name: $"SIZE_EPOUT{idx}")
+                        writeCallback: (_, __) =>
+                        {
+                            var presented = false;
+                            lock(outLock)
+                            {
+                                sizeEpOut[idx] = 0;
+                                if(idx != 0)
+                                {
+                                    presentedOutChunk[idx] = null;
+                                    presented = TryPresentOutChunk(idx);
+                                }
+                            }
+                            if(presented)
+                            {
+                                SetEvent(Events.EpData);
+                            }
+                        }, name: $"SIZE_EPOUT{idx}")
                     .WithReservedBits(7, 25));
 
                 registers.AddRegister((long)Registers.Endpoint0Out + 0x14 * idx, new DoubleWordRegister(this)
@@ -540,6 +681,16 @@ namespace Antmicro.Renode.Peripherals.USB
                     }
                 });
             USBCore.SelectedConfiguration = config;
+            // Unlike upstream (which discarded the HostToDevice refs, leaving no
+            // host->device data path at all), subscribe to each bulk OUT
+            // endpoint's DataWritten so a USB host external's WriteData reaches
+            // the guest -- see HandleHostToDeviceData. EP0's host->device data
+            // rides the SETUP packet's additionalData instead (HandleSetupPacket).
+            for(var i = 1; i < EndpointCount; i++)
+            {
+                var epNum = i;
+                hostToDeviceEndpoints[i].DataWritten += data => HandleHostToDeviceData(epNum, data);
+            }
         }
 
         DoubleWordRegisterCollection IProvidesRegisterCollection<DoubleWordRegisterCollection>.RegistersCollection => registers;
@@ -559,8 +710,8 @@ namespace Antmicro.Renode.Peripherals.USB
 
         private IFlagRegisterField usbPullup;
         private IFlagRegisterField usbEnable;
-        private IFlagRegisterField ep0InEnabled;
-        private IFlagRegisterField ep0OutEnabled;
+        private IFlagRegisterField[] epInEnabled;
+        private IFlagRegisterField[] epOutEnabled;
 
         private readonly USBEndpoint[] deviceToHostEndpoints = new USBEndpoint[EndpointCount];
         private readonly USBEndpoint[] hostToDeviceEndpoints = new USBEndpoint[EndpointCount];
@@ -576,7 +727,15 @@ namespace Antmicro.Renode.Peripherals.USB
         private Action<byte[]> setupPacketResultCallback;
         private readonly IMachine machine;
         private readonly bool[] epInDataStatus;
+        private readonly bool[] epOutDataStatus;
         private readonly bool[] epInStatus;
+        // Host->device bulk data state: bytes queued per OUT endpoint, plus the
+        // one chunk currently presented to the guest (SIZE.EPOUT[n] +
+        // EPDATASTATUS). Guarded by outLock -- DataWritten arrives on a USB host
+        // external's thread while the guest accesses registers on the CPU thread.
+        private readonly Queue<byte>[] outDataQueues;
+        private readonly byte[][] presentedOutChunk;
+        private readonly object outLock = new object();
 
         private readonly InterruptManager<Events> interruptManager;
         private readonly IFlagRegisterField[] events;
@@ -671,6 +830,8 @@ namespace Antmicro.Renode.Peripherals.USB
             SizeEpOut0 = 0x4A0,
             UsbPullup = 0x504,
             DataToggle = 0x50C,
+            LowPower = 0x52C,
+            HaltedEndpointIn0 = 0x420,
             IsoSplit = 0x51C,
             IsoInConfig = 0x530,
             HaltedEndpointOut0 = 0x444,
