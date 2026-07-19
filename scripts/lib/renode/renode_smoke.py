@@ -256,6 +256,7 @@ def run_ble_smoke(
     wall_budget: float = 780.0,
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
+    steady_quantum: str | None = None,
 ) -> None:
     """Studio-over-BLE smoke: boot a real ZMK DUT and the renode-ble-host app on
     one Renode BLE medium (fake CCM in both machines), then assert the host
@@ -264,11 +265,20 @@ def run_ble_smoke(
     PASSES when the host console shows both `STAGE:S4-SECURITY-CHANGED OK`
     (encrypted link up) and `STAGE:S5-GATT-READ OK` (encrypted read) before the
     DUT clocks `virtual_budget` virtual seconds (default 20s -- generous vs the
-    ~1.3s observed). FAILS on any host FAIL marker, on the virtual-time budget,
-    or on the `wall_budget` wall-clock safety net (default 780s ~= 13 min --
-    BLE mode runs ~0.004x realtime, ~6-7 min wall to the read). On failure the
-    tails of both consoles are printed. NOT a cryptographic assertion -- the CCM
-    is a shared identity transform (see README.md's Studio-over-BLE section).
+    ~3.3s observed). FAILS on any host FAIL marker, on the virtual-time budget,
+    or on the `wall_budget` wall-clock safety net. On failure the tails of both
+    consoles are printed. NOT a cryptographic assertion -- the CCM is a shared
+    identity transform (see README.md's Studio-over-BLE section).
+
+    `steady_quantum` (e.g. "0.001") enables the validated "fine-then-coarse"
+    schedule: as soon as the encrypted link is up (host STAGE:S4) the global
+    time-sync quantum is raised from the load-bearing 10us boot value to this
+    coarser value. Pairing needs 10us, but the steady encrypted link tolerates a
+    100x-coarser quantum (S5 still passes; no disconnect / LL assert), which runs
+    the post-pairing phase ~7x faster -- the main lever for a module's own
+    long-running BLE test (the smoke itself exits at S5, so it mostly *validates*
+    the schedule rather than getting faster). None (default) keeps 10us throughout.
+    See renode_harness.raise_global_quantum and README's BLE performance section.
     """
     import tempfile
 
@@ -293,12 +303,24 @@ def run_ble_smoke(
     dut_buf = ""
     host_buf = ""
     reason = None
+    steady_raised = False
     try:
         deadline = time.monotonic() + wall_budget
         vt = 0.0
         while time.monotonic() < deadline:
             host_buf += renode_harness.drain_text(host_console._sock, timeout=0.5)
             dut_buf += renode_harness.drain_text(dut_console._sock, timeout=0.5)
+
+            # Fine-then-coarse: once the encrypted link is up (S4), raise the
+            # global quantum so the steady-state phase runs coarser/faster. The
+            # 10us boot quantum is only needed through connection + pairing.
+            if steady_quantum and not steady_raised and BLE_SECURITY_OK in host_buf:
+                renode_harness.raise_global_quantum(session, steady_quantum)
+                steady_raised = True
+                print(
+                    f"raised global quantum to {steady_quantum} after encrypted link up",
+                    file=sys.stderr,
+                )
 
             if BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf:
                 break
@@ -427,7 +449,16 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=20.0,
         help="BLE mode: virtual seconds to reach the encrypted read before "
-        "failing (default: 20; ~1.3s is typical).",
+        "failing (default: 20; ~3.3s is typical).",
+    )
+    ap.add_argument(
+        "--ble-steady-quantum",
+        default=None,
+        help="BLE mode: after the encrypted link is up (S4), raise the global "
+        "time-sync quantum to this value (e.g. 0.001) for the steady-state phase. "
+        "Pairing needs the 10us boot quantum, but the encrypted link tolerates a "
+        "100x-coarser quantum and runs ~7x faster -- use for long BLE tests. "
+        "Default: keep 10us throughout. See README's BLE performance section.",
     )
     ap.add_argument(
         "--storage-addr",
@@ -465,6 +496,7 @@ def main(argv: list[str] | None = None) -> int:
                 virtual_budget=args.ble_virtual_budget,
                 storage_addr=args.storage_addr,
                 storage_size=args.storage_size,
+                steady_quantum=args.ble_steady_quantum,
             )
         except AssertionError as err:
             print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)

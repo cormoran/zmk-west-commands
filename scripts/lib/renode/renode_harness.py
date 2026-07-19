@@ -71,6 +71,7 @@ __all__ = [
     "STORAGE_SIZE_DEFAULT",
     "DEFAULT_DEVICE_ADDR",
     "device_addr_for_machine",
+    "raise_global_quantum",
     "SEGGER_RTT_HELPER",
 ]
 
@@ -91,6 +92,26 @@ DEFAULT_DEVICE_ADDR = 0xC0E7E7E7E7E7
 # The Zephyr-aware SEGGER RTT capture helper, `include`d over the monitor when
 # boot_single_real(rtt=True) is used (see that function and the file header).
 SEGGER_RTT_HELPER = SCRIPTS_DIR / "segger_rtt_writeskip.py"
+
+
+def raise_global_quantum(session: "RenodeSession", quantum: str) -> None:
+    """Raise (or lower) the emulation global time-sync quantum on a live session.
+
+    BLE mode boots at a 10us global quantum (SetGlobalQuantum "0.00001"), which is
+    load-bearing through connection + pairing but is also the dominant wall-clock
+    cost of two-machine BLE runs (see README's "BLE-mode performance" section): the
+    two CPUs re-synchronise every 10us of virtual time, so the emulation runs at
+    ~0.10x realtime. Once the encrypted link is up (host STAGE:S4), the soft
+    link-layer tolerates a much coarser quantum: raising it to "0.0001" (10x) or
+    "0.001" (100x) keeps the connection alive with no disconnect / LL assert and an
+    encrypted GATT read (S5) still succeeds -- hardware-in-the-loop-free measured
+    ~7x steady-state speedup at "0.001". Use this from a module's own long-running
+    BLE test AFTER it has observed the encrypted link, to run the steady-state
+    workload ("fine-then-coarse"). Do NOT call it before pairing -- a coarse
+    quantum from boot breaks advertising/pairing entirely (verified: even 0.00003
+    never connects)."""
+    assert session.mon is not None
+    session.mon.execute(f'emulation SetGlobalQuantum "{quantum}"')
 
 
 def device_addr_for_machine(index: int) -> int:

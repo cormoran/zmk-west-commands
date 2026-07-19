@@ -122,7 +122,15 @@ class ZMKRenodeTest(WestCommand):
             type=float,
             default=20.0,
             help="BLE mode: virtual seconds to reach the encrypted read before failing "
-            "(default: 20; ~1.3s is typical).",
+            "(default: 20; ~3.3s is typical).",
+        )
+        parser.add_argument(
+            "--ble-steady-quantum",
+            default=None,
+            help="BLE mode: after the encrypted link is up (S4), raise the global "
+            "time-sync quantum to this value (e.g. 0.001) for the steady-state phase "
+            "(~7x faster; pairing still needs the 10us boot quantum). For long BLE "
+            "tests; the smoke itself exits at S5 so it gains little. See README.",
         )
         parser.add_argument(
             "--storage-addr",
@@ -187,6 +195,8 @@ class ZMKRenodeTest(WestCommand):
             kwargs["storage_addr"] = args.storage_addr
         if args.storage_size is not None:
             kwargs["storage_size"] = args.storage_size
+        if getattr(args, "ble_steady_quantum", None):
+            kwargs["steady_quantum"] = args.ble_steady_quantum
 
         log.inf("[*] Running Studio-over-BLE smoke test (real DUT + renode-ble-host)")
         try:

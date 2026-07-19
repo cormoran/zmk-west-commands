@@ -339,9 +339,12 @@ Two constraints make it work (both load-bearing):
   change. Without it the DUT negotiates larger PDUs and anything over `27+4`
   gets "trimmed" by the radio and the link breaks.
 - **Global quantum `0.00001`.** The two-machine `.resc` sets a 10 µs sync
-  quantum; coarser values (even `0.00003`) break the soft link-layer so the
-  host never receives an advertisement. This is ~600× slower than realtime with
-  two CPUs, which is why BLE mode is opt-in.
+  quantum; coarser values (even `0.00003` and `0.0001`) break the soft
+  link-layer so the host never receives an advertisement. This 10 µs sync is the
+  dominant wall-clock cost of BLE mode (the two CPUs re-synchronise 100 000×
+  per virtual second) — see **BLE-mode performance** below for the numbers and
+  the `--ble-steady-quantum` fine-then-coarse lever that recovers it after
+  pairing.
 
 Two hard-won `ccm.py` details are preserved with comments (each was a real
 failure mode):
@@ -352,13 +355,61 @@ failure mode):
 | 30 s SMP timeout, `security_changed err=9`, DUT never TX-encrypts | lazy RX transform — Zephyr's `isr_rx_pdu` reads the OUT buffer before `EVENTS_ENDCRYPT`, so RX must be **eager** too |
 | Fast `0x3d` disconnect right after pairing | CCM payload copied at offset **+2** instead of **+3** (the nRF52 CCM data structure is Header/Length/RFU/Payload; radio `S1INCL=1`) |
 
-**Cost & budgets.** A run reaches the encrypted read at ~1.3 s virtual but
-~**6–7 min wall** (≈0.004× realtime). The smoke passes as soon as S4+S5 appear;
-`--ble-virtual-budget` (default 20 virtual seconds) caps how long it waits, and
-a wall-clock safety net stops a wedged run. It also exports `ZMK_RENODE_BLE=1`
-and `ZMK_RENODE_HOST_ELF=…` for a module's own `tests/renode/*_test.py` (which
-call `renode_harness.boot_ble_pair(dut_elf, host_elf)`), mirroring the
+**Cost & budgets.** A run reaches the encrypted read (S5) at ~3.3 s virtual and
+~**35–50 s wall** (≈0.10× realtime on a lightly-loaded host). The smoke passes
+as soon as S4+S5 appear; `--ble-virtual-budget` (default 20 virtual seconds)
+caps how long it waits, and a wall-clock safety net stops a wedged run. It also
+exports `ZMK_RENODE_BLE=1` and `ZMK_RENODE_HOST_ELF=…` for a module's own
+`tests/renode/*_test.py` (which call
+`renode_harness.boot_ble_pair(dut_elf, host_elf)`), mirroring the
 `ZMK_RENODE_REAL` contract.
+
+##### BLE-mode performance
+
+BLE mode's wall cost is dominated by the **10 µs two-machine time-sync quantum**,
+not by the Python peripheral stubs (fake CCM / FICR / NVMC / QSPI / USBD). The
+proof: stripping the fake-CCM per-transform debug-string build changes nothing
+(0.099× vs 0.100×), yet *coarsening the quantum after pairing* — which does not
+reduce the number of CCM transforms per virtual second — recovers up to ~7×.
+Measurements (Renode 1.16.1, one lightly-loaded x86-64 host; median of ≥2 runs;
+all still **PASS** S4+S5):
+
+| Configuration | Wall to S5 | virtual/wall ratio | PASS |
+|---|---|---|---|
+| Default UART smoke (single machine, reference) | ~14 s | — | ✅ |
+| Real-binary liveness (single machine, reference) | ~85 s / 21 s vt | ~0.25× | ✅ |
+| **BLE baseline** (10 µs quantum, parallel CPUs) | ~33–48 s | **0.10×** | ✅ |
+| BLE + fake-CCM debug string removed | ~34 s | 0.099× | ✅ (no change) |
+| BLE + `SetGlobalSerialExecution true` | ~43 s | 0.055× | ✅ (slower) |
+| BLE + `PerformanceInMips 100` | ~33 s | 0.098× | ✅ (no change; ≈ default) |
+| BLE + `PerformanceInMips 1` | — | — | ❌ (too slow to pair) |
+| Quantum `0.00003` / `0.0001` from boot | — | — | ❌ (never advertises) |
+| **Steady phase** after S4, quantum `0.0001` (10×) | — | **≥0.35×** | ✅ (link survives) |
+| **Steady phase** after S4, quantum `0.001` (100×) | — | **≥0.70×** | ✅ (link survives, ~7×) |
+
+**Root cause.** Two nRF52840 CPUs re-synchronising every 10 µs of virtual time
+run at ~0.10× realtime; a single machine (no BLE medium, default quantum) runs
+at ~0.25×. The fine quantum is *load-bearing through connection + pairing* (the
+soft link-layer's radio-event prepare runs late and asserts otherwise), but once
+the encrypted link is up (host `STAGE:S4`) the link-layer tolerates a
+100×-coarser quantum: the connection stays up with no disconnect / LL assert and
+an encrypted GATT read (S5) still completes.
+
+**`--ble-steady-quantum` (fine-then-coarse).** For a module's own *long* BLE
+test (many virtual seconds of steady RPC traffic), pass e.g.
+`--ble-steady-quantum 0.001`: the harness raises the global quantum the moment
+the encrypted link comes up, running the steady-state phase ~7× faster.
+Equivalently, a module test using `renode_harness.boot_ble_pair(...)` directly
+calls `renode_harness.raise_global_quantum(session, "0.001")` after it observes
+`STAGE:S4`. The `--ble` smoke itself exits at S5 (a tiny virtual gap after S4),
+so it gains almost nothing from the flag — it mostly *validates* the schedule;
+the win is for post-pairing workloads.
+
+**What did not help** (all measured, all still correct): removing the fake-CCM
+debug logging (Python stubs are cold, <0.1× effect); `SetGlobalSerialExecution`
+(parallel CPU execution is the faster default); raising `PerformanceInMips`
+(already effectively saturated). Lowering MIPS or coarsening the *boot* quantum
+breaks pairing outright.
 
 **Relationship to `west zmk-ble-test`.** That command runs BabbleSim
 (`nrf52_bsim`) BLE tests — protocol-accurate POSIX binaries, fast, driving a
@@ -369,8 +420,9 @@ the encrypted-link Studio read reaches the DUT. They are complementary.
 **Current limitations (BLE mode).** Only LE SC **Just Works** is exercised;
 identity addresses come from the FICR model (static-random,
 `device_addr_for_machine(n)`); the radio's 31-byte payload cap forces the
-host-side DLE cap above. Test-time reduction (the ~6–7 min wall cost) is a
-planned follow-up.
+host-side DLE cap above. Steady-state test-time is addressed by
+`--ble-steady-quantum` (see **BLE-mode performance**); the pairing phase's 10 µs
+quantum is a hard floor for the current soft link-layer.
 
 #### Requirements
 
