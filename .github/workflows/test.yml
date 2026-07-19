@@ -102,6 +102,14 @@ jobs:
         with:
           elf-path: build/ble/zephyr/zmk.elf
           host-elf: build/ble-host/zephyr/zephyr.elf
+      - name: Renode usb-mode smoke test (same real image as ble mode)
+        # usb mode runs the EXACT artifact the ble smoke just ran -- no extra
+        # firmware build -- and asserts a Studio GetDeviceInfo round trip over
+        # the emulated USB CDC (NRF_USBD_Full + DualCdcAcmBridge).
+        uses: ./.github/actions/zmk-renode-test
+        with:
+          mode: usb
+          elf-path: build/ble/zephyr/zmk.elf
       - name: Renode uart-mode smoke test
         uses: ./.github/actions/zmk-renode-test
         with:
