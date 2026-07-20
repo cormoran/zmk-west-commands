@@ -6,9 +6,8 @@ The test has two independent axes (see docs/design/renode-transport-orthogonal.m
 `--split-link {none,wired,ble}` (how the central reaches the peripheral).
 `--mode` is retained as a backward-compatible preset expanding to a
 (host-link, split-link) pair; the two vocabularies are mutually exclusive. The
-combination the presets cannot express is `--host-link usb --split-link wired`:
-a wired split whose central STILL speaks Studio (over USB, which frees both
-UARTEs). The four presets:
+one supported combination without a preset is `--host-link none --split-link
+wired` (a Studio-less wired split). The four presets:
 
   * **ble** (default) -- the DUT is the exact `studio-rpc-usb-uart` *hardware*
     image, with no extra module config; platform stubs make it boot. With
@@ -20,12 +19,14 @@ UARTEs). The four presets:
     enumerate the image's real USB composite. Smoke = a core Studio
     GetDeviceInfo round trip over the USB CDC (plus the boot banner when the
     image also enables the board console CDC via CONFIG_ZMK_USB_LOGGING).
-  * **split** -- a WIRED split pair: `--elf` is the central half and
-    `--peripheral-elf` the peripheral half, booted as two machines whose split
-    links (uart1) are cross-connected via a Renode UART hub. Smoke = BOTH halves
-    reach the boot banner AND a keypress injected on the peripheral is relayed
-    over the wired link and processed by the central. No Studio RPC (the two
-    nRF52840 UARTEs are consumed by console + split link).
+  * **wired-split** -- a WIRED split pair whose central STILL speaks Studio:
+    `--elf` is the central half and `--peripheral-elf` the peripheral half,
+    booted as two machines whose split links (uart1) are cross-connected via a
+    Renode UART hub. Studio RPC rides the emulated USB CDC (free because the
+    wired split only consumes the two nRF52840 UARTEs: console uart0 + split
+    uart1). Smoke = a Studio GetDeviceInfo round trip over the central's USB CDC
+    AND a keypress injected on the peripheral relayed over the wired link and
+    processed by the central.
   * **ble-split** -- a WIRELESS split: three real images on one BLE medium.
     `--elf` is the split CENTRAL half (Studio), `--peripheral-elf` the split
     PERIPHERAL half, `--host-elf` the host. Smoke = the encrypted split link
@@ -65,10 +66,10 @@ class ZMKRenodeTest(WestCommand):
                 "boot + Studio smoke test, then the module's own tests/renode/*_test.py "
                 "files. Four modes: --mode ble (default, the real hardware image with no "
                 "extra config, Studio over emulated BLE), --mode usb (the same real image, "
-                "Studio over the emulated USB CDC), --mode split (wired-split central + "
-                "--peripheral-elf on a Renode UART hub), and --mode ble-split (wireless "
-                "split central + --peripheral-elf + --host-elf on one BLE medium). Does "
-                "not build firmware."
+                "Studio over the emulated USB CDC), --mode wired-split (wired-split central "
+                "answering Studio over USB + --peripheral-elf on a Renode UART hub), and "
+                "--mode ble-split (wireless split central + --peripheral-elf + --host-elf on "
+                "one BLE medium). Does not build firmware."
             ),
         )
 
@@ -93,7 +94,7 @@ class ZMKRenodeTest(WestCommand):
         )
         parser.add_argument(
             "--mode",
-            choices=("usb", "ble", "split", "ble-split"),
+            choices=("usb", "ble", "wired-split", "ble-split"),
             default=None,
             help=(
                 "Backward-compatible preset expanding to a (host-link, split-link) pair "
@@ -102,8 +103,9 @@ class ZMKRenodeTest(WestCommand):
                 "without it a boot-liveness check. usb: the SAME real image, Studio RPC "
                 "over the emulated USB CDC. ble-split: a WIRELESS split -- --elf is the "
                 "split CENTRAL, --peripheral-elf the split PERIPHERAL, --host-elf the "
-                "host. split: wired-split central (--elf) + --peripheral-elf on a Renode "
-                "UART hub. Mutually exclusive with --host-link/--split-link. See "
+                "host. wired-split: wired-split central (--elf) answering Studio over USB + "
+                "--peripheral-elf on a Renode UART hub. Mutually exclusive with "
+                "--host-link/--split-link. See "
                 "docs/design/renode-transport-orthogonal.md and docs/renode-testing.md."
             ),
         )
@@ -114,9 +116,9 @@ class ZMKRenodeTest(WestCommand):
             help=(
                 "How the central answers Studio RPC: usb (emulated USB CDC), ble "
                 "(emulated BLE GATT), none (boot-liveness only). Mutually exclusive with "
-                "--mode; pair with --split-link. The headline new combination is "
-                "--host-link usb --split-link wired (a wired split whose central still "
-                "speaks Studio). See docs/design/renode-transport-orthogonal.md."
+                "--mode; pair with --split-link. --host-link usb --split-link wired (a "
+                "wired split whose central still speaks Studio) is also the wired-split "
+                "preset. See docs/design/renode-transport-orthogonal.md."
             ),
         )
         parser.add_argument(
@@ -131,8 +133,8 @@ class ZMKRenodeTest(WestCommand):
         parser.add_argument(
             "--peripheral-elf",
             help=(
-                "split / ble-split mode: the split PERIPHERAL half's firmware ELF (--elf is "
-                "the CENTRAL half). Required for both split modes."
+                "wired-split / ble-split mode: the split PERIPHERAL half's firmware ELF "
+                "(--elf is the CENTRAL half). Required for both split modes."
             ),
         )
         parser.add_argument(
@@ -148,7 +150,7 @@ class ZMKRenodeTest(WestCommand):
             "--boot-timeout",
             type=float,
             default=20.0,
-            help="split/usb mode: seconds to wait for the ZMK boot banner (default: 20).",
+            help="wired-split/usb mode: seconds to wait for the ZMK boot banner (default: 20).",
         )
         parser.add_argument(
             "--skip-smoke",
@@ -452,7 +454,7 @@ class ZMKRenodeTest(WestCommand):
     ) -> None:
         import renode_smoke  # noqa: E402
 
-        log.inf("[*] Running wired-split Renode smoke test (central + peripheral)")
+        log.inf("[*] Running Studio-less wired-split Renode smoke test (central + peripheral)")
         try:
             renode_smoke.run_split_smoke(
                 central_elf=central_elf,

@@ -17,15 +17,17 @@ import renode_harness directly for anything more specific (their own custom
 RPC subsystem, etc.).
 
 Four modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
-split / ble-split mode). ble mode boots a real hardware image and (with
+wired-split / ble-split mode). ble mode boots a real hardware image and (with
 `--host-elf`) drives an encrypted Studio-over-BLE read, or without a host a
 boot-liveness check. usb mode boots the SAME real hardware image on the
 NRF_USBD_Full usb platform and drives a Studio GetDeviceInfo round trip over the
-emulated USB CDC (plus the boot banner when the image has a console CDC). split
-mode boots a wired-split central (`--elf`) + peripheral (`--peripheral-elf`) on a
-Renode UART hub and checks both boot banners + a peripheral keypress relayed to
-the central. ble-split boots three images on one BLE medium (split central +
-peripheral + host). See docs/renode-testing.md and docs/design/renode-internals.md.
+emulated USB CDC (plus the boot banner when the image has a console CDC).
+wired-split mode boots a wired-split central (`--elf`) + peripheral
+(`--peripheral-elf`) on a Renode UART hub and asserts BOTH a Studio GetDeviceInfo
+round trip over the central's USB CDC AND a peripheral keypress relayed over the
+wired link to the central. ble-split boots three images on one BLE medium (split
+central + peripheral + host). See docs/renode-testing.md and
+docs/design/renode-internals.md.
 
 Usage:
     # ble mode (default -- real image + host app):
@@ -36,8 +38,8 @@ Usage:
     python renode_smoke.py --mode usb --elf /path/to/zmk.elf \\
         --west-topdir /path/to/module
 
-    # split mode (wired split -- central + peripheral):
-    python renode_smoke.py --mode split --elf /path/to/central.elf \\
+    # wired-split mode (wired split; central Studio over USB CDC):
+    python renode_smoke.py --mode wired-split --elf /path/to/central.elf \\
         --peripheral-elf /path/to/peripheral.elf
 
 Exits non-zero (with a message on stderr) on any failure.
@@ -75,28 +77,32 @@ HOST_LINKS = ("usb", "ble", "none")
 SPLIT_LINKS = ("none", "wired", "ble")
 
 # The four backward-compatible presets, each a (host-link, split-link) pair.
+# wired-split is a WIRED split whose central STILL answers Studio RPC -- over
+# the emulated USB CDC, which is free because the wired split link only consumes
+# the two nRF52840 UARTEs (console uart0 + split uart1), leaving USB for Studio.
 MODE_PRESETS: dict[str, tuple[str, str]] = {
     "ble": ("ble", "none"),
     "usb": ("usb", "none"),
-    "split": ("none", "wired"),
+    "wired-split": ("usb", "wired"),
     "ble-split": ("ble", "ble"),
 }
 
 # (host-link, split-link) cells the harness knows how to run. The four presets
-# plus the orthogonal combination reachable only via the axis flags. Cells not
-# listed here are rejected with an explanatory error (see resolve_links).
+# plus the Studio-less wired split reachable only via the axis flags
+# (--host-link none --split-link wired). Cells not listed here are rejected with
+# an explanatory error (see resolve_links).
 SUPPORTED_LINKS: set[tuple[str, str]] = {
     ("ble", "none"),
     ("usb", "none"),
-    ("none", "wired"),
+    ("usb", "wired"),  # the wired-split preset: wired split + Studio over USB
     ("ble", "ble"),
-    ("usb", "wired"),  # the headline new combination
+    ("none", "wired"),  # Studio-less wired split (axis-flags only, no preset)
 }
 
 
 def canonical_mode(host_link: str, split_link: str) -> str:
     """The preset name for a (host, split) pair, or the canonical
-    "<host>+<split>" string when the pair is not one of the five presets. Used
+    "<host>+<split>" string when the pair is not one of the four presets. Used
     for the backward-compatible ZMK_RENODE_MODE env var / logging."""
     for name, pair in MODE_PRESETS.items():
         if pair == (host_link, split_link):
@@ -1386,7 +1392,7 @@ def main(argv: list[str] | None = None) -> int:
         "--elf",
         required=True,
         type=Path,
-        help="DUT firmware ELF (all modes; the CENTRAL half in split mode).",
+        help="DUT firmware ELF (all modes; the CENTRAL half in wired-split mode).",
     )
     ap.add_argument(
         "--mode",
@@ -1397,9 +1403,10 @@ def main(argv: list[str] | None = None) -> int:
         "encrypted Studio-over-BLE read (S4/S5), without it a boot-liveness check. usb: "
         "the SAME real image, Studio GetDeviceInfo over the emulated USB CDC. ble-split: "
         "a wireless split -- --elf is the split CENTRAL, --peripheral-elf the split "
-        "PERIPHERAL, --host-elf the host. split: wired-split central (--elf) + "
-        "--peripheral-elf on a Renode UART hub; both boot banners + a peripheral keypress "
-        "relayed to the central. Mutually exclusive with --host-link/--split-link.",
+        "PERIPHERAL, --host-elf the host. wired-split: wired-split central (--elf) + "
+        "--peripheral-elf on a Renode UART hub; a Studio GetDeviceInfo round trip over "
+        "the central's USB CDC + a peripheral keypress relayed over the wired link to the "
+        "central. Mutually exclusive with --host-link/--split-link.",
     )
     ap.add_argument(
         "--host-link",
@@ -1426,8 +1433,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--peripheral-elf",
         type=Path,
-        help="split / ble-split mode: the split PERIPHERAL half's firmware ELF (--elf is "
-        "the CENTRAL half).",
+        help="wired-split / ble-split mode: the split PERIPHERAL half's firmware ELF (--elf "
+        "is the CENTRAL half).",
     )
     ap.add_argument(
         "--studio-proto-dir",

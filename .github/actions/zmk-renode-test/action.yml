@@ -31,9 +31,11 @@ inputs:
       check), `usb` (the SAME real hardware image, but Studio RPC over the
       emulated USB CDC; smoke = a core Studio GetDeviceInfo round trip, plus
       the boot banner when the image also enables the board console CDC),
-      `split` (wired
-      split -- `elf-path` is the central half, `peripheral-elf` the peripheral;
-      smoke = both boot banners + a peripheral keypress relayed to the central),
+      `wired-split` (a WIRED split whose central STILL speaks Studio -- over the
+      emulated USB CDC, free because the wired split link only uses the two
+      UARTEs; `elf-path` is the central half, `peripheral-elf` the peripheral;
+      smoke = a Studio GetDeviceInfo round trip over the central's USB CDC + a
+      peripheral keypress relayed over the wired link to the central),
       or `ble-split` (a WIRELESS split -- `elf-path` is the split CENTRAL,
       `peripheral-elf` the split PERIPHERAL, `host-elf` the host; asserts the
       encrypted split link comes up then the host reads Studio through the
@@ -63,7 +65,7 @@ inputs:
     description: >-
       split / ble-split mode: path to the built split PERIPHERAL half's firmware
       ELF (relative paths resolve against $GITHUB_WORKSPACE; `elf-path` is the
-      CENTRAL half). Required when mode is `split` or `ble-split`.
+      CENTRAL half). Required when mode is `wired-split` or `ble-split`.
     required: false
     default: ""
   host-elf:

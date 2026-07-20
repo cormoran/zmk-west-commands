@@ -17,7 +17,7 @@ module-specific test. A module's own `tests/renode/*_test.py` run afterwards and
 ## Command reference
 
 ```
-usage: west zmk-renode-test [-h] --elf ELF [--mode {usb,ble,split,ble-split}]
+usage: west zmk-renode-test [-h] --elf ELF [--mode {usb,ble,wired-split,ble-split}]
                             [--peripheral-elf PERIPHERAL_ELF] [--host-elf HOST_ELF]
                             [--boot-timeout BOOT_TIMEOUT] [--skip-smoke]
                             [--rtt] [--min-virtual MIN_VIRTUAL]
@@ -31,11 +31,11 @@ Common:
 
 | Flag | Applies to | Meaning |
 |---|---|---|
-| `--elf` (required) | all | the DUT firmware ELF (built by the caller); the split **central** half in `split` / `ble-split`. |
-| `--mode {usb,ble,split,ble-split}` | — | `ble` (default), `usb` (real image, Studio over the emulated USB CDC), `split` (wired split), or `ble-split` (wireless split). |
-| `--peripheral-elf` | split, ble-split | the split **peripheral** half's firmware ELF (`--elf` is the central). Required for `--mode split` / `ble-split`. |
+| `--elf` (required) | all | the DUT firmware ELF (built by the caller); the split **central** half in `wired-split` / `ble-split`. |
+| `--mode {usb,ble,wired-split,ble-split}` | — | `ble` (default), `usb` (real image, Studio over the emulated USB CDC), `wired-split` (wired split whose central answers Studio over USB), or `ble-split` (wireless split). |
+| `--peripheral-elf` | wired-split, ble-split | the split **peripheral** half's firmware ELF (`--elf` is the central). Required for `--mode wired-split` / `ble-split`. |
 | `--host-elf` | ble, ble-split | the `renode-ble-host` app ELF. ble: given → full S4/S5 smoke, omitted → boot-liveness. **Required** for `ble-split`. |
-| `--boot-timeout` | split, usb | seconds to wait for the boot banner (default 20). |
+| `--boot-timeout` | wired-split, usb | seconds to wait for the boot banner (default 20). |
 | `--skip-smoke` | all | skip the smoke test; run only `tests_dir`. |
 
 Advanced (rarely needed):
@@ -133,51 +133,69 @@ sharing the machine.
 $ west zmk-renode-test tests/renode --mode usb --elf build/<artifact>/zephyr/zmk.elf
 ```
 
-## split mode: what it proves
+## wired-split mode: what it proves
 
 ```mermaid
 graph LR
     key(["injected keypress"])
     periph["peripheral half<br/>(renode_wired_split)"]
-    central["central half<br/>(renode_wired_split)"]
+    central["central half<br/>(renode_usb_wired_split)"]
     log(["central logs<br/>position: 0"])
+    host(["Studio host<br/>(USB CDC)"])
     key --> periph
     periph -- "wired split link<br/>(uart1 ↔ uart1)" --> central
     central --> log
+    host <-- "Studio GetDeviceInfo<br/>(emulated USB CDC)" --> central
 ```
 
-split mode boots a **wired split pair** — a central (`--elf`) and a peripheral
-(`--peripheral-elf`) — as two Renode machines whose split-link UARTs (`uart1`)
-are cross-connected through a Renode UART hub (`platforms/split_wired.resc`, via
-`renode_harness.boot_split_wired`). The two boards talk over ZMK's
-`zmk,wired-split` transport (`CONFIG_ZMK_SPLIT_WIRED`); each half's console is on
-its own `uart0` socket.
+wired-split mode boots a **wired split pair** — a central (`--elf`) and a
+peripheral (`--peripheral-elf`) — as two Renode machines whose split-link UARTs
+(`uart1`) are cross-connected through a Renode UART hub
+(`platforms/usb_wired_split.resc`, via `renode_harness.boot_usb_wired_split`).
+The two boards talk over ZMK's `zmk,wired-split` transport
+(`CONFIG_ZMK_SPLIT_WIRED`); each half's console is on its own `uart0` socket. The
+central additionally enumerates its USB composite (NRF_USBD_Full +
+DualCdcAcmBridge) so Studio RPC rides the emulated **USB CDC**.
 
-**What it proves:** both halves boot to the ZMK banner, **and** the wired split
-link is up — a synthetic keypress injected on the peripheral (`gpio0` pin 2,
-the first `kscan-gpio-direct` input) is relayed over the split UART and processed
-by the central, which logs the relayed key `position: 0` (ZMK's default DBG log
-level). The smoke waits for both banners, then settles ~3 s before injecting
-(there is **no** cross-machine execution-order guarantee at `t=0`, so an event
-fired too early races the central's UART RX-enable and is silently dropped — the
-historical wired-split boot-order gotcha).
+**What it proves — both halves at once:**
 
-**Why no Studio RPC:** the nRF52840 has only two UARTEs (`uart0` console +
-`uart1` split link), so there is no third UART for a Studio RPC transport. The
-correct, valuable smoke for a wired split is therefore the split pairing/relay,
-not a Studio round trip.
+1. **Studio over USB** — a Studio `GetDeviceInfo` round trip completes over the
+   central's USB CDC, exactly as in `usb` mode but on the split central.
+2. **Wired relay** — a synthetic keypress injected on the peripheral (`gpio0`
+   pin 2, the first `kscan-gpio-direct` input) is relayed over the split UART and
+   processed by the central, which logs the relayed key `position: 0` (ZMK's
+   default DBG log level).
 
-Build both halves from this repo's one `renode_wired_split` shield (console on
-`uart0`, wired split on `uart1`, no BLE/USB), differing only by
-`CONFIG_ZMK_SPLIT_ROLE_CENTRAL` — see
-[`tests/zmk-config/build-split.yaml`](../tests/zmk-config/build-split.yaml):
+The smoke waits for both banners, then settles ~3 s before injecting (there is
+**no** cross-machine execution-order guarantee at `t=0`, so an event fired too
+early races the central's UART RX-enable and is silently dropped — the historical
+wired-split boot-order gotcha).
+
+**Why USB for Studio:** the nRF52840 has only two UARTEs, both consumed here
+(`uart0` console + `uart1` split link), so there is no third UART for a Studio
+transport — but the wired split frees the **USB** peripheral, which the central
+uses for Studio instead. This is the one combination the older fixed presets
+could not express; it is now the `wired-split` preset (`--host-link usb
+--split-link wired`).
+
+The central builds from this repo's `renode_usb_wired_split` shield (console on
+`uart0`, wired split on `uart1`, USB Studio on; `studio-rpc-usb-uart` snippet);
+the peripheral is the plain `renode_wired_split` half — see
+[`tests/zmk-config/build-usb-split.yaml`](../tests/zmk-config/build-usb-split.yaml):
 
 ```bash
-$ west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-split.yaml -af split -d build
-$ west zmk-renode-test --mode split \
-      --elf build/split-central/zephyr/zmk.elf \
-      --peripheral-elf build/split-peripheral/zephyr/zmk.elf
+$ west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired -d build
+$ west zmk-renode-test --mode wired-split \
+      --elf build/usb-wired-central/zephyr/zmk.elf \
+      --peripheral-elf build/usb-wired-peripheral/zephyr/zmk.elf
 ```
+
+> **Studio-less wired split.** For a plain wired pair with no Studio at all
+> (both UARTEs on console + split link), use the axis flags `--host-link none
+> --split-link wired` with
+> [`build-split.yaml`](../tests/zmk-config/build-split.yaml) (the
+> `renode_wired_split` shield for both halves). That path asserts only the wired
+> relay, not a Studio round trip.
 
 ## ble-split mode: what it proves
 
