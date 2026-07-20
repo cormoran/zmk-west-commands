@@ -123,7 +123,7 @@ usage: west zmk-test [-h] [-d BUILD_DIR] [-m [EXTRA_MODULES ...]] [-v] [test_pat
 Run the ZMK test suite with zmk's run-test.sh script.
 
 positional arguments:
-  test_path             Specify the (parent) test directory to run. The command finds tests recursively by searching `native_posix_64.keymap`. Current directory by default.
+  test_path             Specify the (parent) test directory to run. The command finds tests recursively by searching `native_sim.keymap`. Current directory by default.
 
 options:
   -h, --help            show this help message and exit
@@ -141,7 +141,7 @@ emulator, run a boot + Studio smoke test, then (optionally) the module's own
 `tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
 This command never builds firmware; the caller builds the ELF.
 
-There are **five modes** (`--mode`, default `ble`). `--elf` is the DUT (the
+There are **four modes** (`--mode`, default `ble`). `--elf` is the DUT (the
 central half in `split` / `ble-split`):
 
 | Mode | DUT you build | What the smoke proves | Runtime |
@@ -149,16 +149,13 @@ central half in `split` / `ble-split`):
 | **`ble`** (default) | the exact `studio-rpc-usb-uart` **hardware** image you would flash — **no extra config** | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
 | **`usb`** | the **same** real hardware image as ble mode (one build serves both) | The image enumerates over emulated USB and answers a core Studio `GetDeviceInfo` over its **real USB CDC** transport (+ boot banner when the image also has a console CDC) | ~45 s |
 | **`ble-split`** | both halves of a wireless split: `--elf` = split CENTRAL (Studio), `--peripheral-elf` = split PERIPHERAL, `--host-elf` = host | The encrypted split link comes up (peripheral↔central L2) **then** the host does an encrypted Studio read **through** the central (peripheral → central → host) | ~3–6 min |
-| **`uart`** | ELF built with this repo's `renode-studio-uart` snippet | Boots (ZMK banner) and answers a core Studio `GetDeviceInfo` over an emulated UART | ~15 s |
 | **`split`** | a **wired-split** pair: `--elf` central + `--peripheral-elf` peripheral (this repo's `renode_wired_split` shield) | BOTH halves boot (ZMK banner) **and** a keypress injected on the peripheral is relayed over the wired split UART and processed by the central | ~20 s |
 
 ble is the default because it boots the **exact image you flash** — a module
 needs no Renode-specific build artifact. usb mode runs that **same** image but
 drives Studio RPC bidirectionally over the emulated USB CDC — real image *and*
 a fast direct RPC round trip (no BLE pairing / time-sync-quantum cost), making
-it the natural choice for module RPC tests against the real artifact. uart mode
-is the legacy direct-UART path; it needs an extra `renode-studio-uart` snippet
-build (see below).
+it the natural choice for module RPC tests against the real artifact.
 
 Renode is downloaded automatically on first use (a portable tarball, cached
 under `$RENODE_ROOT`, default `~/.renode`). Each `tests_dir/*_test.py` file is
@@ -175,7 +172,7 @@ module-specific to build. Build the [`renode-ble-host`](renode-ble-host/) app
 (the simulated computer) once, then run the two-machine BLE smoke:
 
 ```bash
-# build the exact hardware image (no renode-studio-uart snippet):
+# build the exact hardware image:
 $ west zmk-build <your-zmk-config> -af <your studio-rpc-usb-uart artifact>
 # build the host app once (match its target-name prefix to your DUT's
 # advertised CONFIG_ZMK_KEYBOARD_NAME; default prefix is "Module"):
@@ -222,7 +219,7 @@ Studio CDC. A standard `studio-rpc-usb-uart` image has one CDC function
 console CDC enumerates first and the smoke additionally asserts the Zephyr boot
 banner on it (auto-detected from the image's real USB descriptors — no flag
 needed). Single machine, no BLE time-sync quantum: real-image coverage at
-near-uart-mode speed.
+high speed.
 
 #### ble-split mode
 
@@ -263,41 +260,6 @@ for a worked example (central = `renode_split_left`, peripheral =
 > longer on a shared CI runner). Same fake-CCM disclaimer as ble mode — plus
 > the split link is itself encrypted, so it uses the fake CCM too.
 
-#### uart mode
-
-The DUT is built with the `renode-studio-uart` snippet this repo ships as a
-Zephyr module: the snippet re-binds Studio RPC + the console to real UART
-peripherals Renode can drive directly, dodging USB entirely. This predates usb
-mode (which now drives Studio over the emulated USB CDC of the unmodified
-image); it remains the zero-USB fallback, and a **candidate for deprecation**
-once usb mode has proven out across consumer repos. Add a `build.yaml`
-artifact:
-
-```yaml
-include:
-  - artifact: renode
-    board: xiao_ble//zmk           # an nRF52840 board (the checked-in .repl)
-    shield: renode_tester
-    cmake-args: -DCONFIG_ZMK_STUDIO=y   # for the core Studio RPC smoke check
-    snippets:
-      - renode-studio-uart
-```
-
-```bash
-$ west zmk-build <your-zmk-config> -af renode
-# smoke + the module's own custom-RPC tests:
-$ west zmk-renode-test tests/renode --mode uart --elf build/renode/zephyr/zmk.elf
-# boot-banner only, for a module that does not enable Studio RPC:
-$ west zmk-renode-test --mode uart --elf build/renode/zephyr/zmk.elf --no-rpc
-```
-
-> `CONFIG_ZMK_STUDIO=y` build-asserts on a `zmk,physical-layout` (with
-> `key_physical_attrs`) **and** the absence of a chosen `zmk,matrix-transform`.
-> Give your shield/board a keys'd physical layout that references the transform
-> directly — see the in-repo example
-> `tests/zmk-config/boards/shields/renode_tester/renode_tester.overlay`, and
-> [docs/renode-testing.md](docs/renode-testing.md) for the newer-ZMK board note.
-
 #### split mode (wired)
 
 The DUT is a **wired split pair**: two ZMK images — a central and a peripheral —
@@ -334,12 +296,10 @@ $ west zmk-renode-test --mode split \
 
 #### Requirements
 
-The uart / usb mode Studio RPC check compiles the workspace's
+The usb mode Studio RPC check compiles the workspace's
 `zmk-studio-messages` protos, so it needs the python `protobuf` runtime and the
 `protoc` compiler: `pip install -r requirements-test.txt` (`protoc` is a system
-package, e.g. `apt-get install protobuf-compiler`). In uart mode, pass
-`--no-rpc` to check only the boot banner (usb mode always asserts the RPC —
-that is its point).
+package, e.g. `apt-get install protobuf-compiler`).
 
 #### GitHub Action
 
@@ -355,7 +315,6 @@ manifest:
     elf-path: build/ble/zephyr/zmk.elf
     host-elf: build/zephyr/zephyr.elf   # optional; ble full S4/S5 (else liveness)
     # mode: usb                          # same elf-path image, Studio over USB CDC
-    # mode: uart                         # opt in to the snippet-built UART DUT
     tests: tests/renode                  # optional
 ```
 

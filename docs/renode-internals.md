@@ -16,9 +16,7 @@ means the emulator has to stand in for the peripherals that image expects (this
 page). **usb mode** boots that same artifact but swaps the USBD stub for a real
 USB device model so Studio RPC runs over the image's USB CDC (see the
 [usb-mode section](#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)
-below). The alternative **uart mode** sidesteps all of this: it boots an ELF
-built with the `renode-studio-uart` snippet, which re-binds Studio RPC + the
-console to real UART peripherals Renode drives directly.
+below).
 
 ## Why a real image needs platform help
 

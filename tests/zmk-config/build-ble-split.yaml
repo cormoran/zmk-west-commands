@@ -18,7 +18,7 @@
 #
 # Both halves cap CONFIG_BT_CTLR_DATA_LENGTH_MAX=27 (in the shield .conf files)
 # so every encrypted on-air PDU fits Renode's 31-byte radio cap. Targets ZMK's
-# HWv2 `xiao_ble//zmk` board (only on newer ZMK; see scripts/west-test-renode.yml).
+# HWv2 `xiao_ble//zmk` board (only on newer ZMK; see scripts/west-test.yml).
 include:
   - artifact: ble-split-central
     board: xiao_ble//zmk

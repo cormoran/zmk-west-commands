@@ -12,16 +12,16 @@ BLE fine-quantum.
 
 ## Motivation
 
-`--mode {uart,ble,usb,split,ble-split}` couples two decisions that are actually
+`--mode {ble,usb,split,ble-split}` couples two decisions that are actually
 independent:
 
 * **host-link** -- the path the central uses to answer Studio RPC to a computer:
-  emulated **USB** CDC, emulated **BLE** GATT, an emulated **UART** (the
-  `renode-studio-uart` snippet), or **none** (boot-liveness only, no RPC).
+  emulated **USB** CDC, emulated **BLE** GATT, or **none** (boot-liveness only,
+  no RPC).
 * **split-link** -- the path between the two halves of a split keyboard:
   **none** (not a split), **wired** (UART hub), or **BLE** (radio + fake CCM).
 
-The five presets only ever expose five of the twelve `host-link x split-link`
+The four presets only ever expose four of the nine `host-link x split-link`
 cells. The cell the presets structurally *cannot* express is the valuable one:
 
 > **`usb` x `wired`.** A wired split has historically had **no** Studio RPC on the
@@ -41,7 +41,7 @@ because only one of the two links is a radio pairing.
 Two new options, on `west zmk-renode-test` and `renode_smoke.py` alike:
 
 ```
---host-link  {usb,ble,uart,none}   how the central answers Studio RPC
+--host-link  {usb,ble,none}        how the central answers Studio RPC
 --split-link {none,wired,ble}      how the central reaches the peripheral
 ```
 
@@ -49,7 +49,6 @@ Two new options, on `west zmk-renode-test` and `renode_smoke.py` alike:
 
 | `--mode`    | host-link | split-link |
 |-------------|-----------|------------|
-| `uart`      | `uart`    | `none`     |
 | `ble`       | `ble`     | `none`     |
 | `usb`       | `usb`     | `none`     |
 | `split`     | `none`    | `wired`    |
@@ -68,7 +67,7 @@ Rules:
 `--peripheral-elf` is required whenever `split-link != none`; `--host-elf` is
 meaningful whenever `host-link == ble` (the `renode-ble-host` app) and, for a
 BLE split-link, is what pairs with the central. `--host-elf` with `host-link in
-{usb,uart,none}` is an error, as today.
+{usb,none}` is an error, as today.
 
 ### The `(host-link, split-link)` support matrix
 
@@ -80,21 +79,15 @@ flags; "reserved" = a valid name the resolver rejects until a smoke is added;
 | host-link \ split-link | `none`            | `wired`                | `ble`                  |
 |------------------------|-------------------|------------------------|------------------------|
 | `none`                 | -- (nothing to do)| `split` (preset)       | reserved               |
-| `uart`                 | `uart` (preset)   | -- (no free UARTE)†    | -- †                   |
 | `usb`                  | `usb` (preset)    | **`usb`x`wired`**      | reserved               |
 | `ble`                  | `ble` (preset)    | reserved               | `ble-split` (preset)   |
 
-The set the resolver accepts is exactly the five presets plus `usb`x`wired`
+The set the resolver accepts is exactly the four presets plus `usb`x`wired`
 (`SUPPORTED_LINKS` in `renode_smoke.py`). A "reserved" cell parses but errors
 with "unsupported combination ..." — the name is claimed and the dispatch is
 ready, but no smoke/artifacts exist yet; add one by extending `SUPPORTED_LINKS`,
 the dispatch, and a `run_*_smoke`. None of the NEW/reserved cells are wired into
-CI (the default matrix is the five presets + `usb`x`wired`).
-
-† `uart` host-link needs a dedicated UARTE for the Studio transport; a `wired`
-split-link needs the *other* UARTE, and console needs one too -- three UARTEs on
-a two-UARTE part. Rejected with an explanatory error. (A `uart` host-link is
-fundamentally the "no USB, no BLE" fallback and does not compose with a split.)
+CI (the default matrix is the four presets + `usb`x`wired`).
 
 `usb`x`wired` is the one implemented NEW cell (the deliverable here).
 
@@ -107,7 +100,6 @@ The harness never builds firmware; the caller does. Each cell dictates how the
 |-------------------|-------------------------------------------------------------|----------------------------------------|----------------------|
 | `usb` (preset)    | real `studio-rpc-usb-uart` image (`build-ble.yaml`)         | --                                     | --                   |
 | `ble` (preset)    | same real image (`build-ble.yaml`)                          | --                                     | `renode-ble-host`    |
-| `uart` (preset)   | `renode-studio-uart` snippet image (`build-renode.yaml`)    | --                                     | --                   |
 | `split` (preset)  | wired central (`build-split.yaml`, USB/BLE off)             | wired peripheral (`build-split.yaml`)  | --                   |
 | `ble-split`       | split-central + studio-rpc-usb-uart (`build-ble-split.yaml`)| split-peripheral (`build-ble-split.yaml`)| `renode-ble-host`  |
 | **`usb`x`wired`** | new `renode_usb_wired_split` central (USB Studio + wired split, `build-usb-split.yaml`) | `renode_wired_split` peripheral (`build-usb-split.yaml`) | -- |
@@ -176,7 +168,7 @@ Module `tests/renode/*_test.py` files today read `ZMK_RENODE_MODE` +
 not break:
 
 * Always export the two axes:
-  * `ZMK_RENODE_HOST_LINK` = `usb` | `ble` | `uart` | `none`
+  * `ZMK_RENODE_HOST_LINK` = `usb` | `ble` | `none`
   * `ZMK_RENODE_SPLIT_LINK` = `none` | `wired` | `ble`
 * Keep exporting `ZMK_RENODE_MODE` for backward compatibility: set it to the
   preset name when the `(host,split)` pair is a preset, else to the canonical
@@ -192,13 +184,12 @@ CLI, `mode` retained; the same mutual-exclusion rule applies in the shim.
 
 ## CI
 
-Keep the matrix small -- **5 jobs**, not the twelve-cell cross product:
+Keep the matrix small -- **4 jobs**, not the nine-cell cross product:
 
 1. `ble` (default preset, the existing real-image S4/S5 job)
 2. `usb` (existing)
-3. `uart` (existing)
-4. `split` (existing wired preset)
-5. **`usb`x`wired`** (NEW) -- build the new USB-Studio wired-split central +
+3. `split` (existing wired preset)
+4. **`usb`x`wired`** (NEW) -- build the new USB-Studio wired-split central +
    reuse the existing wired peripheral, then
    `--host-link usb --split-link wired`.
 

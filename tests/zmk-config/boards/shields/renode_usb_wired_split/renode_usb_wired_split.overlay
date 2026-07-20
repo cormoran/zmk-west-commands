@@ -19,7 +19,7 @@
  *     0 == gpio0 pin 2) relays to the central as keymap position 0 (the smoke
  *     asserts the central logs "position: 0").
  *
- * Renode gotchas (as in the renode-studio-uart snippet / renode_wired_split):
+ * Renode gotchas (as in renode_wired_split):
  * the stock xiao_ble enables &qspi/&p25q16h (external NOR) whose readiness
  * events Renode does not model, so that driver busy-waits forever -- disable it.
  * Unlike renode_wired_split, DO NOT disable &usbd here (USB carries Studio); the

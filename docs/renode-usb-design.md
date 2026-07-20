@@ -41,20 +41,22 @@ amend the text below:
 
 ## Goal
 
-Replace uart mode's firmware-side deviation (the `renode-studio-uart` snippet +
-`renode-test-module`'s `ZMK_TRANSPORT_NONE` transport clone) with a mode that
-boots the **exact `studio-rpc-usb-uart` flashable image** — the same ELF ble
-mode already runs — and drives **Studio RPC over the emulated USB CDC-ACM**,
-bidirectionally, from the existing TCP harness. Zero firmware change, zero
-root/kernel-module requirements, CI-identical environment.
+usb mode boots the **exact `studio-rpc-usb-uart` flashable image** — the same
+ELF ble mode already runs — and drives **Studio RPC over the emulated USB
+CDC-ACM**, bidirectionally, from the existing TCP harness. Zero firmware change,
+zero root/kernel-module requirements, CI-identical environment. It is the
+real-image Studio-RPC path: where an earlier UART-based test mode re-bound
+Studio RPC to a UART peripheral via a firmware-side snippet, usb mode instead
+exercises the image's own USB transport with no build-time deviation. That old
+UART snippet + its transport-clone module have since been removed.
 
-Expected payoff beyond parity with uart mode:
+Payoff:
 
-- Delete the snippet + transport-clone module (the whole reason uart mode
-  needs a special build).
+- No special build: the same real flashable image ble mode runs also serves
+  usb mode.
 - Much faster than ble mode (single machine, register/DMA-driven, no 10 µs
-  BLE quantum): uart-mode-like wall clock on the *real* image. Candidate to
-  become the default mode for module RPC tests.
+  BLE quantum): fast wall clock on the *real* image, the natural choice for
+  module RPC tests.
 - Wired-split tests gain Studio RPC on the central (both UARTEs stay free for
   split link + console — previously impossible: only 2 UARTEs exist).
 - Opens the door to asserting real USB HID keystroke reports later.
@@ -211,8 +213,7 @@ ep numbers, keep the refs in an array, and route `GetData(ep)` accordingly.
   `include @.../DualCdcAcmBridge.cs`, `emulation CreateDualCdcAcmBridge`-style
   setup + two `CreateServerSocketTerminal`s.
 - `zmk_renode_test.py`: `--mode usb` — same DUT artifact as ble mode, smoke =
-  console-over-CDC assertion + `rpc_client.py` round trip (both reused from
-  uart mode).
+  console-over-CDC assertion + `rpc_client.py` round trip.
 
 ## Mode interactions (important)
 
@@ -222,8 +223,9 @@ ep numbers, keep the refs in an array, and route `GetData(ep)` accordingly.
   bridge registered; ble mode = keep today's unplugged-idle behavior (the
   forked model without a registered host behaves exactly like the stub:
   enable+pullup, then silence).
-- uart mode stays until usb mode is proven in CI across consumer repos; then
-  deprecate the snippet + `renode-test-module` (they exist only to dodge USB).
+- The old UART test mode's snippet and its transport-clone module (they existed
+  only to dodge USB) have been removed now that usb mode covers the real USB
+  transport.
 
 ## Risks
 
@@ -265,7 +267,7 @@ quantum involved).
   `rpc_client.py` `GetDeviceInfo` round trip green on the Studio-CDC socket.
 - **Phase 3 (~0.5–1d)** — Productize: `--mode usb`, env contract
   (`ZMK_RENODE_MODE=usb`), action input, docs, CI job (same DUT artifact as
-  ble). Gate: repo CI green incl. new job; uart mode untouched.
+  ble). Gate: repo CI green incl. new job.
 - **Phase 4 (optional)** — Wired-split + Studio-over-USB on the central;
   HID IN report capture for keystroke assertions; upstream the NRF_USBD fixes
   to renode-infrastructure (good-citizen PR; the fork stays regardless).

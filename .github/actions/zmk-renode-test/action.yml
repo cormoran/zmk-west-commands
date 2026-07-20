@@ -20,9 +20,8 @@ inputs:
     description: >-
       Path to the already-built DUT firmware ELF to test (relative paths are
       resolved against $GITHUB_WORKSPACE). The caller builds this -- for the
-      default ble mode the exact `studio-rpc-usb-uart` hardware image (no extra
-      config -- the same image you flash); for uart mode a `build.yaml` artifact
-      built with this repo's `renode-studio-uart` snippet.
+      default ble (and usb) mode the exact `studio-rpc-usb-uart` hardware image
+      (no extra config -- the same image you flash).
     required: true
   mode:
     description: >-
@@ -32,8 +31,7 @@ inputs:
       check), `usb` (the SAME real hardware image, but Studio RPC over the
       emulated USB CDC; smoke = a core Studio GetDeviceInfo round trip, plus
       the boot banner when the image also enables the board console CDC),
-      `uart` (snippet-built DUT, Studio over emulated UARTs, which
-      requires a `renode-studio-uart` build.yaml artifact), `split` (wired
+      `split` (wired
       split -- `elf-path` is the central half, `peripheral-elf` the peripheral;
       smoke = both boot banners + a peripheral keypress relayed to the central),
       or `ble-split` (a WIRELESS split -- `elf-path` is the split CENTRAL,
@@ -49,7 +47,7 @@ inputs:
   host-link:
     description: >-
       Orthogonal axis: how the central answers Studio RPC -- `usb`, `ble`,
-      `uart`, or `none`. Mutually exclusive with `mode`; set together with
+      or `none`. Mutually exclusive with `mode`; set together with
       `split-link`. Leave empty to use `mode`. See
       docs/renode-transport-orthogonal.md.
     required: false

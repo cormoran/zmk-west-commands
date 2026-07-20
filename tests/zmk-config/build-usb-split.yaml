@@ -5,7 +5,7 @@
 #
 # Kept in its own file (like build-split.yaml / build-ble.yaml) because it
 # targets ZMK's HWv2 `xiao_ble//zmk` board (only in newer ZMK; see
-# scripts/west-test-renode.yml). Build both halves with:
+# scripts/west-test.yml). Build both halves with:
 #   west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml \
 #       -af usb-wired -d build
 #

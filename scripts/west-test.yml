@@ -1,11 +1,21 @@
+# Default test manifest: zmkfirmware/zmk @ main.
+#
+# CI runs the build + Renode jobs as a matrix over three ZMK branches
+# (zmkfirmware/zmk#main, cormoran/zmk#main+dya, cormoran/zmk#main+custom-studio-protocol);
+# each job's Init step rewrites the `zmk` project's `remote:`/`revision:` lines
+# below to the matrix value before `west init` (see .github/workflows/test.yml).
+# Both remotes are declared here so either can be selected. Locally this file is
+# used as-is (zmkfirmware/main).
 manifest:
   remotes:
     - name: zmkfirmware
       url-base: https://github.com/zmkfirmware
+    - name: cormoran
+      url-base: https://github.com/cormoran
   projects:
     - name: zmk
       remote: zmkfirmware
-      revision: v0.3-branch
+      revision: main
       import: app/west.yml
   self:
     import: west.yml

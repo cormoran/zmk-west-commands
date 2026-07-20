@@ -1,5 +1,0 @@
-manifest:
-  self:
-    import:
-      file: scripts/west-test-renode.yml
-      path-prefix: zmk-west-commands/dependencies
