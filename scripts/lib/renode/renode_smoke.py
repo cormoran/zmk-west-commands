@@ -100,30 +100,43 @@ def _assert_get_device_info(
     rpc,
     rpc_timeout: float,
     expect_name_nonempty: bool,
+    rounds: int = 1,
 ) -> str:
     """Send a core Studio RPC GetDeviceInfo over `rpc` (a framed RpcSocket) and
-    assert a well-formed response; returns the device name."""
-    req = studio_pb2.Request()
-    req.request_id = 1
-    req.core.get_device_info = True
-    rpc.send(req.SerializeToString())
-    resp_bytes = rpc.read_frame(timeout=rpc_timeout)
-    if resp_bytes is None:
-        raise AssertionError("no Studio RPC response frame received (timeout)")
+    assert a well-formed response; returns the device name.
 
-    resp = studio_pb2.Response()
-    resp.ParseFromString(resp_bytes)
-    if resp.WhichOneof("type") != "request_response":
-        raise AssertionError(f"expected a request_response, got {resp.WhichOneof('type')!r}")
-    if resp.request_response.WhichOneof("subsystem") != "core":
-        raise AssertionError(
-            "expected core subsystem in response, got "
-            f"{resp.request_response.WhichOneof('subsystem')!r}"
-        )
-    name = resp.request_response.core.get_device_info.name
-    if expect_name_nonempty and not name:
-        raise AssertionError("GetDeviceInfoResponse.name was empty")
-    print(f"core Studio RPC GetDeviceInfo OK (name={name!r})", file=sys.stderr)
+    `rounds` > 1 repeats the request/response exchange on the same session. This
+    matters for the USB transport: a request/response is one host->device OUT
+    transfer followed by one device->host IN transfer, and a bug that only
+    delivers the *first* transfer of either direction per session (e.g. an
+    endpoint that is never re-armed) passes a single-shot check but fails the
+    second round -- so the USB smoke sends at least two."""
+    name = ""
+    for round_index in range(rounds):
+        req = studio_pb2.Request()
+        req.request_id = round_index + 1
+        req.core.get_device_info = True
+        rpc.send(req.SerializeToString())
+        resp_bytes = rpc.read_frame(timeout=rpc_timeout)
+        if resp_bytes is None:
+            raise AssertionError(
+                f"no Studio RPC response frame received (timeout) on round {round_index + 1}"
+            )
+
+        resp = studio_pb2.Response()
+        resp.ParseFromString(resp_bytes)
+        if resp.WhichOneof("type") != "request_response":
+            raise AssertionError(f"expected a request_response, got {resp.WhichOneof('type')!r}")
+        if resp.request_response.WhichOneof("subsystem") != "core":
+            raise AssertionError(
+                "expected core subsystem in response, got "
+                f"{resp.request_response.WhichOneof('subsystem')!r}"
+            )
+        name = resp.request_response.core.get_device_info.name
+        if expect_name_nonempty and not name:
+            raise AssertionError("GetDeviceInfoResponse.name was empty")
+        suffix = f" (round {round_index + 1}/{rounds})" if rounds > 1 else ""
+        print(f"core Studio RPC GetDeviceInfo OK (name={name!r}){suffix}", file=sys.stderr)
     return name
 
 
@@ -349,7 +362,12 @@ def _run_usb_attempt(
             )
             studio = cdc[0]
 
-        _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty)
+        # Two rounds: the USB path is where request #2 used to be lost (only the
+        # first device->host IN transfer per session was delivered before the
+        # bridge's read one-shot re-arm was fixed), so guard against regressing it.
+        _assert_get_device_info(
+            studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2
+        )
     finally:
         for sock in cdc:
             sock.close()

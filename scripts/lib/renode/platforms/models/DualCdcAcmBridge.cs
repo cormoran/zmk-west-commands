@@ -38,6 +38,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
@@ -221,6 +222,19 @@ namespace Antmicro.Renode.Peripherals.USB
         // Device->host pump: the CDCToUARTConverter pattern -- a one-shot read
         // callback per IN endpoint, re-armed after every delivery. Empty chunks
         // (end-of-packet markers / ZLPs) forward nothing but still re-arm.
+        //
+        // The re-arm is deferred (ReArmDeviceToHostPump) rather than issued
+        // synchronously from inside the callback: USBEndpoint.HandlePacket hands a
+        // queued device->host chunk to the armed one-shot `dataCallback` and then
+        // sets `dataCallback = null` *after* the callback returns. A re-arm done
+        // synchronously within the callback is therefore immediately clobbered by
+        // that trailing null, so only the very first delivery (armed from wiring,
+        // outside any HandlePacket) would ever fire and every device->host
+        // transfer after the first is left sitting undelivered in the endpoint
+        // buffer (observed as "only the 1st Studio reply per session reaches the
+        // host"). Deferring the re-arm so its SetDataReadCallbackOneShot runs
+        // after HandlePacket has unwound avoids the clobber; it serializes on the
+        // endpoint buffer lock and picks up any chunk queued in the meantime.
         private void StartDeviceToHostPump(IUSBDevice device, CdcAcmBridgeChannel channel)
         {
             var endpoint = device.USBCore.GetEndpoint(channel.InEndpoint, USBDirection.DeviceToHost);
@@ -235,7 +249,30 @@ namespace Antmicro.Renode.Peripherals.USB
                 {
                     channel.HandleDeviceData(value);
                 }
-                StartDeviceToHostPump(device, channel);
+                ReArmDeviceToHostPump(device, channel);
+            });
+        }
+
+        // Re-arm the device->host read one-shot from outside the current
+        // HandlePacket call stack (see StartDeviceToHostPump). A ThreadPool hop is
+        // enough: SetDataReadCallbackOneShot serializes on the endpoint's buffer
+        // lock, so the re-arm runs only after HandlePacket releases it (and its
+        // clobbering `dataCallback = null` has executed). The guest's IN transfer
+        // already completed synchronously in the model, so this host-side delay is
+        // invisible to firmware. Swallow teardown races (the device/endpoint may
+        // be gone once the emulation is stopping) to keep them off the ThreadPool.
+        private void ReArmDeviceToHostPump(IUSBDevice device, CdcAcmBridgeChannel channel)
+        {
+            ThreadPool.QueueUserWorkItem(_ =>
+            {
+                try
+                {
+                    StartDeviceToHostPump(device, channel);
+                }
+                catch(Exception e)
+                {
+                    this.Log(LogLevel.Debug, "Device->host pump re-arm aborted on CDC channel {0}: {1}", channel.Index, e.Message);
+                }
             });
         }
 
