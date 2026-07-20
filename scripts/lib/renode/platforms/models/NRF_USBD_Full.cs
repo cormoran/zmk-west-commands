@@ -93,6 +93,17 @@ namespace Antmicro.Renode.Peripherals.USB
 
         public event Action<uint> EventTriggered;
 
+        // Device->host bulk data hook. The stock Renode USBEndpoint one-shot read
+        // callback (the mechanism DualCdcAcmBridge's device->host pump used) is
+        // self-destroying: USBEndpoint.HandlePacket invokes dataCallback and then
+        // unconditionally nulls it, so a pump that re-arms the one-shot inside its
+        // own callback has that re-arm wiped after its first armed delivery and the
+        // pipeline wedges under bidirectional traffic (issue #50). When a host
+        // subscribes here, bulk IN is delivered straight to it, bypassing that
+        // broken one-shot path entirely (synchronously, on the CPU thread inside
+        // the guest's TASKS_STARTEPIN write -- no deferral / ThreadPool hop).
+        public event Action<int, byte[]> BulkInDataProduced;
+
         private void HandleSetupPacket(SetupPacket packet, byte[] additionalData, Action<byte[]> action)
         {
             this.Log(LogLevel.Noisy, "Received SetupPacket: {0}", packet);
@@ -144,7 +155,18 @@ namespace Antmicro.Renode.Peripherals.USB
             }
             else if(usbPacket.Length != 0)
             {
-                deviceToHostEndpoints[epNumber].HandlePacket(usbPacket);
+                var handler = BulkInDataProduced;
+                if(handler != null)
+                {
+                    handler(epNumber, usbPacket);
+                }
+                else
+                {
+                    // No host subscribed yet: fall back to the framework buffer so
+                    // pre-subscription output (e.g. a console CDC's boot banner) is
+                    // retained for the host to drain once it subscribes.
+                    deviceToHostEndpoints[epNumber].HandlePacket(usbPacket);
+                }
             }
             DataAcknowledged(epNumber);
         }

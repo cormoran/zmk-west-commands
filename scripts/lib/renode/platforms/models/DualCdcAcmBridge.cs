@@ -18,7 +18,9 @@
 //    endpoint numbers are hardcoded (ctor arguments exist as an escape hatch);
 //  - drives host->device data through the fork's bulk OUT path
 //    (USBEndpoint.WriteData -> DataWritten -> EPDATASTATUS/EPDATA), and
-//    device->host data through the SetDataReadCallbackOneShot re-arm loop;
+//    device->host data through the fork's NRF_USBD_Full.BulkInDataProduced hook
+//    (the stock USBEndpoint one-shot read callback self-destructs -- see
+//    DrainBufferedDeviceToHost / OnBulkInData and issue #50);
 //  - sends SET_LINE_CODING and SET_CONTROL_LINE_STATE (DTR=1) per CDC control
 //    interface for host fidelity (Zephyr's legacy cdc_acm gates TX only on
 //    `configured`, so DTR is not load-bearing -- see the design doc).
@@ -38,7 +40,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading;
 
 using Antmicro.Renode.Core;
 using Antmicro.Renode.Core.Structure;
@@ -197,12 +198,30 @@ namespace Antmicro.Renode.Peripherals.USB
 
             SendControlSequence(device, controlRequests, () =>
             {
+                // Drain anything the guest already sent (buffered via the model's
+                // HandlePacket fallback while no host was subscribed -- e.g. a
+                // console CDC boot banner), THEN subscribe to the model's direct
+                // bulk-IN hook. We deliberately do NOT use the stock USBEndpoint
+                // one-shot pump: HandlePacket nulls the read callback right after
+                // firing it, so a synchronously re-armed one-shot is wiped after
+                // its first armed delivery and the pipeline wedges (issue #50).
                 foreach(var channel in channels)
                 {
                     if(channel.IsWired)
                     {
-                        StartDeviceToHostPump(device, channel);
+                        DrainBufferedDeviceToHost(device, channel);
                     }
+                }
+                var model = device as NRF_USBD_Full;
+                if(model != null && !bulkInSubscribed)
+                {
+                    bulkInSubscribed = true;
+                    model.BulkInDataProduced += OnBulkInData;
+                }
+                else if(model == null)
+                {
+                    this.Log(LogLevel.Error,
+                        "Device is not an NRF_USBD_Full; device->host bulk delivery unavailable");
                 }
                 this.Log(LogLevel.Info, "CDC channels wired; DTR asserted");
             });
@@ -219,61 +238,61 @@ namespace Antmicro.Renode.Peripherals.USB
             device.USBCore.HandleSetupPacket(request.Key, _ => SendControlSequence(device, requests, done), request.Value);
         }
 
-        // Device->host pump: the CDCToUARTConverter pattern -- a one-shot read
-        // callback per IN endpoint, re-armed after every delivery. Empty chunks
-        // (end-of-packet markers / ZLPs) forward nothing but still re-arm.
-        //
-        // The re-arm is deferred (ReArmDeviceToHostPump) rather than issued
-        // synchronously from inside the callback: USBEndpoint.HandlePacket hands a
-        // queued device->host chunk to the armed one-shot `dataCallback` and then
-        // sets `dataCallback = null` *after* the callback returns. A re-arm done
-        // synchronously within the callback is therefore immediately clobbered by
-        // that trailing null, so only the very first delivery (armed from wiring,
-        // outside any HandlePacket) would ever fire and every device->host
-        // transfer after the first is left sitting undelivered in the endpoint
-        // buffer (observed as "only the 1st Studio reply per session reaches the
-        // host"). Deferring the re-arm so its SetDataReadCallbackOneShot runs
-        // after HandlePacket has unwound avoids the clobber; it serializes on the
-        // endpoint buffer lock and picks up any chunk queued in the meantime.
-        private void StartDeviceToHostPump(IUSBDevice device, CdcAcmBridgeChannel channel)
+        // Route the model's bulk IN (device->host) straight to the matching
+        // channel's host terminal, bypassing the stock USBEndpoint one-shot
+        // machinery (see NRF_USBD_Full.BulkInDataProduced). Runs on the CPU thread
+        // inside the guest's TASKS_STARTEPIN write -- fully synchronous and
+        // deterministic, with no ThreadPool hop / per-chunk re-arm latency.
+        private void OnBulkInData(int endpoint, byte[] data)
+        {
+            foreach(var channel in channels)
+            {
+                if(channel.IsWired && channel.InEndpoint == endpoint)
+                {
+                    foreach(var value in data)
+                    {
+                        channel.HandleDeviceData(value);
+                    }
+                    return;
+                }
+            }
+            // Unmatched IN endpoint (e.g. a HID interrupt IN in the composite):
+            // nothing on the host consumes it, so drop it.
+        }
+
+        // Deliver any device->host bytes the guest emitted BEFORE we subscribed
+        // (they sit in the model's USBEndpoint framework buffer, put there by the
+        // HandlePacket fallback). NonBlocking makes SetDataReadCallbackOneShot
+        // return an empty array immediately on an empty buffer instead of storing
+        // a callback, so the loop terminates leaving NO stale one-shot behind.
+        // Empty chunks (end-of-packet markers) also read back as empty arrays, so
+        // we only stop after a couple of consecutive empties to drain past them.
+        private void DrainBufferedDeviceToHost(IUSBDevice device, CdcAcmBridgeChannel channel)
         {
             var endpoint = device.USBCore.GetEndpoint(channel.InEndpoint, USBDirection.DeviceToHost);
             if(endpoint == null)
             {
-                this.Log(LogLevel.Error, "No DeviceToHost endpoint {0} for CDC channel {1}", channel.InEndpoint, channel.Index);
                 return;
             }
-            endpoint.SetDataReadCallbackOneShot((_, data) =>
+            endpoint.NonBlocking = true;
+            var consecutiveEmpty = 0;
+            while(consecutiveEmpty < 2)
             {
-                foreach(var value in data)
+                var got = 0;
+                endpoint.SetDataReadCallbackOneShot((_, data) =>
                 {
-                    channel.HandleDeviceData(value);
-                }
-                ReArmDeviceToHostPump(device, channel);
-            });
-        }
-
-        // Re-arm the device->host read one-shot from outside the current
-        // HandlePacket call stack (see StartDeviceToHostPump). A ThreadPool hop is
-        // enough: SetDataReadCallbackOneShot serializes on the endpoint's buffer
-        // lock, so the re-arm runs only after HandlePacket releases it (and its
-        // clobbering `dataCallback = null` has executed). The guest's IN transfer
-        // already completed synchronously in the model, so this host-side delay is
-        // invisible to firmware. Swallow teardown races (the device/endpoint may
-        // be gone once the emulation is stopping) to keep them off the ThreadPool.
-        private void ReArmDeviceToHostPump(IUSBDevice device, CdcAcmBridgeChannel channel)
-        {
-            ThreadPool.QueueUserWorkItem(_ =>
-            {
-                try
-                {
-                    StartDeviceToHostPump(device, channel);
-                }
-                catch(Exception e)
-                {
-                    this.Log(LogLevel.Debug, "Device->host pump re-arm aborted on CDC channel {0}: {1}", channel.Index, e.Message);
-                }
-            });
+                    if(data != null)
+                    {
+                        foreach(var value in data)
+                        {
+                            channel.HandleDeviceData(value);
+                            got++;
+                        }
+                    }
+                });
+                consecutiveEmpty = got > 0 ? 0 : consecutiveEmpty + 1;
+            }
+            endpoint.NonBlocking = false;
         }
 
         // Walk the real configuration descriptor and collect, in interface
@@ -368,6 +387,7 @@ namespace Antmicro.Renode.Peripherals.USB
         }
 
         private readonly CdcAcmBridgeChannel[] channels;
+        private bool bulkInSubscribed;
 
         private const int DescriptorHeaderLength = 9;
         private const ushort ConfigurationDescriptorValue = 0x0200;
