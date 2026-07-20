@@ -63,9 +63,8 @@ $ west zmk-build -a mykbd
 $ west zmk-build -af 'mykbd-*'
 ```
 
-See **[docs/zmk-build.md](docs/zmk-build.md)** for flashing (`--flash`), the
-shortcut flags (`--reset` / `--debug-print` / `--debug-jlink`), VSCode
-integration (`--vscode`), and the extended `build.yaml` `snippets` behavior.
+See **[docs/zmk-build.md](docs/zmk-build.md)** for flashing, the shortcut flags,
+VSCode integration, and the extended `build.yaml` behavior.
 
 ### west zmk-test
 
@@ -94,17 +93,15 @@ options:
   -v, --verbose         Enable verbose output for west itself and tests.
 ```
 
-See **[docs/zmk-test.md](docs/zmk-test.md)** for the test-case directory layout
-(how cases are discovered and what each file means).
+See **[docs/zmk-test.md](docs/zmk-test.md)** for the test-case directory layout.
 
 ### west zmk-renode-test
 
 Boot an **already-built** ZMK firmware ELF in the [Renode](https://renode.io/)
-emulator, run a boot + Studio smoke test, then (optionally) the module's own
-`tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
-This command never builds firmware; the caller builds the ELF.
+emulator and run a boot + Studio smoke test. No hardware needed. The caller
+builds the ELF, and this command only runs it.
 
-There are **four modes** (`--mode`, default `ble`); `--elf` is the DUT (the
+There are **four modes** (`--mode`, default `ble`). `--elf` is the DUT (the
 central half in `split` / `ble-split`):
 
 | Mode | What it proves |
@@ -120,18 +117,16 @@ $ west zmk-build <your-zmk-config> -af <your studio-rpc-usb-uart artifact>
 $ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
 ```
 
-See **[docs/renode-testing.md](docs/renode-testing.md)** for per-mode build +
-run recipes, all flags, the `ZMK_RENODE_*` module-test env contract, RTT
-observation, performance, requirements, and troubleshooting; and
-**[docs/renode-internals.md](docs/renode-internals.md)** for how a real image
-boots under emulation at all (platform stubs, fake CCM, USB model fork).
+See **[docs/renode-testing.md](docs/renode-testing.md)** for per-mode recipes,
+flags, the CI action, and troubleshooting.
+**[docs/renode-internals.md](docs/renode-internals.md)** covers how a real image
+boots under emulation.
 
 ### west zmk-ble-test
 
-Run a module's **BabbleSim (bsim) BLE tests** with no hardware: build the DUT
-from the workspace ZMK app with your module added via `ZMK_EXTRA_MODULES`, build
-any split peripherals and host ("computer") apps, launch them all under the bsim
-2G4 phy, and diff the filtered device output against a checked-in snapshot.
+Run a module's **BabbleSim (bsim) BLE tests** with no hardware. It builds the
+DUT (plus any split peripherals and host apps), runs them under the bsim 2G4
+phy, and diffs the device output against a checked-in snapshot.
 
 ```bash
 # Run every case under tests/ble, with this module added via ZMK_EXTRA_MODULES
@@ -153,15 +148,11 @@ usage: west zmk-ble-test [-h] [-m MODULE] [--auto-accept] [--sim-prefix NAME]
 ```
 
 See **[docs/zmk-ble-test.md](docs/zmk-ble-test.md)** for the test-case directory
-layout, the `siblings.txt` placeholder / device-numbering rules, determinism
-guidance, BabbleSim setup, the ZMK revision prerequisite, and the
-Studio-over-BLE host-app JSON DSL.
+layout, BabbleSim setup, and the Studio-over-BLE host-app DSL.
 
 ## GitHub Actions
 
-Thin composite actions wrap the commands above for CI. Each assumes the caller
-already ran checkout + `west init`/`west update` with `zmk-west-commands` in the
-manifest. Usage and the full input contract are documented alongside each
+Thin composite actions wrap the commands above for CI, documented alongside each
 command:
 
 - **`zmk-renode-test`** — see [docs/renode-testing.md § GitHub Action](docs/renode-testing.md#github-action)
@@ -170,5 +161,4 @@ command:
 ## Development Guide
 
 See **[docs/development.md](docs/development.md)** for how to set up a west
-workspace to develop and test `zmk-west-commands` itself (workspace layouts, the
-dev container, running the tests, linting & formatting).
+workspace to develop and test `zmk-west-commands` itself.
