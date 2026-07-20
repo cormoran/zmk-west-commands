@@ -140,6 +140,122 @@ def _assert_get_device_info(
     return name
 
 
+# devtool custom-subsystem SetStudioLockState payloads (the bytes carried in a
+# Studio custom CallRequest): cormoran.devtool.Request{set_studio_lock_state:
+# {state: STUDIO_LOCK_STATE_LOCKED / _UNLOCKED}}. Hand-encoded so the smoke does
+# not need to compile the devtool proto.
+_DEVTOOL_SET_LOCK_LOCKED = bytes.fromhex("0a020801")
+_DEVTOOL_SET_LOCK_UNLOCKED = bytes.fromhex("0a020802")
+
+
+def _drain_frames(rpc, quiet_time: float = 0.4) -> None:
+    """Read and discard Studio frames until none arrive for `quiet_time`."""
+    while rpc.read_frame(timeout=quiet_time) is not None:
+        pass
+
+
+def _assert_unlock_burst(studio_pb2, rpc, rpc_timeout: float) -> None:
+    """Exercise a genuine device->host BURST -- two device->host transfers
+    back-to-back with no host->device packet in between -- and assert both are
+    delivered. A devtool SetStudioLockState(UNLOCKED) that actually changes the
+    lock state makes the firmware emit a core lock_state_changed *notification*
+    AND the custom CallResponse, one right after the other; that is exactly the
+    case the DualCdcAcmBridge device->host read one-shot must re-arm across (the
+    2-round GetDeviceInfo check above never produces a dev->host burst, only
+    strictly alternating request/response). If the bridge dropped the second of
+    the two, the response would arrive but the notification would not (or vice
+    versa) -- so both are required here.
+
+    Gracefully skipped when the image has no `cormoran__devtool` custom subsystem
+    (run_usb_smoke is generic; not every studio-rpc-usb-uart image ships it)."""
+    # Discover the devtool subsystem index (list_custom_subsystems is unsecured).
+    req = studio_pb2.Request()
+    req.request_id = 90
+    req.custom.list_custom_subsystems.SetInParent()
+    rpc.send(req.SerializeToString())
+    resp_bytes = rpc.read_frame(timeout=rpc_timeout)
+    if resp_bytes is None:
+        raise AssertionError("no list_custom_subsystems response (timeout)")
+    resp = studio_pb2.Response()
+    resp.ParseFromString(resp_bytes)
+    if resp.WhichOneof("type") != "request_response" or resp.request_response.WhichOneof(
+        "subsystem"
+    ) != "custom":
+        raise AssertionError("unexpected list_custom_subsystems response shape")
+    devtool_index = next(
+        (
+            s.index
+            for s in resp.request_response.custom.list_custom_subsystems.subsystems
+            if "devtool" in s.identifier
+        ),
+        None,
+    )
+    if devtool_index is None:
+        print(
+            "no cormoran__devtool subsystem; skipping device->host burst assertion",
+            file=sys.stderr,
+        )
+        return
+
+    def _set_lock(request_id: int, payload: bytes) -> None:
+        r = studio_pb2.Request()
+        r.request_id = request_id
+        r.custom.call.subsystem_index = devtool_index
+        r.custom.call.payload = payload
+        rpc.send(r.SerializeToString())
+
+    # Force a known starting state (LOCKED) so the following UNLOCK is guaranteed
+    # to be a real transition -- only a state *change* raises the notification.
+    _set_lock(91, _DEVTOOL_SET_LOCK_LOCKED)
+    _drain_frames(rpc)
+
+    # The unlock: expect BOTH a core lock_state_changed notification and the
+    # custom CallResponse for this request_id, in either order.
+    unlock_id = 92
+    _set_lock(unlock_id, _DEVTOOL_SET_LOCK_UNLOCKED)
+    saw_notification = False
+    saw_response = False
+    deadline = time.monotonic() + rpc_timeout
+    while not (saw_notification and saw_response) and time.monotonic() < deadline:
+        frame = rpc.read_frame(timeout=deadline - time.monotonic())
+        if frame is None:
+            break
+        r = studio_pb2.Response()
+        try:
+            r.ParseFromString(frame)
+        except Exception:
+            continue
+        kind = r.WhichOneof("type")
+        if kind == "notification":
+            if (
+                r.notification.WhichOneof("subsystem") == "core"
+                and r.notification.core.WhichOneof("notification_type")
+                == "lock_state_changed"
+            ):
+                saw_notification = True
+        elif kind == "request_response" and r.request_response.request_id == unlock_id:
+            saw_response = True
+
+    if not saw_response and not saw_notification:
+        raise AssertionError(
+            "unlock produced no device->host frames at all (timeout)"
+        )
+    if not saw_response:
+        raise AssertionError(
+            "unlock notification arrived but its CallResponse did not -- a "
+            "device->host burst transfer was dropped"
+        )
+    if not saw_notification:
+        raise AssertionError(
+            "unlock CallResponse arrived but the lock_state_changed notification "
+            "did not -- a device->host burst transfer was dropped"
+        )
+    print(
+        "device->host burst OK (lock_state_changed notification + CallResponse delivered)",
+        file=sys.stderr,
+    )
+
+
 def run_uart_smoke(
     elf: Path,
     renode_path: str,
@@ -368,6 +484,11 @@ def _run_usb_attempt(
         _assert_get_device_info(
             studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2
         )
+        # And a genuine device->host burst (two dev->host transfers back-to-back:
+        # a lock_state_changed notification + the CallResponse), which the
+        # alternating-request/response check above never produces -- this is the
+        # case the bridge's device->host read-callback re-arm has to drain.
+        _assert_unlock_burst(studio_pb2, studio, rpc_timeout)
     finally:
         for sock in cdc:
             sock.close()
