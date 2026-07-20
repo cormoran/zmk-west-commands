@@ -49,7 +49,7 @@ inputs:
       Orthogonal axis: how the central answers Studio RPC -- `usb`, `ble`,
       or `none`. Mutually exclusive with `mode`; set together with
       `split-link`. Leave empty to use `mode`. See
-      docs/renode-transport-orthogonal.md.
+      docs/design/renode-transport-orthogonal.md.
     required: false
     default: ""
   split-link:
@@ -164,7 +164,7 @@ runs:
         # The two orthogonal axes and the `mode` preset are mutually exclusive:
         # if either axis is set, pass those and NOT --mode (whose default is
         # "ble"); otherwise fall back to the preset. See
-        # docs/renode-transport-orthogonal.md.
+        # docs/design/renode-transport-orthogonal.md.
         if [ -n "$IN_HOST_LINK" ] || [ -n "$IN_SPLIT_LINK" ]; then
           [ -n "$IN_HOST_LINK" ] && args+=(--host-link "$IN_HOST_LINK")
           [ -n "$IN_SPLIT_LINK" ] && args+=(--split-link "$IN_SPLIT_LINK")

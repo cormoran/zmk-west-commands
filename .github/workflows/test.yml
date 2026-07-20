@@ -3,6 +3,12 @@ name: Test West Commands
 on:
   push:
     branches: ["**"]
+    # Documentation-only changes don't affect build/test output, so skip CI for
+    # pushes that touch nothing but Markdown / LICENSE. A push mixing docs with
+    # code still runs (paths-ignore only skips when every changed file matches).
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
 
 permissions:
   contents: read

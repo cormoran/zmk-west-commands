@@ -25,7 +25,7 @@ emulated USB CDC (plus the boot banner when the image has a console CDC). split
 mode boots a wired-split central (`--elf`) + peripheral (`--peripheral-elf`) on a
 Renode UART hub and checks both boot banners + a peripheral keypress relayed to
 the central. ble-split boots three images on one BLE medium (split central +
-peripheral + host). See docs/renode-testing.md and docs/renode-internals.md.
+peripheral + host). See docs/renode-testing.md and docs/design/renode-internals.md.
 
 Usage:
     # ble mode (default -- real image + host app):
@@ -69,7 +69,7 @@ FATAL_CONSOLE_MARKERS = ("FATAL ERROR", "Halting system")
 # Transport orthogonalization: the test's two independent axes are the
 # host-link (how the central answers Studio RPC) and the split-link (how the
 # central reaches the peripheral). `--mode` is retained as a preset that
-# expands to a (host-link, split-link) pair. See docs/renode-transport-orthogonal.md.
+# expands to a (host-link, split-link) pair. See docs/design/renode-transport-orthogonal.md.
 # ---------------------------------------------------------------------------
 HOST_LINKS = ("usb", "ble", "none")
 SPLIT_LINKS = ("none", "wired", "ble")
@@ -138,7 +138,7 @@ def resolve_links(
         supported = ", ".join(f"{h}x{s}" for h, s in sorted(SUPPORTED_LINKS))
         raise ValueError(
             f"unsupported combination host-link={host} x split-link={split}. "
-            f"Supported: {supported}. See docs/renode-transport-orthogonal.md."
+            f"Supported: {supported}. See docs/design/renode-transport-orthogonal.md."
         )
     return host, split
 
@@ -466,7 +466,7 @@ def _run_usb_attempt(
     try:
         # Let the guest finish its USB driver bring-up (ENABLE + USBPULLUP)
         # before the host attaches -- a SETUP fired before the guest's INTEN is
-        # set would be silently lost (see docs/renode-usb-design.md).
+        # set would be silently lost (see docs/design/renode-usb-design.md).
         t0 = time.monotonic()
         while time.monotonic() - t0 < boot_settle:
             renode_harness.drain_text(console._sock, timeout=0.5)
@@ -647,7 +647,7 @@ def run_usb_wired_smoke(
     max_attempts: int = 2,
 ) -> None:
     """usb+wired-split smoke (the orthogonal usb host-link x wired split-link
-    combination -- see docs/renode-transport-orthogonal.md), with the same
+    combination -- see docs/design/renode-transport-orthogonal.md), with the same
     bounded whole-emulation retry as run_usb_smoke.
 
     Boots a WIRED split pair (renode_harness.boot_usb_wired_split) whose CENTRAL
@@ -1407,7 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="How the central answers Studio RPC: usb (emulated USB CDC), ble (emulated "
         "BLE GATT), none (boot-liveness only). Mutually exclusive with --mode. See "
-        "docs/renode-transport-orthogonal.md.",
+        "docs/design/renode-transport-orthogonal.md.",
     )
     ap.add_argument(
         "--split-link",

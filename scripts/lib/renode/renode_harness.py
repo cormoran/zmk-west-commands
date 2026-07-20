@@ -402,7 +402,7 @@ def load_studio_pb2(proto_dir: Path):
 # --------------------------------------------------------------------------
 # Convenience: boot a REAL flashable image (USB CDC + QSPI + BLE) using
 # platforms/single_real.resc + xiao_nrf52840_real.repl (see
-# docs/renode-internals.md for what the platform stubs do and why).
+# docs/design/renode-internals.md for what the platform stubs do and why).
 # --------------------------------------------------------------------------
 
 
@@ -578,7 +578,7 @@ def boot_single_real(
 
 
 # The DualCdcAcmBridge USB host external (see the .cs header and
-# docs/renode-usb-design.md gap (d)), ad-hoc-compiled at attach time like the
+# docs/design/renode-usb-design.md gap (d)), ad-hoc-compiled at attach time like the
 # NRF_USBD_Full model it drives.
 DUAL_CDC_BRIDGE_CS = PLATFORMS_DIR / "models" / "DualCdcAcmBridge.cs"
 
@@ -735,7 +735,7 @@ def boot_ble_pair(
 # are cross-connected through a Renode UART hub so the emulated central and
 # peripheral talk over a virtual wire -- ZMK's `zmk,wired-split` transport, no
 # BLE. Each half's console (uart0) is exposed on its own TCP socket. See
-# docs/renode-testing.md's split-mode section and docs/renode-internals.md.
+# docs/renode-testing.md's split-mode section and docs/design/renode-internals.md.
 # --------------------------------------------------------------------------
 
 
@@ -796,7 +796,7 @@ def boot_split_wired(
 # the NRF_USBD_Full usb platform (Studio over emulated USB CDC, console on
 # uart0, wired-split link on uart1); the peripheral is the plain wired-split
 # half. Studio RPC is reached by attach_dual_cdc_bridge() after boot, exactly as
-# in usb mode. See docs/renode-transport-orthogonal.md.
+# in usb mode. See docs/design/renode-transport-orthogonal.md.
 # --------------------------------------------------------------------------
 
 
@@ -879,7 +879,7 @@ def boot_usb_wired_split(
 # Topology: split PERIPHERAL half --BLE(split)--> split CENTRAL half
 # --BLE(Studio)--> host. The central is BOTH a GAP central (to the peripheral)
 # and a GAP peripheral (to the host). See renode_smoke.run_ble_split_smoke and
-# docs/renode-internals.md for what this proves and the fake-CCM disclaimer.
+# docs/design/renode-internals.md for what this proves and the fake-CCM disclaimer.
 # --------------------------------------------------------------------------
 
 
