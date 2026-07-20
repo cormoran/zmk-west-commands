@@ -166,8 +166,22 @@ def _assert_unlock_burst(studio_pb2, rpc, rpc_timeout: float) -> None:
     the two, the response would arrive but the notification would not (or vice
     versa) -- so both are required here.
 
-    Gracefully skipped when the image has no `cormoran__devtool` custom subsystem
-    (run_usb_smoke is generic; not every studio-rpc-usb-uart image ships it)."""
+    Gracefully skipped when the studio proto has no `custom` subsystem at all
+    (an upstream zmk-studio-messages build -- the burst needs the custom-RPC
+    subsystem, a fork feature), or when the image has that subsystem but ships no
+    `cormoran__devtool` (run_usb_smoke is generic; not every studio-rpc-usb-uart
+    image ships either)."""
+    # The burst rides the custom-RPC subsystem, which only the fork's
+    # zmk-studio-messages defines. On an upstream proto studio_pb2.Request has no
+    # `custom` field, so building the request below would AttributeError -- skip
+    # cleanly instead (the 2-round GetDeviceInfo above still guards the re-arm).
+    if "custom" not in studio_pb2.Request.DESCRIPTOR.fields_by_name:
+        print(
+            "studio proto has no custom subsystem (upstream image); "
+            "skipping device->host burst assertion",
+            file=sys.stderr,
+        )
+        return
     # Discover the devtool subsystem index (list_custom_subsystems is unsecured).
     req = studio_pb2.Request()
     req.request_id = 90
@@ -178,9 +192,10 @@ def _assert_unlock_burst(studio_pb2, rpc, rpc_timeout: float) -> None:
         raise AssertionError("no list_custom_subsystems response (timeout)")
     resp = studio_pb2.Response()
     resp.ParseFromString(resp_bytes)
-    if resp.WhichOneof("type") != "request_response" or resp.request_response.WhichOneof(
-        "subsystem"
-    ) != "custom":
+    if (
+        resp.WhichOneof("type") != "request_response"
+        or resp.request_response.WhichOneof("subsystem") != "custom"
+    ):
         raise AssertionError("unexpected list_custom_subsystems response shape")
     devtool_index = next(
         (
@@ -229,17 +244,14 @@ def _assert_unlock_burst(studio_pb2, rpc, rpc_timeout: float) -> None:
         if kind == "notification":
             if (
                 r.notification.WhichOneof("subsystem") == "core"
-                and r.notification.core.WhichOneof("notification_type")
-                == "lock_state_changed"
+                and r.notification.core.WhichOneof("notification_type") == "lock_state_changed"
             ):
                 saw_notification = True
         elif kind == "request_response" and r.request_response.request_id == unlock_id:
             saw_response = True
 
     if not saw_response and not saw_notification:
-        raise AssertionError(
-            "unlock produced no device->host frames at all (timeout)"
-        )
+        raise AssertionError("unlock produced no device->host frames at all (timeout)")
     if not saw_response:
         raise AssertionError(
             "unlock notification arrived but its CallResponse did not -- a "
@@ -481,9 +493,7 @@ def _run_usb_attempt(
         # Two rounds: the USB path is where request #2 used to be lost (only the
         # first device->host IN transfer per session was delivered before the
         # bridge's read one-shot re-arm was fixed), so guard against regressing it.
-        _assert_get_device_info(
-            studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2
-        )
+        _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2)
         # And a genuine device->host burst (two dev->host transfers back-to-back:
         # a lock_state_changed notification + the CallResponse), which the
         # alternating-request/response check above never produces -- this is the
