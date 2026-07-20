@@ -378,7 +378,10 @@ class ZMKBuild(WestCommand):
                     inc["artifact"] = (
                         args.artifact if args.artifact else Path(args.config_path).parent.name
                     )
-                inc["artifact"] = inc["artifact"].replace(" ", "_")
+                # Sanitize characters that are illegal / awkward in a build-dir
+                # name. Board revision qualifiers use '/' (e.g. `xiao_ble//zmk`),
+                # which would otherwise nest the artifact under phantom subdirs.
+                inc["artifact"] = inc["artifact"].replace(" ", "_").replace("/", "_")
         if len(matrix) != len(set(map(lambda inc: inc["artifact"], matrix))):
             log.die("Duplicated artifact names found.")
 

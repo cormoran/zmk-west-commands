@@ -25,10 +25,17 @@ jobs:
 
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { zmk_remote: zmkfirmware, zmk_revision: main }
+          - { zmk_remote: cormoran, zmk_revision: main+dya }
+          - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
     timeout-minutes: 10
     container:
       image: zmkfirmware/zmk-build-arm:stable
-    name: Build
+    name: "Build [${{ matrix.zmk_revision }}]"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,12 +46,14 @@ jobs:
           cache_name: cache-west-modules
         with:
           path: dependencies/
-          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test.yml') }}
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-${{ hashFiles('scripts/west-test.yml') }}
           restore-keys: |
-            ${{ runner.os }}-build-${{ env.cache_name }}-
+            ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-
       - name: Init
         run: |
           git config --global --add safe.directory ${{ github.workspace }}
+          # CI matrix: point the zmk project at this row's branch (see scripts/west-test.yml).
+          sed -i -e "s|      remote: zmkfirmware|      remote: ${{ matrix.zmk_remote }}|" -e "s|      revision: main|      revision: ${{ matrix.zmk_revision }}|" scripts/west-test.yml
           west init -l . --mf scripts/west-test-standalone.yml
           west update --narrow
           west zephyr-export
@@ -55,10 +64,20 @@ jobs:
 
   renode:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { zmk_remote: zmkfirmware, zmk_revision: main }
+          - { zmk_remote: cormoran, zmk_revision: main+dya }
+          - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
     timeout-minutes: 45
     container:
       image: zmkfirmware/zmk-build-arm:stable
-    name: Renode
+    # Single-machine (non-split) host-link coverage: boots the one real image and
+    # runs the ble and usb Studio smokes against it. The split variants live in the
+    # renode-split / renode-usb-split / renode-ble-split jobs below.
+    name: "Renode (single: ble + usb) [${{ matrix.zmk_revision }}]"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,28 +88,23 @@ jobs:
           cache_name: cache-west-modules-renode
         with:
           path: dependencies/
-          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-${{ hashFiles('scripts/west-test.yml') }}
           restore-keys: |
-            ${{ runner.os }}-build-${{ env.cache_name }}-
+            ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-
       - name: Init
-        # Renode targets ZMK's HWv2 xiao_ble//zmk board, which is only on newer
-        # ZMK -- so this uses a `main`-pinned manifest, separate from the
-        # v0.3-branch one the build/unittest job uses (see west-test-renode.yml).
         run: |
           git config --global --add safe.directory ${{ github.workspace }}
-          west init -l . --mf scripts/west-test-renode-standalone.yml
+          # CI matrix: point the zmk project at this row's branch (see scripts/west-test.yml).
+          sed -i -e "s|      remote: zmkfirmware|      remote: ${{ matrix.zmk_remote }}|" -e "s|      revision: main|      revision: ${{ matrix.zmk_revision }}|" scripts/west-test.yml
+          west init -l . --mf scripts/west-test-standalone.yml
           west update --narrow
           west zephyr-export
       - name: Build ble-mode DUT (real studio-rpc-usb-uart image)
-        # The DUT for the DEFAULT ble mode: the exact hardware-flashable image,
-        # with NO renode-studio-uart snippet (build-ble.yaml). -d keeps the ELF
-        # under $GITHUB_WORKSPACE (the standalone manifest puts `west topdir` at
-        # the checkout's parent, so the default build dir would land outside it).
+        # The DUT for the DEFAULT ble mode: the exact hardware-flashable image
+        # (targets ZMK's HWv2 xiao_ble//zmk board). -d keeps the ELF under
+        # $GITHUB_WORKSPACE (the standalone manifest puts `west topdir` at the
+        # checkout's parent, so the default build dir would land outside it).
         run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble.yaml -af ble -d build
-      - name: Build uart-mode DUT (renode-studio-uart snippet image)
-        # Kept so uart mode stays covered too. build-renode.yaml is a separate
-        # file so the v0.3 unittests never try to build the HWv2 board.
-        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-renode.yaml -af renode -d build
       - name: Build renode-ble-host app
         # The Studio-over-BLE host (a stock nrf52840dk Zephyr app). Match its
         # target-name prefix to this repo's DUT, which the renode_tester shield
@@ -110,18 +124,20 @@ jobs:
         with:
           mode: usb
           elf-path: build/ble/zephyr/zmk.elf
-      - name: Renode uart-mode smoke test
-        uses: ./.github/actions/zmk-renode-test
-        with:
-          mode: uart
-          elf-path: build/renode/zephyr/zmk.elf
 
   renode-split:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { zmk_remote: zmkfirmware, zmk_revision: main }
+          - { zmk_remote: cormoran, zmk_revision: main+dya }
+          - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
     timeout-minutes: 45
     container:
       image: zmkfirmware/zmk-build-arm:stable
-    name: Renode (wired split)
+    name: "Renode (wired split) [${{ matrix.zmk_revision }}]"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -132,14 +148,16 @@ jobs:
           cache_name: cache-west-modules-renode-wired-split
         with:
           path: dependencies/
-          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-${{ hashFiles('scripts/west-test.yml') }}
           restore-keys: |
-            ${{ runner.os }}-build-${{ env.cache_name }}-
+            ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-
       - name: Init
-        # Same main-pinned manifest as the renode job (HWv2 xiao_ble//zmk).
+        # zmk branch = matrix row (HWv2 xiao_ble//zmk board); see the sed below.
         run: |
           git config --global --add safe.directory ${{ github.workspace }}
-          west init -l . --mf scripts/west-test-renode-standalone.yml
+          # CI matrix: point the zmk project at this row's branch (see scripts/west-test.yml).
+          sed -i -e "s|      remote: zmkfirmware|      remote: ${{ matrix.zmk_remote }}|" -e "s|      revision: main|      revision: ${{ matrix.zmk_revision }}|" scripts/west-test.yml
+          west init -l . --mf scripts/west-test-standalone.yml
           west update --narrow
           west zephyr-export
       - name: Build wired-split central + peripheral halves
@@ -157,10 +175,17 @@ jobs:
 
   renode-usb-split:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { zmk_remote: zmkfirmware, zmk_revision: main }
+          - { zmk_remote: cormoran, zmk_revision: main+dya }
+          - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
     timeout-minutes: 45
     container:
       image: zmkfirmware/zmk-build-arm:stable
-    name: Renode (usb+wired split)
+    name: "Renode (usb+wired split) [${{ matrix.zmk_revision }}]"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -171,14 +196,16 @@ jobs:
           cache_name: cache-west-modules-renode-usb-wired-split
         with:
           path: dependencies/
-          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-${{ hashFiles('scripts/west-test.yml') }}
           restore-keys: |
-            ${{ runner.os }}-build-${{ env.cache_name }}-
+            ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-
       - name: Init
-        # Same main-pinned manifest as the renode job (HWv2 xiao_ble//zmk).
+        # zmk branch = matrix row (HWv2 xiao_ble//zmk board); see the sed below.
         run: |
           git config --global --add safe.directory ${{ github.workspace }}
-          west init -l . --mf scripts/west-test-renode-standalone.yml
+          # CI matrix: point the zmk project at this row's branch (see scripts/west-test.yml).
+          sed -i -e "s|      remote: zmkfirmware|      remote: ${{ matrix.zmk_remote }}|" -e "s|      revision: main|      revision: ${{ matrix.zmk_revision }}|" scripts/west-test.yml
+          west init -l . --mf scripts/west-test-standalone.yml
           west update --narrow
           west zephyr-export
       - name: Build usb+wired split halves
@@ -206,10 +233,17 @@ jobs:
     # retries the whole emulation once (see renode_smoke.run_ble_split_smoke);
     # give a generous ceiling for two 120s-virtual attempts + the two extra
     # firmware builds on a slow shared runner.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { zmk_remote: zmkfirmware, zmk_revision: main }
+          - { zmk_remote: cormoran, zmk_revision: main+dya }
+          - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
     timeout-minutes: 90
     container:
       image: zmkfirmware/zmk-build-arm:stable
-    name: Renode BLE-split
+    name: "Renode (BLE split) [${{ matrix.zmk_revision }}]"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -220,14 +254,16 @@ jobs:
           cache_name: cache-west-modules-renode-ble-split
         with:
           path: dependencies/
-          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-${{ hashFiles('scripts/west-test.yml') }}
           restore-keys: |
-            ${{ runner.os }}-build-${{ env.cache_name }}-
+            ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-
       - name: Init
-        # Same main-pinned manifest as the renode job (HWv2 xiao_ble//zmk board).
+        # zmk branch = matrix row (HWv2 xiao_ble//zmk board); see the sed below.
         run: |
           git config --global --add safe.directory ${{ github.workspace }}
-          west init -l . --mf scripts/west-test-renode-standalone.yml
+          # CI matrix: point the zmk project at this row's branch (see scripts/west-test.yml).
+          sed -i -e "s|      remote: zmkfirmware|      remote: ${{ matrix.zmk_remote }}|" -e "s|      revision: main|      revision: ${{ matrix.zmk_revision }}|" scripts/west-test.yml
+          west init -l . --mf scripts/west-test-standalone.yml
           west update --narrow
           west zephyr-export
       - name: Build split CENTRAL half (renode_split_left; Studio + name "Renode")

@@ -58,9 +58,9 @@ class WestCommandsTests(unittest.TestCase):
         artifacts = [
             "with_logging",
             "studio",
-            "nice_nano_v2__corne_left",
-            "nice_nano_v2__corne_right",
-            "seeeduino_xiao_ble__tester_xiao",
+            "nice_nano__zmk__corne_left",
+            "nice_nano__zmk__corne_right",
+            "xiao_ble__zmk__tester_xiao",
         ]
         for artifact in artifacts:
             shutil.rmtree(BUILD_DIR / artifact, ignore_errors=True)
@@ -71,16 +71,16 @@ class WestCommandsTests(unittest.TestCase):
         expected_config_entries = {
             "with_logging": ["CONFIG_ZMK_USB_LOGGING=y"],
             "studio": ["CONFIG_ZMK_STUDIO=y", "CONFIG_USB_CDC_ACM=y"],
-            "nice_nano_v2__corne_left": [
-                "CONFIG_BOARD_NICE_NANO_V2=y",
+            "nice_nano__zmk__corne_left": [
+                "CONFIG_BOARD_NICE_NANO=y",
                 "CONFIG_SHIELD_CORNE_LEFT=y",
             ],
-            "nice_nano_v2__corne_right": [
-                "CONFIG_BOARD_NICE_NANO_V2=y",
+            "nice_nano__zmk__corne_right": [
+                "CONFIG_BOARD_NICE_NANO=y",
                 "CONFIG_SHIELD_CORNE_RIGHT=y",
             ],
-            "seeeduino_xiao_ble__tester_xiao": [
-                "CONFIG_BOARD_SEEEDUINO_XIAO_BLE=y",
+            "xiao_ble__zmk__tester_xiao": [
+                "CONFIG_BOARD_XIAO_BLE=y",
                 "CONFIG_SHIELD_TESTER_XIAO=y",
             ],
         }
@@ -93,7 +93,7 @@ class WestCommandsTests(unittest.TestCase):
                 self.assertIn(entry, config_text, f"{entry} not found in {artifact}")
 
     def test_zmk_build_no_yaml_cli_targets_no_run(self):
-        artifact_dir = BUILD_DIR / "seeeduino_xiao_ble__tester_xiao"
+        artifact_dir = BUILD_DIR / "xiao_ble__zmk__tester_xiao"
         shutil.rmtree(artifact_dir, ignore_errors=True)
 
         result = run_west(
@@ -101,7 +101,7 @@ class WestCommandsTests(unittest.TestCase):
                 "zmk-build",
                 "tests/test1",
                 "-b",
-                "seeeduino_xiao_ble",
+                "xiao_ble//zmk",
                 "-s",
                 "tester_xiao",
                 "-n",
@@ -119,7 +119,7 @@ class WestCommandsTests(unittest.TestCase):
     def test_zmk_build_with_zmk_config(self):
         result = run_west(["zmk-build", "tests/zmk-config/config", "-q"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        artifact = "seeeduino_xiao_ble__my_awesome_keyboard"
+        artifact = "xiao_ble__zmk__my_awesome_keyboard"
         config_path = BUILD_DIR / artifact / "zephyr" / ".config"
         self.assertTrue(config_path.exists(), f"{artifact} .config is missing")
         config_text = config_path.read_text()
@@ -132,7 +132,7 @@ class WestCommandsTests(unittest.TestCase):
     def test_zmk_build_parent_of_config(self):
         result = run_west(["zmk-build", "tests/zmk-config", "-q"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        artifact = "seeeduino_xiao_ble__my_awesome_keyboard"
+        artifact = "xiao_ble__zmk__my_awesome_keyboard"
         config_path = BUILD_DIR / artifact / "zephyr" / ".config"
         self.assertTrue(config_path.exists(), f"{artifact} .config is missing")
         config_text = config_path.read_text()

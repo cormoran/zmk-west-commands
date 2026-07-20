@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Generic Renode smoke test for any ZMK module's built ELF.
 
-Given a firmware ELF built with the Renode Studio-RPC-over-UART overlay +
-transport (see build_fw.py's generic mode / references/renode-notes.md),
-boot it under Renode using platforms/single.resc and assert:
+Given a real, hardware-flashable ZMK firmware ELF, boot it under Renode and
+assert:
 
-  1. The real ZMK boot banner appears on the console UART ("proves" the
-     platform description, ELF load, and CPU execution all work).
+  1. The real ZMK boot banner appears (proves the platform description, ELF
+     load, and CPU execution all work).
   2. A core Studio RPC GetDeviceInfo request round-trips a well-formed
      Response with a non-empty device name.
 
@@ -17,16 +16,16 @@ module's own tests (e.g. this template's tests/renode/test_renode.py)
 import renode_harness directly for anything more specific (their own custom
 RPC subsystem, etc.).
 
-Five modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
-split / ble-split mode). ble mode boots a real hardware image and (with `--host-elf`) drives
-an encrypted Studio-over-BLE read, or without a host a boot-liveness check. usb
-mode boots the SAME real hardware image on the NRF_USBD_Full usb platform and
-drives a Studio GetDeviceInfo round trip over the emulated USB CDC (plus the
-boot banner when the image has a console CDC). uart mode boots a snippet-built
-DUT and checks the boot banner + a core Studio GetDeviceInfo. split mode boots a
-wired-split central (`--elf`) + peripheral (`--peripheral-elf`) on a Renode UART
-hub and checks both boot banners + a peripheral keypress relayed to the central.
-See docs/renode-testing.md and docs/renode-internals.md.
+Four modes (`--mode`, default `ble`); `--elf` is the DUT (the central half in
+split / ble-split mode). ble mode boots a real hardware image and (with
+`--host-elf`) drives an encrypted Studio-over-BLE read, or without a host a
+boot-liveness check. usb mode boots the SAME real hardware image on the
+NRF_USBD_Full usb platform and drives a Studio GetDeviceInfo round trip over the
+emulated USB CDC (plus the boot banner when the image has a console CDC). split
+mode boots a wired-split central (`--elf`) + peripheral (`--peripheral-elf`) on a
+Renode UART hub and checks both boot banners + a peripheral keypress relayed to
+the central. ble-split boots three images on one BLE medium (split central +
+peripheral + host). See docs/renode-testing.md and docs/renode-internals.md.
 
 Usage:
     # ble mode (default -- real image + host app):
@@ -36,12 +35,6 @@ Usage:
     # usb mode (same real image as ble mode; Studio RPC over emulated USB CDC):
     python renode_smoke.py --mode usb --elf /path/to/zmk.elf \\
         --west-topdir /path/to/module
-
-    # uart mode:
-    python renode_smoke.py --mode uart --elf /path/to/zmk.elf \\
-        --studio-proto-dir /path/to/zmk-studio-messages/proto/zmk
-    # or let it auto-discover the proto dir under a west topdir:
-    python renode_smoke.py --mode uart --elf /path/to/zmk.elf --west-topdir /path/to/module
 
     # split mode (wired split -- central + peripheral):
     python renode_smoke.py --mode split --elf /path/to/central.elf \\
@@ -78,23 +71,21 @@ FATAL_CONSOLE_MARKERS = ("FATAL ERROR", "Halting system")
 # central reaches the peripheral). `--mode` is retained as a preset that
 # expands to a (host-link, split-link) pair. See docs/renode-transport-orthogonal.md.
 # ---------------------------------------------------------------------------
-HOST_LINKS = ("usb", "ble", "uart", "none")
+HOST_LINKS = ("usb", "ble", "none")
 SPLIT_LINKS = ("none", "wired", "ble")
 
-# The five backward-compatible presets, each a (host-link, split-link) pair.
+# The four backward-compatible presets, each a (host-link, split-link) pair.
 MODE_PRESETS: dict[str, tuple[str, str]] = {
-    "uart": ("uart", "none"),
     "ble": ("ble", "none"),
     "usb": ("usb", "none"),
     "split": ("none", "wired"),
     "ble-split": ("ble", "ble"),
 }
 
-# (host-link, split-link) cells the harness knows how to run. The five presets
-# plus the orthogonal combinations reachable only via the axis flags. Cells not
+# (host-link, split-link) cells the harness knows how to run. The four presets
+# plus the orthogonal combination reachable only via the axis flags. Cells not
 # listed here are rejected with an explanatory error (see resolve_links).
 SUPPORTED_LINKS: set[tuple[str, str]] = {
-    ("uart", "none"),
     ("ble", "none"),
     ("usb", "none"),
     ("none", "wired"),
@@ -345,45 +336,6 @@ def _assert_unlock_burst(studio_pb2, rpc, rpc_timeout: float) -> None:
         "device->host burst OK (lock_state_changed notification + CallResponse delivered)",
         file=sys.stderr,
     )
-
-
-def run_uart_smoke(
-    elf: Path,
-    renode_path: str,
-    studio_proto_dir: Path | None = None,
-    check_rpc: bool = True,
-    expect_name_nonempty: bool = True,
-    boot_timeout: float = 15.0,
-    rpc_timeout: float = 10.0,
-) -> None:
-    """uart-mode smoke: boot `elf` (built with the renode-studio-uart snippet)
-    under Renode and assert the ZMK boot banner appears; unless `check_rpc` is
-    False, also assert a core Studio RPC GetDeviceInfo round trip (which
-    requires `studio_proto_dir`)."""
-    if check_rpc:
-        if studio_proto_dir is None:
-            raise ValueError("studio_proto_dir is required unless check_rpc is False")
-        studio_pb2 = renode_harness.load_studio_pb2(studio_proto_dir)
-
-    session, console, rpc = renode_harness.boot_single(renode_path, elf)
-    try:
-        print("waiting for ZMK boot banner...", file=sys.stderr)
-        banner = renode_harness.wait_for_text(
-            console._sock, "Welcome to ZMK", timeout=boot_timeout
-        )
-        if "Welcome to ZMK" not in banner:
-            raise AssertionError(f"never saw ZMK boot banner on console UART; got:\n{banner}")
-        print("boot banner OK", file=sys.stderr)
-
-        if not check_rpc:
-            print("skipping Studio RPC check (--no-rpc)", file=sys.stderr)
-            return
-
-        _assert_get_device_info(studio_pb2, rpc, rpc_timeout, expect_name_nonempty)
-    finally:
-        rpc.close()
-        console.close()
-        session.stop()
 
 
 # usb-mode: the DualCdcAcmBridge external name; its two IUART channels are
@@ -1445,18 +1397,17 @@ def main(argv: list[str] | None = None) -> int:
         "encrypted Studio-over-BLE read (S4/S5), without it a boot-liveness check. usb: "
         "the SAME real image, Studio GetDeviceInfo over the emulated USB CDC. ble-split: "
         "a wireless split -- --elf is the split CENTRAL, --peripheral-elf the split "
-        "PERIPHERAL, --host-elf the host. uart: snippet-built DUT, Studio over emulated "
-        "UARTs. split: wired-split central (--elf) + --peripheral-elf on a Renode UART "
-        "hub; both boot banners + a peripheral keypress relayed to the central. Mutually "
-        "exclusive with --host-link/--split-link.",
+        "PERIPHERAL, --host-elf the host. split: wired-split central (--elf) + "
+        "--peripheral-elf on a Renode UART hub; both boot banners + a peripheral keypress "
+        "relayed to the central. Mutually exclusive with --host-link/--split-link.",
     )
     ap.add_argument(
         "--host-link",
         choices=HOST_LINKS,
         default=None,
         help="How the central answers Studio RPC: usb (emulated USB CDC), ble (emulated "
-        "BLE GATT), uart (renode-studio-uart snippet), none (boot-liveness only). "
-        "Mutually exclusive with --mode. See docs/renode-transport-orthogonal.md.",
+        "BLE GATT), none (boot-liveness only). Mutually exclusive with --mode. See "
+        "docs/renode-transport-orthogonal.md.",
     )
     ap.add_argument(
         "--split-link",
@@ -1479,14 +1430,9 @@ def main(argv: list[str] | None = None) -> int:
         "the CENTRAL half).",
     )
     ap.add_argument(
-        "--no-rpc",
-        action="store_true",
-        help="uart mode: check only the boot banner (for modules without Studio RPC).",
-    )
-    ap.add_argument(
         "--studio-proto-dir",
         type=Path,
-        help="uart mode: path to zmk-studio-messages' proto/zmk dir "
+        help="usb / usb+wired mode: path to zmk-studio-messages' proto/zmk dir "
         "(auto-discovered from --west-topdir if omitted).",
     )
     ap.add_argument("--west-topdir", type=Path, help="used to auto-discover --studio-proto-dir")
@@ -1571,7 +1517,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Renode is not installed and could not be auto-installed", file=sys.stderr)
         return 2
 
-    # Both usb host-link and a uart host-link with RPC need the Studio protos.
+    # The usb host-link (usb and usb+wired) needs the Studio protos.
     def _proto_dir():
         proto_dir = args.studio_proto_dir
         if proto_dir is None:
@@ -1660,20 +1606,6 @@ def main(argv: list[str] | None = None) -> int:
                 rpc_timeout=args.rpc_timeout,
                 storage_addr=args.storage_addr,
                 storage_size=args.storage_size,
-            )
-        elif (host, split) == ("uart", "none"):
-            proto_dir = None
-            if not args.no_rpc:
-                proto_dir = _proto_dir()
-                if proto_dir is None:
-                    return 2
-            run_uart_smoke(
-                elf=args.elf,
-                renode_path=renode_path,
-                studio_proto_dir=proto_dir,
-                check_rpc=not args.no_rpc,
-                boot_timeout=args.boot_timeout,
-                rpc_timeout=args.rpc_timeout,
             )
         else:  # unreachable: resolve_links already gated SUPPORTED_LINKS
             print(

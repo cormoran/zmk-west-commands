@@ -33,7 +33,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from rpc_client import RpcSocket, frame  # noqa: E402  (re-exported for callers)
 
 # This module lives at scripts/lib/renode/renode_harness.py inside
-# zmk-west-commands, with platforms/ (single.resc, split_wired.resc, the
+# zmk-west-commands, with platforms/ (single_real.resc, split_wired.resc, the
 # .repl) and install_renode.sh as its direct siblings under that same dir.
 # Keeping them grouped in one directory means the path constants below don't
 # depend on where this file is imported from -- true whether it's imported
@@ -64,7 +64,6 @@ __all__ = [
     "compile_protos",
     "load_studio_pb2",
     "find_studio_proto_dir",
-    "boot_single",
     "boot_single_real",
     "attach_dual_cdc_bridge",
     "boot_ble_pair",
@@ -401,49 +400,6 @@ def load_studio_pb2(proto_dir: Path):
 
 
 # --------------------------------------------------------------------------
-# Convenience: boot a single-board ELF using platforms/single.resc.
-# --------------------------------------------------------------------------
-
-
-def boot_single(
-    renode_path: str,
-    elf: Path,
-    boot_wait: float = 3.0,
-    port_base: int | None = None,
-) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
-    """Boot `elf` under Renode using this skill's platforms/single.resc
-    (console on uart0, Studio RPC on uart1 -- see overlays/studio-rpc-uart.overlay).
-    Returns (session, console_socket, rpc_socket); caller is responsible for
-    calling session.stop() (and closing the sockets) when done, e.g. via
-    unittest's addCleanup or a try/finally. Does NOT wait for the boot
-    banner or start the emulation running -- call session.go() is already
-    done here, but asserting on the banner/RPC round-trip is left to the
-    caller since expectations differ per test.
-    """
-    if port_base is None:
-        import random
-
-        port_base = random.randint(26000, 40000)
-
-    session = RenodeSession(
-        renode_path,
-        PLATFORMS_DIR / "single.resc",
-        monitor_port=port_base,
-        variables={
-            "bin": f"@{elf}",
-            "console_port": port_base + 1,
-            "rpc_port": port_base + 2,
-        },
-        cwd=SKILL_DIR,
-    )
-    session.start(boot_wait=boot_wait)
-    console = session.connect_uart(port_base + 1)
-    rpc = session.connect_uart(port_base + 2)
-    session.go()
-    return session, console, rpc
-
-
-# --------------------------------------------------------------------------
 # Convenience: boot a REAL flashable image (USB CDC + QSPI + BLE) using
 # platforms/single_real.resc + xiao_nrf52840_real.repl (see
 # docs/renode-internals.md for what the platform stubs do and why).
@@ -531,8 +487,8 @@ def boot_single_real(
 ) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
     """Boot a real flashable `elf` under Renode using platforms/single_real.resc
     (the USBD/QSPI/FICR/NVMC-stub platform) with the storage partition preloaded
-    as erased 0xFF sectors. Returns (session, console_socket, rpc_socket); as with
-    boot_single the caller owns cleanup (session.stop() + closing sockets).
+    as erased 0xFF sectors. Returns (session, console_socket, rpc_socket); the
+    caller owns cleanup (session.stop() + closing sockets).
 
     A real image has no UART Studio transport, so `rpc_socket` here is just the
     (idle) uart1 terminal -- kept for symmetry and for a module's own tests.
@@ -796,8 +752,8 @@ def boot_split_wired(
     single Renode UART hub ("split_link") so the two emulated boards form a
     point-to-point wired link.
 
-    Returns (session, central_console, peripheral_console); as with boot_single
-    the caller owns cleanup (session.stop() + closing the sockets). Both consoles
+    Returns (session, central_console, peripheral_console); the caller owns
+    cleanup (session.stop() + closing the sockets). Both consoles
     are connected before `start` so no early boot-banner bytes are lost.
 
     The plain xiao_nrf52840.repl is used (no USB/QSPI/FICR stubs): a wired-split

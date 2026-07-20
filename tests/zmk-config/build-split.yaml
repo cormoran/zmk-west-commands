@@ -1,8 +1,8 @@
 # Wired-split DUT pair for `west zmk-renode-test --mode split` (see the repo
 # README's `west zmk-renode-test` section). Kept in its own file, alongside
-# build-ble.yaml / build-renode.yaml and separate from build.yaml + the repo
-# unittests, because it targets ZMK's HWv2 `xiao_ble//zmk` board (only in newer
-# ZMK; see scripts/west-test-renode.yml). Build both halves with:
+# build-ble.yaml and separate from build.yaml + the repo unittests, because it
+# targets ZMK's HWv2 `xiao_ble//zmk` board (only in newer ZMK; see
+# scripts/west-test.yml). Build both halves with:
 #   west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-split.yaml -af split -d build
 #
 # Produces build/split-central/zephyr/zmk.elf and

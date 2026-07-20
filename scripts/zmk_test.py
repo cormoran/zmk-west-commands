@@ -27,7 +27,7 @@ class ZMKTest(WestCommand):
             nargs="?",
             help="""
             Specify (parent) test directory to run.
-            The command finds tests recursively by searching `native_posix_64.keymap`.
+            The command finds tests recursively by searching `native_sim.keymap`.
             Current directory by default.
             """,
         )

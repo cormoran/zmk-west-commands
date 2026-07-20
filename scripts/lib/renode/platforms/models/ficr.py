@@ -1,8 +1,8 @@
 # FICR (0x10000000) model for real-binary mode -- see xiao_nrf52840_real.repl.
 #
-# Renode normally Tags FICR as a read-0 region, which is fine for the
-# renode-studio-uart images but fatal for a real xiao_ble build: settings_nvs
-# reads CODEPAGESIZE/CODESIZE to size its partition and fails -EDOM (-33) when
+# Renode normally Tags FICR as a read-0 region, which is fatal for a real
+# xiao_ble build: settings_nvs reads CODEPAGESIZE/CODESIZE to size its partition
+# and fails -EDOM (-33) when
 # they read 0, so settings never load, BT host init stalls, and the HCI
 # Read-BD_ADDR times out into a BT_ASSERT kernel oops around vt=10s. This model
 # serves real hardware-like values for every FICR word ZMK/Zephyr/nrfx touches

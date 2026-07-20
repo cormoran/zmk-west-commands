@@ -1,16 +1,13 @@
 # Real-hardware DUT image for `west zmk-renode-test --mode ble` (the default
-# mode; see the repo README's `west zmk-renode-test` section). Kept in its own
-# file, alongside build-renode.yaml (the uart-mode snippet build) and separate
-# from build.yaml + the repo unittests, because it targets ZMK's HWv2
-# `xiao_ble//zmk` board (only in newer ZMK; see scripts/west-test-renode.yml).
-# Build it explicitly with:
+# mode; see the repo README's `west zmk-renode-test` section). Kept separate from
+# build.yaml + the repo unittests because it targets ZMK's HWv2 `xiao_ble//zmk`
+# board. Build it explicitly with:
 #   west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-ble.yaml -af ble
 #
-# Unlike build-renode.yaml, this uses NO renode-studio-uart snippet: it is the
-# exact `studio-rpc-usb-uart` image you would flash to hardware (USB CDC + QSPI
-# NOR + BLE). That is the whole point of ble mode -- platform stubs make the
-# real image boot under Renode, so a module needs no extra Renode-specific build
-# config. `CONFIG_ZMK_STUDIO=y` enables the Studio RPC surface; on xiao_ble
+# This is the exact `studio-rpc-usb-uart` image you would flash to hardware (USB
+# CDC + QSPI NOR + BLE), with no Renode-specific build config. That is the whole
+# point of ble/usb mode -- platform stubs make the real image boot under Renode.
+# `CONFIG_ZMK_STUDIO=y` enables the Studio RPC surface; on xiao_ble
 # `CONFIG_ZMK_BLE` defaults on, so the DUT advertises and the host can pair.
 # Produces zephyr/zmk.elf; the renode_tester shield names the DUT "Renode".
 include:

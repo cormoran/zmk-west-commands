@@ -1,16 +1,14 @@
 :name: XIAO nRF52840 single -- REAL-BINARY mode (boot a flashable USB/BLE/QSPI image)
 :description: Boot one real xiao_ble ZMK image (studio-rpc-usb-uart snippet) unmodified.
 
-# Real-binary counterpart of single.resc: loads xiao_nrf52840_real.repl (which
-# adds the USBD/QSPI/FICR stubs a real flashable image needs -- see that file
-# and docs/renode-internals.md) instead of the studio-rpc-uart platform.
+# Loads xiao_nrf52840_real.repl, which adds the USBD/QSPI/FICR stubs a real
+# flashable image needs (see that file and docs/renode-internals.md).
 #
 # A real image speaks Studio RPC only over USB/BLE, so there is no UART RPC
 # transport to attach to -- but uart0 may still carry a console (observation
 # builds) and uart1 exists in the platform, so both are exposed as server
-# sockets for symmetry with single.resc / for a module's own tests. Liveness is
-# verified by PC-symbol sampling rather than a UART round trip (see
-# renode_smoke.run_liveness_smoke).
+# sockets for a module's own tests. Liveness is verified by PC-symbol sampling
+# rather than a UART round trip (see renode_smoke.run_liveness_smoke).
 #
 # This script does NOT preload the NVS storage partition or call `start`: the
 # harness issues `sysbus LoadBinary` (erased-0xFF sectors, so nvs_mount does

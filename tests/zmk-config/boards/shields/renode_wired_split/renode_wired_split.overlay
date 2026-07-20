@@ -21,8 +21,7 @@
  * docs/renode-testing.md). This overlay is for Renode emulation only -- the
  * uart1 pins (P0.02/P0.03) are not verified conflict-free on a real XIAO board.
  *
- * Renode gotchas (identical to the renode-studio-uart snippet -- see its
- * overlay header for the full explanation): the stock xiao_ble board enables
+ * Renode gotchas: the stock xiao_ble board enables
  * &qspi/&p25q16h (external NOR flash) and &usbd/&board_cdc_acm_uart (USB CDC);
  * Renode models neither peripheral's readiness events, so their drivers
  * busy-wait forever and boot hangs silently before main(). Disable all four.

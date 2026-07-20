@@ -1,21 +1,21 @@
 board:
-  - seeeduino_xiao_ble
+  - xiao_ble//zmk
 shield:
   - tester_xiao
 
 include:
   - artifact: with_logging
-    board: seeeduino_xiao_ble
+    board: xiao_ble//zmk
     shield: tester_xiao
     snippet: zmk-usb-logging
   - artifact: studio
-    board: seeeduino_xiao_ble
+    board: xiao_ble//zmk
     shield: tester_xiao
     snippets:
       - zmk-usb-logging
       - studio-rpc-usb-uart
     cmake-args: -DCONFIG_ZMK_STUDIO=y
-  - board: nice_nano_v2
+  - board: nice_nano//zmk
     shield: corne_left
-  - board: nice_nano_v2
+  - board: nice_nano//zmk
     shield: corne_right

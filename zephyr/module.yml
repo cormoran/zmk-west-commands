@@ -1,17 +1,8 @@
 # Root Zephyr module manifest for zmk-west-commands.
 #
-# This turns the repo into a (Kconfig-gated, inert-by-default) Zephyr module
-# so that consumers which already list zmk-west-commands in their west
-# manifest automatically get the Renode Studio-RPC UART transport and the
-# `renode-studio-uart` snippet -- no separate west pin needed.
-#
-# Safe for every existing consumer: the transport's Kconfig
-# (ZMK_RENODE_STUDIO_UART_TRANSPORT) is `default n` and `depends on
-# ZMK_STUDIO_RPC`, so nothing is compiled into a normal build, and a
-# registered snippet_root is inert unless `-S renode-studio-uart` is passed.
+# zmk-west-commands is tooling (west commands + the Renode/bsim test harness),
+# not a runtime ZMK module: it ships no build-time CMake/Kconfig of its own. This
+# manifest exists only so the repo is a valid, inert Zephyr module -- e.g. the
+# BLE bsim job adds it via ZMK_EXTRA_MODULES (`zmk-ble-test --module .`) and a
+# build must be able to resolve it without pulling in any code.
 name: zmk-west-commands
-build:
-  cmake: renode-test-module
-  kconfig: renode-test-module/Kconfig
-  settings:
-    snippet_root: .
