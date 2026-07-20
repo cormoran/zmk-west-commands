@@ -26,6 +26,11 @@ $rpc_port?=3456
 # renode_harness.boot_single_real; the default here keeps the script runnable
 # only after those paths are made absolute (see the .repl header).
 $platform?=@platforms/xiao_nrf52840_real.repl
+# xiao_ble//zmk links at the Adafruit-UF2 bootloader offset
+# (CONFIG_FLASH_LOAD_OFFSET); the reset vector is there, not at 0x0. LoadELF
+# sets the entry PC but `start` resets the core via VTOR (0 -> dead PC=0), so
+# VectorTableOffset is pointed at the load offset after LoadELF (below).
+$vtor?=0x27000
 
 mach create "single"
 machine LoadPlatformDescription $platform
@@ -37,3 +42,4 @@ emulation CreateServerSocketTerminal $rpc_port "rpc_term" false
 connector Connect sysbus.uart1 rpc_term
 
 sysbus LoadELF $bin
+sysbus.cpu VectorTableOffset $vtor
