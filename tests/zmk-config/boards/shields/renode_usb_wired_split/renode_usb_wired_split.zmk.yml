@@ -1,0 +1,5 @@
+file_format: "1"
+id: renode_usb_wired_split
+name: Renode USB+Wired Split Tester (central)
+type: shield
+requires: [seeed_xiao]

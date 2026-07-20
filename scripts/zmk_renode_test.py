@@ -1,7 +1,14 @@
 """`west zmk-renode-test` -- boot a built ZMK ELF in the Renode emulator, run a
 boot + Studio smoke test, then a module's own `tests/renode/*_test.py` files.
 
-Five modes (`--mode`, default `ble`):
+The test has two independent axes (see docs/renode-transport-orthogonal.md):
+`--host-link {usb,ble,uart,none}` (how the central answers Studio RPC) and
+`--split-link {none,wired,ble}` (how the central reaches the peripheral).
+`--mode` is retained as a backward-compatible preset expanding to a
+(host-link, split-link) pair; the two vocabularies are mutually exclusive. The
+combination the presets cannot express is `--host-link usb --split-link wired`:
+a wired split whose central STILL speaks Studio (over USB, which frees both
+UARTEs). The five presets:
 
   * **ble** (default) -- the DUT is the exact `studio-rpc-usb-uart` *hardware*
     image, with no extra module config; platform stubs make it boot. With
@@ -90,23 +97,40 @@ class ZMKRenodeTest(WestCommand):
         parser.add_argument(
             "--mode",
             choices=("uart", "usb", "ble", "split", "ble-split"),
-            default="ble",
+            default=None,
             help=(
-                "ble (default): the real hardware image with no extra config; with "
-                "--host-elf the renode-ble-host app pairs and does an encrypted Studio "
-                "GATT read (S4/S5), without it a boot-liveness check. "
-                "usb: the SAME real hardware image, but Studio RPC over the emulated USB "
-                "CDC (NRF_USBD_Full + DualCdcAcmBridge); smoke = GetDeviceInfo over USB "
-                "(+ boot banner when the image has a console CDC). "
-                "ble-split: a WIRELESS split -- --elf is the split CENTRAL half, "
-                "--peripheral-elf the split PERIPHERAL half, --host-elf the host; the "
-                "smoke asserts the encrypted split link comes up THEN the host reads "
-                "Studio through the central (peripheral -> central -> host). "
-                "uart: snippet-built DUT, console + Studio RPC over emulated UARTs; smoke = "
-                "boot banner + GetDeviceInfo. "
-                "split: wired-split central (--elf) + --peripheral-elf on a Renode UART "
-                "hub; smoke = both boot banners + a peripheral keypress relayed to the "
-                "central. See docs/renode-testing.md."
+                "Backward-compatible preset expanding to a (host-link, split-link) pair "
+                "(default, no flags: ble). ble: real hardware image; with --host-elf the "
+                "renode-ble-host app pairs and does an encrypted Studio GATT read (S4/S5), "
+                "without it a boot-liveness check. usb: the SAME real image, Studio RPC "
+                "over the emulated USB CDC. ble-split: a WIRELESS split -- --elf is the "
+                "split CENTRAL, --peripheral-elf the split PERIPHERAL, --host-elf the "
+                "host. uart: snippet-built DUT, Studio RPC over emulated UARTs. split: "
+                "wired-split central (--elf) + --peripheral-elf on a Renode UART hub. "
+                "Mutually exclusive with --host-link/--split-link. See "
+                "docs/renode-transport-orthogonal.md and docs/renode-testing.md."
+            ),
+        )
+        parser.add_argument(
+            "--host-link",
+            choices=("usb", "ble", "uart", "none"),
+            default=None,
+            help=(
+                "How the central answers Studio RPC: usb (emulated USB CDC), ble "
+                "(emulated BLE GATT), uart (renode-studio-uart snippet), none "
+                "(boot-liveness only). Mutually exclusive with --mode; pair with "
+                "--split-link. The headline new combination is --host-link usb "
+                "--split-link wired (a wired split whose central still speaks Studio). "
+                "See docs/renode-transport-orthogonal.md."
+            ),
+        )
+        parser.add_argument(
+            "--split-link",
+            choices=("none", "wired", "ble"),
+            default=None,
+            help=(
+                "How the central reaches the peripheral: none (not a split), wired (UART "
+                "hub), ble (radio + fake CCM). Mutually exclusive with --mode."
             ),
         )
         parser.add_argument(
@@ -205,14 +229,28 @@ class ZMKRenodeTest(WestCommand):
                 "first, e.g. `west zmk-build <zmk-config> -af <artifact>`)"
             )
 
-        if args.host_elf and args.mode not in ("ble", "ble-split"):
-            log.die("--host-elf is only valid with --mode ble / ble-split.")
-        if args.peripheral_elf and args.mode not in ("split", "ble-split"):
-            log.die("--peripheral-elf is only valid with --mode split / ble-split.")
-
         # Make the harness (and the module's own tests) importable.
         sys.path.insert(0, str(LIB_RENODE_DIR))
         import renode_harness  # noqa: E402
+        import renode_smoke  # noqa: E402
+
+        # Resolve the two orthogonal axes from either a --mode preset or the
+        # explicit --host-link/--split-link flags (mutually exclusive).
+        try:
+            host, split = renode_smoke.resolve_links(args.mode, args.host_link, args.split_link)
+        except ValueError as err:
+            log.die(str(err))
+        # Stash the resolved pair for _run_module_tests' env contract.
+        args._host_link, args._split_link = host, split
+        log.inf(
+            f"[*] host-link={host} x split-link={split} "
+            f"({renode_smoke.canonical_mode(host, split)})"
+        )
+
+        if args.host_elf and host != "ble":
+            log.die("--host-elf is only valid with a ble host-link.")
+        if args.peripheral_elf and split == "none":
+            log.die("--peripheral-elf is only valid with a wired/ble split-link.")
 
         renode_path = renode_harness.find_or_install_renode(version=args.renode_version)
         if renode_path is None:
@@ -220,16 +258,16 @@ class ZMKRenodeTest(WestCommand):
         log.inf(f"[*] Renode: {renode_path}")
 
         host_elf = None
-        if args.mode in ("ble", "ble-split") and args.host_elf:
+        if host == "ble" and args.host_elf:
             host_elf = Path(args.host_elf).absolute()
             if not host_elf.is_file():
                 log.die(f"host ELF not found: {host_elf}")
 
         peripheral_elf = None
-        if args.mode in ("split", "ble-split"):
+        if split != "none":
             if not args.peripheral_elf:
                 log.die(
-                    f"--mode {args.mode} requires --peripheral-elf (the peripheral half's ELF)."
+                    f"split-link={split} requires --peripheral-elf (the peripheral half's ELF)."
                 )
             peripheral_elf = Path(args.peripheral_elf).absolute()
             if not peripheral_elf.is_file():
@@ -237,27 +275,31 @@ class ZMKRenodeTest(WestCommand):
                     f"peripheral ELF not found: {peripheral_elf} (this command does not "
                     "build firmware -- build it first)"
                 )
-            if args.mode == "ble-split" and host_elf is None:
-                log.die("--host-elf is required for --mode ble-split.")
+            if (host, split) == ("ble", "ble") and host_elf is None:
+                log.die("--host-elf is required for a ble host-link x ble split-link (ble-split).")
 
         if not args.skip_smoke:
-            if args.mode == "ble-split":
+            if (host, split) == ("ble", "ble"):
                 self._run_ble_split_smoke(args, elf, peripheral_elf, host_elf, renode_path)
-            elif args.mode == "ble":
+            elif (host, split) == ("ble", "none"):
                 if host_elf is not None:
                     self._run_ble_studio_smoke(args, elf, host_elf, renode_path)
                 else:
                     log.inf(
-                        "[*] ble mode without --host-elf: no host given, checking DUT "
-                        "boot liveness only (no encrypted Studio read)."
+                        "[*] ble host-link without --host-elf: checking DUT boot liveness "
+                        "only (no encrypted Studio read)."
                     )
                     self._run_ble_liveness_smoke(args, elf, renode_path)
-            elif args.mode == "split":
+            elif (host, split) == ("none", "wired"):
                 self._run_split_smoke(args, elf, peripheral_elf, renode_path)
-            elif args.mode == "usb":
+            elif (host, split) == ("usb", "wired"):
+                self._run_usb_wired_smoke(args, elf, peripheral_elf, renode_path)
+            elif (host, split) == ("usb", "none"):
                 self._run_usb_smoke(args, elf, renode_path)
-            else:
+            elif (host, split) == ("uart", "none"):
                 self._run_uart_smoke(args, elf, renode_path)
+            else:  # unreachable: resolve_links already gated the supported set
+                log.die(f"unsupported combination host-link={host} x split-link={split}")
         else:
             log.inf("[*] Skipping smoke test (--skip-smoke)")
 
@@ -407,6 +449,46 @@ class ZMKRenodeTest(WestCommand):
             log.die(f"usb smoke test FAILED: {err}")
         log.inf("[*] USB smoke test OK")
 
+    def _run_usb_wired_smoke(
+        self, args, central_elf: Path, peripheral_elf: Path, renode_path: str
+    ) -> None:
+        import renode_harness  # noqa: E402
+        import renode_smoke  # noqa: E402
+
+        # protobuf is a hard runtime dep here: usb+wired always asserts the
+        # Studio RPC round trip over USB (that is half the point of the combo).
+        try:
+            import google.protobuf  # noqa: F401
+        except ImportError:
+            log.die(
+                "the `protobuf` Python package is required for the usb+wired Studio RPC "
+                "smoke test -- install it (see requirements-test.txt) or pass --skip-smoke."
+            )
+        proto_dir = self._find_studio_proto_dir(renode_harness)
+
+        kwargs = {}
+        if args.storage_addr is not None:
+            kwargs["storage_addr"] = args.storage_addr
+        if args.storage_size is not None:
+            kwargs["storage_size"] = args.storage_size
+
+        log.inf(
+            "[*] Running usb+wired-split Renode smoke test (wired split; central Studio "
+            "RPC over the emulated USB CDC + peripheral keypress relayed to the central)"
+        )
+        try:
+            renode_smoke.run_usb_wired_smoke(
+                central_elf=central_elf,
+                peripheral_elf=peripheral_elf,
+                renode_path=renode_path,
+                studio_proto_dir=proto_dir,
+                boot_timeout=args.boot_timeout,
+                **kwargs,
+            )
+        except AssertionError as err:
+            log.die(f"usb+wired smoke test FAILED: {err}")
+        log.inf("[*] usb+wired smoke test OK")
+
     def _run_split_smoke(
         self, args, central_elf: Path, peripheral_elf: Path, renode_path: str
     ) -> None:
@@ -460,26 +542,38 @@ class ZMKRenodeTest(WestCommand):
             log.wrn(f"no *_test.py files found directly under {tests_dir}")
             return
 
+        import renode_smoke  # noqa: E402
+
+        host = getattr(args, "_host_link", None)
+        split = getattr(args, "_split_link", None)
+        if host is None or split is None:
+            host, split = renode_smoke.resolve_links(args.mode, args.host_link, args.split_link)
+
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(LIB_RENODE_DIR) + (os.pathsep + existing if existing else "")
-        # Module-test env contract (see docs/renode-testing.md):
-        #   ZMK_RENODE_MODE  = uart | usb | ble | split | ble-split
-        #   ZMK_RENODE_ELF   = the DUT ELF
-        # The real-image modes (ble / ble-split / usb) also export the
-        # storage-partition overrides; ble modes additionally export
-        # ZMK_RENODE_HOST_ELF when a host was given.
-        env["ZMK_RENODE_MODE"] = args.mode
+        # Module-test env contract (see docs/renode-transport-orthogonal.md):
+        #   ZMK_RENODE_HOST_LINK  = usb | ble | uart | none
+        #   ZMK_RENODE_SPLIT_LINK = none | wired | ble
+        #   ZMK_RENODE_MODE       = the preset name when the pair is a preset, else
+        #                           the canonical "<host>+<split>" string (kept for
+        #                           backward compatibility with older consumers)
+        #   ZMK_RENODE_ELF        = the DUT / central ELF
+        # A non-none split-link also exports ZMK_RENODE_PERIPHERAL_ELF; the
+        # real-image links (ble / usb host, ble split) export the storage-partition
+        # overrides; a ble host-link with a host exports ZMK_RENODE_HOST_ELF.
+        env["ZMK_RENODE_HOST_LINK"] = host
+        env["ZMK_RENODE_SPLIT_LINK"] = split
+        env["ZMK_RENODE_MODE"] = renode_smoke.canonical_mode(host, split)
         env["ZMK_RENODE_ELF"] = str(elf)
-        if args.mode == "split":
-            # split-mode tests build a wired pair via renode_harness.boot_split_wired;
-            # --elf is the central, ZMK_RENODE_PERIPHERAL_ELF the peripheral half.
+        if split != "none":
+            # split tests build the peripheral half too (--elf is the central;
+            # ZMK_RENODE_PERIPHERAL_ELF is the peripheral -- see the boot_* harness fns).
             env["ZMK_RENODE_PERIPHERAL_ELF"] = str(Path(args.peripheral_elf).absolute())
-        if args.mode in ("ble", "ble-split", "usb"):
-            # These modes boot a real image -- via renode_harness.boot_single_real
-            # (ble liveness, and usb with repl_template="xiao_nrf52840_usb.repl" +
-            # attach_dual_cdc_bridge), boot_ble_pair (two-machine) or
-            # boot_ble_split (three-machine) -- honoring these overrides.
+        # A real flashable image is booted whenever the host rides USB/BLE or the
+        # split rides BLE (all of which use the USBD/QSPI/FICR/NVMC-stub platform
+        # and honour these storage overrides); a plain wired-only pair does not.
+        if host in ("ble", "usb") or split == "ble":
             import renode_harness  # noqa: E402
 
             addr = (
@@ -494,12 +588,8 @@ class ZMKRenodeTest(WestCommand):
             )
             env["ZMK_RENODE_STORAGE_ADDR"] = hex(addr)
             env["ZMK_RENODE_STORAGE_SIZE"] = hex(size)
-            if args.host_elf:
-                env["ZMK_RENODE_HOST_ELF"] = str(Path(args.host_elf).absolute())
-            # ble-split: --elf is the split CENTRAL; ZMK_RENODE_PERIPHERAL_ELF is
-            # the split PERIPHERAL half (see renode_harness.boot_ble_split).
-            if args.mode == "ble-split" and getattr(args, "peripheral_elf", None):
-                env["ZMK_RENODE_PERIPHERAL_ELF"] = str(Path(args.peripheral_elf).absolute())
+        if host == "ble" and args.host_elf:
+            env["ZMK_RENODE_HOST_ELF"] = str(Path(args.host_elf).absolute())
 
         failures = []
         for test_file in test_files:

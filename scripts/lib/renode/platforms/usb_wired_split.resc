@@ -1,0 +1,62 @@
+:name: XIAO nRF52840 usb+wired split -- central Studio over USB CDC + wired split link
+:description: Two machines. central = real studio-rpc-usb-uart image with a WIRED
+:description: split link (Studio rides emulated USB CDC, console on uart0, split on
+:description: uart1); peripheral = plain wired-split half. The harness preloads the
+:description: central NVS and calls `start`.
+
+# The orthogonal combination the fixed presets could never express: a WIRED
+# split whose CENTRAL still answers Studio RPC. USB consumes no UARTE, so the
+# central keeps its console on uart0 AND drives the `zmk,wired-split` link on
+# uart1 while Studio RPC flows over the emulated USB CDC (NRF_USBD_Full +
+# DualCdcAcmBridge, attached by the harness after boot). See
+# docs/renode-transport-orthogonal.md.
+#
+# Composition = split_wired.resc (a UART hub between the two machines' split
+# UARTEs) with the CENTRAL machine loaded from the materialized
+# xiao_nrf52840_usb.repl (the NRF_USBD_Full USB model + FICR/NVMC/QSPI stubs a
+# real flashable image needs -- exactly as usb mode) instead of the plain repl.
+# The peripheral half is the unchanged plain wired-split image, so it needs none
+# of the real-image platform help and stays on xiao_nrf52840.repl.
+#
+# This script only wires everything up; the harness (renode_harness.boot_usb_wired_split)
+# preloads the central's NVS storage partition (erased 0xFF) and issues `start`
+# over the monitor after connecting the console sockets, then attaches the USB
+# CDC bridge -- so no early boot-banner bytes are lost.
+
+using sysbus
+
+# $central_platform is the real USB repl with absolute model-.py paths,
+# materialized by renode_harness.boot_usb_wired_split.
+$central_bin?=@central.elf
+$peripheral_bin?=@peripheral.elf
+$central_platform?=@platforms/xiao_nrf52840_usb.repl
+$central_console_port?=3467
+$peripheral_console_port?=3468
+
+emulation CreateUARTHub "split_link"
+
+# Both halves are xiao_ble//zmk images, which link at the Adafruit-UF2
+# bootloader partition ($vtor, CONFIG_FLASH_LOAD_OFFSET) -- the Cortex-M reset
+# vector lives there, not at 0x0. LoadELF sets the entry PC, but `start` resets
+# the core via VTOR (0 -> empty flash -> dead PC=0), so point VectorTableOffset
+# at the load offset after each LoadELF (the .resc runs sequentially, so LoadELF
+# has completed by then). Without this the boot only works by luck.
+$vtor?=0x27000
+
+# ---- central (real studio-rpc-usb-uart image + wired split on uart1) ---------
+mach create "central"
+machine LoadPlatformDescription $central_platform
+emulation CreateServerSocketTerminal $central_console_port "central_console_term" false
+connector Connect sysbus.uart0 central_console_term
+connector Connect sysbus.uart1 split_link
+sysbus LoadELF $central_bin
+sysbus.cpu VectorTableOffset $vtor
+
+# ---- peripheral (plain wired-split half) ------------------------------------
+mach create "peripheral"
+machine LoadPlatformDescription @platforms/xiao_nrf52840.repl
+emulation CreateServerSocketTerminal $peripheral_console_port "peripheral_console_term" false
+connector Connect sysbus.uart0 peripheral_console_term
+connector Connect sysbus.uart1 split_link
+sysbus LoadELF $peripheral_bin
+sysbus.cpu VectorTableOffset $vtor

@@ -155,6 +155,49 @@ jobs:
           elf-path: build/split-central/zephyr/zmk.elf
           peripheral-elf: build/split-peripheral/zephyr/zmk.elf
 
+  renode-usb-split:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    name: Renode (usb+wired split)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cache west modules
+        uses: actions/cache@v4
+        continue-on-error: true
+        env:
+          cache_name: cache-west-modules-renode-usb-wired-split
+        with:
+          path: dependencies/
+          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ hashFiles('scripts/west-test-renode.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ env.cache_name }}-
+      - name: Init
+        # Same main-pinned manifest as the renode job (HWv2 xiao_ble//zmk).
+        run: |
+          git config --global --add safe.directory ${{ github.workspace }}
+          west init -l . --mf scripts/west-test-renode-standalone.yml
+          west update --narrow
+          west zephyr-export
+      - name: Build usb+wired split halves
+        # The orthogonal combination the presets cannot express: a WIRED split
+        # whose CENTRAL still answers Studio RPC (over emulated USB CDC). The
+        # central (renode_usb_wired_split shield + studio-rpc-usb-uart snippet)
+        # keeps USB on; the peripheral is the plain renode_wired_split half.
+        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired -d build
+      - name: Renode usb+wired-split smoke test
+        # Asserts BOTH halves of what makes this combination valuable: a Studio
+        # GetDeviceInfo round trip over the central's USB CDC AND a peripheral
+        # keypress relayed over the wired link to the central ("position: 0").
+        uses: ./.github/actions/zmk-renode-test
+        with:
+          host-link: usb
+          split-link: wired
+          elf-path: build/usb-wired-central/zephyr/zmk.elf
+          peripheral-elf: build/usb-wired-peripheral/zephyr/zmk.elf
+
   renode-ble-split:
     runs-on: ubuntu-latest
     # HEAVY: three emulated nRF52840s on one BLE medium at a 10us quantum runs

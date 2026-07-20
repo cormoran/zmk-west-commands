@@ -1,0 +1,2 @@
+config SHIELD_RENODE_USB_WIRED_SPLIT
+    def_bool $(shields_list_contains,renode_usb_wired_split)

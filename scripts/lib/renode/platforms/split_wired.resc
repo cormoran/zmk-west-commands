@@ -17,6 +17,11 @@ $central_bin?=@central.elf
 $peripheral_bin?=@peripheral.elf
 $central_console_port?=3465
 $peripheral_console_port?=3466
+# Both halves are xiao_ble//zmk images linked at the Adafruit-UF2 bootloader
+# offset (CONFIG_FLASH_LOAD_OFFSET); the reset vector is there, not 0x0. LoadELF
+# sets the entry PC but `start` resets via VTOR (0 -> dead PC=0), so
+# VectorTableOffset is pointed at the offset after each LoadELF (below).
+$vtor?=0x27000
 
 emulation CreateUARTHub "split_link"
 
@@ -26,6 +31,7 @@ emulation CreateServerSocketTerminal $central_console_port "central_console_term
 connector Connect sysbus.uart0 central_console_term
 connector Connect sysbus.uart1 split_link
 sysbus LoadELF $central_bin
+sysbus.cpu VectorTableOffset $vtor
 
 mach create "peripheral"
 machine LoadPlatformDescription @platforms/xiao_nrf52840.repl
@@ -33,3 +39,4 @@ emulation CreateServerSocketTerminal $peripheral_console_port "peripheral_consol
 connector Connect sysbus.uart0 peripheral_console_term
 connector Connect sysbus.uart1 split_link
 sysbus LoadELF $peripheral_bin
+sysbus.cpu VectorTableOffset $vtor
