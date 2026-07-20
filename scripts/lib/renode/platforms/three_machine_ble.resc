@@ -33,6 +33,11 @@ $c_console?=3471
 $c_rpc?=3472
 $p_console?=3473
 $h_console?=3474
+# The split central + peripheral are xiao_ble//zmk images linked at the
+# Adafruit-UF2 bootloader offset (CONFIG_FLASH_LOAD_OFFSET): their reset vector
+# is there, not 0x0, so VectorTableOffset is set after each of their LoadELFs
+# (below). The host is a plain nrf52840dk app at 0x0 -- default VTOR, no override.
+$vtor?=0x27000
 
 # Shared BLE radio medium.
 emulation CreateBLEMedium "wireless"
@@ -56,6 +61,7 @@ emulation CreateServerSocketTerminal $c_rpc "central_rpc" false
 connector Connect sysbus.uart1 central_rpc
 
 sysbus LoadELF $central_bin
+sysbus.cpu VectorTableOffset $vtor
 
 # ---- peripheral (real ZMK split-peripheral image) ---------------------------
 mach create "peripheral"
@@ -67,6 +73,7 @@ emulation CreateServerSocketTerminal $p_console "peripheral_console" false
 connector Connect sysbus.uart0 peripheral_console
 
 sysbus LoadELF $peripheral_bin
+sysbus.cpu VectorTableOffset $vtor
 
 # ---- host (renode-ble-host: simulated computer / Studio BLE central) --------
 mach create "host"

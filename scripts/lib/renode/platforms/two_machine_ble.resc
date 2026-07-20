@@ -25,6 +25,11 @@ $ccm?=@platforms/ccm.repl
 $d_console?=3461
 $d_rpc?=3462
 $h_console?=3463
+# The DUT is a xiao_ble//zmk image linked at the Adafruit-UF2 bootloader offset
+# (CONFIG_FLASH_LOAD_OFFSET): its reset vector is there, not 0x0, so
+# VectorTableOffset is set after its LoadELF (below). The host is a plain
+# nrf52840dk app linked at 0x0, so it keeps the default VTOR (no override).
+$vtor?=0x27000
 
 # Shared BLE radio medium.
 emulation CreateBLEMedium "wireless"
@@ -48,6 +53,7 @@ emulation CreateServerSocketTerminal $d_rpc "dut_rpc" false
 connector Connect sysbus.uart1 dut_rpc
 
 sysbus LoadELF $dut_bin
+sysbus.cpu VectorTableOffset $vtor
 
 # ---- Host (renode-ble-host: simulated computer / BLE central) --------------
 mach create "host"

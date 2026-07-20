@@ -15,6 +15,12 @@ using sysbus
 $bin?=@zmk.elf
 $console_port?=3455
 $rpc_port?=3456
+# xiao_ble//zmk links at the Adafruit-UF2 bootloader offset
+# (CONFIG_FLASH_LOAD_OFFSET), so the Cortex-M reset vector lives there, not at
+# 0x0. LoadELF sets the entry PC but `start` resets the core via VTOR (0 ->
+# empty flash -> dead PC=0), so VectorTableOffset is pointed at the load offset
+# after LoadELF (below). Override for a board with a different offset.
+$vtor?=0x27000
 
 mach create "single"
 machine LoadPlatformDescription @platforms/xiao_nrf52840.repl
@@ -26,3 +32,4 @@ emulation CreateServerSocketTerminal $rpc_port "rpc_term" false
 connector Connect sysbus.uart1 rpc_term
 
 sysbus LoadELF $bin
+sysbus.cpu VectorTableOffset $vtor
