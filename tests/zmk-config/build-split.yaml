@@ -1,5 +1,9 @@
-# Wired-split DUT pair for `west zmk-renode-test --mode split` (see the repo
-# README's `west zmk-renode-test` section). Kept in its own file, alongside
+# Studio-less wired-split DUT pair for the axis-flag path
+# `west zmk-renode-test --host-link none --split-link wired` (see the repo
+# README's `west zmk-renode-test` section). The `wired-split` PRESET now carries
+# Studio over USB and builds from build-usb-split.yaml instead; this file is the
+# minimal no-Studio wired pair (both UARTEs consumed by console + split link),
+# reachable only via the explicit axis flags. Kept in its own file, alongside
 # build-ble.yaml and separate from build.yaml + the repo unittests, because it
 # targets ZMK's HWv2 `xiao_ble//zmk` board (only in newer ZMK; see
 # scripts/west-test.yml). Build both halves with:

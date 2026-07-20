@@ -12,7 +12,7 @@ BLE fine-quantum.
 
 ## Motivation
 
-`--mode {ble,usb,split,ble-split}` couples two decisions that are actually
+`--mode {ble,usb,wired-split,ble-split}` couples two decisions that are actually
 independent:
 
 * **host-link** -- the path the central uses to answer Studio RPC to a computer:
@@ -72,24 +72,27 @@ BLE split-link, is what pairs with the central. `--host-elf` with `host-link in
 ### The `(host-link, split-link)` support matrix
 
 Not every cell is meaningful or buildable; this is what the harness accepts
-TODAY. "preset" = reachable via `--mode`; "**NEW**" = implemented via the axis
-flags; "reserved" = a valid name the resolver rejects until a smoke is added;
-"--" = rejected as impossible.
+TODAY. "preset" = reachable via `--mode`; "axis-only" = supported but reachable
+only via the axis flags (no preset); "reserved" = a valid name the resolver
+rejects until a smoke is added; "--" = rejected as impossible.
 
-| host-link \ split-link | `none`            | `wired`                | `ble`                  |
-|------------------------|-------------------|------------------------|------------------------|
-| `none`                 | -- (nothing to do)| `split` (preset)       | reserved               |
-| `usb`                  | `usb` (preset)    | **`usb`x`wired`**      | reserved               |
-| `ble`                  | `ble` (preset)    | reserved               | `ble-split` (preset)   |
+| host-link \ split-link | `none`            | `wired`                    | `ble`                  |
+|------------------------|-------------------|----------------------------|------------------------|
+| `none`                 | -- (nothing to do)| `none`x`wired` (axis-only) | reserved               |
+| `usb`                  | `usb` (preset)    | `wired-split` (preset)     | reserved               |
+| `ble`                  | `ble` (preset)    | reserved                   | `ble-split` (preset)   |
 
-The set the resolver accepts is exactly the four presets plus `usb`x`wired`
-(`SUPPORTED_LINKS` in `renode_smoke.py`). A "reserved" cell parses but errors
-with "unsupported combination ..." — the name is claimed and the dispatch is
-ready, but no smoke/artifacts exist yet; add one by extending `SUPPORTED_LINKS`,
-the dispatch, and a `run_*_smoke`. None of the NEW/reserved cells are wired into
-CI (the default matrix is the four presets + `usb`x`wired`).
+The set the resolver accepts is exactly the four presets plus the Studio-less
+`none`x`wired` cell (`SUPPORTED_LINKS` in `renode_smoke.py`). A "reserved" cell
+parses but errors with "unsupported combination ..." — the name is claimed and
+the dispatch is ready, but no smoke/artifacts exist yet; add one by extending
+`SUPPORTED_LINKS`, the dispatch, and a `run_*_smoke`. Every accepted cell is
+wired into CI except the Studio-less `none`x`wired` (its coverage is a strict
+subset of the `wired-split` preset, which asserts the same wired relay plus
+Studio over USB).
 
-`usb`x`wired` is the one implemented NEW cell (the deliverable here).
+`usb`x`wired` — the wired split whose central still speaks Studio over USB — is
+the headline of this work; it is the `wired-split` preset.
 
 ## Which firmware artifact each cell needs
 
@@ -100,13 +103,14 @@ The harness never builds firmware; the caller does. Each cell dictates how the
 |-------------------|-------------------------------------------------------------|----------------------------------------|----------------------|
 | `usb` (preset)    | real `studio-rpc-usb-uart` image (`build-ble.yaml`)         | --                                     | --                   |
 | `ble` (preset)    | same real image (`build-ble.yaml`)                          | --                                     | `renode-ble-host`    |
-| `split` (preset)  | wired central (`build-split.yaml`, USB/BLE off)             | wired peripheral (`build-split.yaml`)  | --                   |
+| `none`x`wired` (axis-only) | wired central (`build-split.yaml`, USB/BLE off)   | wired peripheral (`build-split.yaml`)  | --                   |
 | `ble-split`       | split-central + studio-rpc-usb-uart (`build-ble-split.yaml`)| split-peripheral (`build-ble-split.yaml`)| `renode-ble-host`  |
-| **`usb`x`wired`** | new `renode_usb_wired_split` central (USB Studio + wired split, `build-usb-split.yaml`) | `renode_wired_split` peripheral (`build-usb-split.yaml`) | -- |
+| **`wired-split`** (`usb`x`wired`) | `renode_usb_wired_split` central (USB Studio + wired split, `build-usb-split.yaml`) | `renode_wired_split` peripheral (`build-usb-split.yaml`) | -- |
 | `usb`x`ble` (reserved) | split-central + studio-rpc-usb-uart | ble peripheral | -- |
 
-The new artifact for the headline cell is a **wired-split central that keeps USB
-on**: today's `renode_wired_split` shield disables USB (`CONFIG_ZMK_USB=n`) to
+The new artifact for the `wired-split` preset is a **wired-split central that
+keeps USB on**: the Studio-less `renode_wired_split` shield disables USB
+(`CONFIG_ZMK_USB=n`) to
 dodge the USBD boot hang, which is exactly what makes it lack Studio. The new
 central shield (`renode_usb_wired_split_left`, working name) instead:
 
@@ -171,10 +175,10 @@ not break:
   * `ZMK_RENODE_HOST_LINK` = `usb` | `ble` | `none`
   * `ZMK_RENODE_SPLIT_LINK` = `none` | `wired` | `ble`
 * Keep exporting `ZMK_RENODE_MODE` for backward compatibility: set it to the
-  preset name when the `(host,split)` pair is a preset, else to the canonical
-  `"<host>+<split>"` string (e.g. `usb+wired`). Existing consumers that only
-  understand the five preset values keep working for preset combos; new
-  consumers read the two axis vars.
+  preset name when the `(host,split)` pair is a preset (so `usb`x`wired` reports
+  `wired-split`), else to the canonical `"<host>+<split>"` string (e.g.
+  `none+wired`). Existing consumers that only understand the four preset values
+  keep working for preset combos; new consumers read the two axis vars.
 * `ZMK_RENODE_ELF` / `_PERIPHERAL_ELF` / `_HOST_ELF` / `_STORAGE_ADDR` /
   `_STORAGE_SIZE` are unchanged; `_PERIPHERAL_ELF` is exported whenever
   split-link != none, `_HOST_ELF` whenever a host was given.
@@ -184,14 +188,16 @@ CLI, `mode` retained; the same mutual-exclusion rule applies in the shim.
 
 ## CI
 
-Keep the matrix small -- **4 jobs**, not the nine-cell cross product:
+Keep the matrix small, not the nine-cell cross product:
 
-1. `ble` (default preset, the existing real-image S4/S5 job)
-2. `usb` (existing)
-3. `split` (existing wired preset)
-4. **`usb`x`wired`** (NEW) -- build the new USB-Studio wired-split central +
-   reuse the existing wired peripheral, then
-   `--host-link usb --split-link wired`.
+1. `ble` + `usb` (one job boots the single real image and runs both the ble and
+   usb Studio smokes against it)
+2. `wired-split` (`--mode wired-split` == `usb`x`wired`: build the USB-Studio
+   wired-split central + the wired peripheral, assert Studio over USB **and** the
+   `position: 0` relay). This subsumes the old Studio-less `split` job -- its
+   relay coverage is a strict subset -- so there is no separate `none`x`wired`
+   job.
+3. `ble-split` (below).
 
 `ble-split` stays as its own (heaviest, flakiest) job as today. The remaining
 NEW cells (`usb`x`ble`, `ble`+`wired`, `none`+`ble`) are documented as reachable

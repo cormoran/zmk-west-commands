@@ -196,10 +196,15 @@ the channels' `IsWired` properties.
 
 ## Wired split: the UART hub (no platform stubs needed)
 
-`--mode split` needs none of the above. A wired-split image built with the
-`renode_wired_split` shield disables USB + QSPI and does not enable BLE, so both
-halves boot on the **plain** `xiao_nrf52840.repl` — no USBD/QSPI/FICR/NVMC stubs,
-no NVS preload, no fake CCM.
+The Studio-less wired split (`--host-link none --split-link wired`) needs none of
+the above. A wired-split image built with the `renode_wired_split` shield
+disables USB + QSPI and does not enable BLE, so both halves boot on the **plain**
+`xiao_nrf52840.repl` — no USBD/QSPI/FICR/NVMC stubs, no NVS preload, no fake CCM.
+
+(The `wired-split` *preset* keeps the same UART hub but adds Studio over USB on
+the central — so its central boots on the USB platform, exactly like `usb` mode,
+via `platforms/usb_wired_split.resc` + `renode_harness.boot_usb_wired_split`. See
+the USB section above; only the extra `uart1` split link differs.)
 
 The one platform mechanic is the **UART hub**. `platforms/split_wired.resc`
 creates two machines (`central`, `peripheral`); each puts its console on `uart0`

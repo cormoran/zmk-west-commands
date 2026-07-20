@@ -82,7 +82,7 @@ jobs:
       image: zmkfirmware/zmk-build-arm:stable
     # Single-machine (non-split) host-link coverage: boots the one real image and
     # runs the ble and usb Studio smokes against it. The split variants live in the
-    # renode-split / renode-usb-split / renode-ble-split jobs below.
+    # renode-split (wired-split, Studio over USB) / renode-ble-split jobs below.
     name: "Renode (single: ble + usb) [${{ matrix.zmk_revision }}]"
     steps:
       - name: Checkout
@@ -167,67 +167,19 @@ jobs:
           west update --narrow
           west zephyr-export
       - name: Build wired-split central + peripheral halves
-        # Both halves from the one renode_wired_split shield (console on uart0,
-        # wired split on uart1, no BLE/USB); they differ only by
-        # CONFIG_ZMK_SPLIT_ROLE_CENTRAL (set for the central in build-split.yaml).
-        # -af split matches both split-central and split-peripheral artifacts.
-        run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-split.yaml -af split -d build
-      - name: Renode wired-split smoke test
-        uses: ./.github/actions/zmk-renode-test
-        with:
-          mode: split
-          elf-path: build/split-central/zephyr/zmk.elf
-          peripheral-elf: build/split-peripheral/zephyr/zmk.elf
-
-  renode-usb-split:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { zmk_remote: zmkfirmware, zmk_revision: main }
-          - { zmk_remote: cormoran, zmk_revision: main+dya }
-          - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
-    timeout-minutes: 45
-    container:
-      image: zmkfirmware/zmk-build-arm:stable
-    name: "Renode (usb+wired split) [${{ matrix.zmk_revision }}]"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Cache west modules
-        uses: actions/cache@v4
-        continue-on-error: true
-        env:
-          cache_name: cache-west-modules-renode-usb-wired-split
-        with:
-          path: dependencies/
-          key: ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-${{ hashFiles('scripts/west-test.yml') }}
-          restore-keys: |
-            ${{ runner.os }}-build-${{ env.cache_name }}-${{ matrix.zmk_revision }}-
-      - name: Init
-        # zmk branch = matrix row (HWv2 xiao_ble//zmk board); see the sed below.
-        run: |
-          git config --global --add safe.directory ${{ github.workspace }}
-          # CI matrix: point the zmk project at this row's branch (see scripts/west-test.yml).
-          sed -i -e "s|      remote: zmkfirmware|      remote: ${{ matrix.zmk_remote }}|" -e "s|      revision: main|      revision: ${{ matrix.zmk_revision }}|" scripts/west-test.yml
-          west init -l . --mf scripts/west-test-standalone.yml
-          west update --narrow
-          west zephyr-export
-      - name: Build usb+wired split halves
-        # The orthogonal combination the presets cannot express: a WIRED split
-        # whose CENTRAL still answers Studio RPC (over emulated USB CDC). The
+        # The wired-split preset (host-link usb x split-link wired): a WIRED split
+        # whose CENTRAL still answers Studio RPC over the emulated USB CDC. The
         # central (renode_usb_wired_split shield + studio-rpc-usb-uart snippet)
         # keeps USB on; the peripheral is the plain renode_wired_split half.
+        # -af usb-wired matches both usb-wired-central and usb-wired-peripheral.
         run: west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml -af usb-wired -d build
-      - name: Renode usb+wired-split smoke test
-        # Asserts BOTH halves of what makes this combination valuable: a Studio
-        # GetDeviceInfo round trip over the central's USB CDC AND a peripheral
-        # keypress relayed over the wired link to the central ("position: 0").
+      - name: Renode wired-split smoke test (Studio over USB + wired relay)
+        # Asserts BOTH halves of what makes this valuable: a Studio GetDeviceInfo
+        # round trip over the central's USB CDC AND a peripheral keypress relayed
+        # over the wired link to the central ("position: 0").
         uses: ./.github/actions/zmk-renode-test
         with:
-          host-link: usb
-          split-link: wired
+          mode: wired-split
           elf-path: build/usb-wired-central/zephyr/zmk.elf
           peripheral-elf: build/usb-wired-peripheral/zephyr/zmk.elf
 

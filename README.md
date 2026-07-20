@@ -102,13 +102,13 @@ emulator and run a boot + Studio smoke test. No hardware needed. The caller
 builds the ELF, and this command only runs it.
 
 There are **four modes** (`--mode`, default `ble`). `--elf` is the DUT (the
-central half in `split` / `ble-split`):
+central half in `wired-split` / `ble-split`):
 
 | Mode | What it proves |
 |---|---|
 | **`ble`** (default) | Boots the exact `studio-rpc-usb-uart` **hardware** image with no extra config. With `--host-elf`: LE pairing + an encrypted Studio GATT read. Without it: boot liveness. |
 | **`usb`** | The same real image, driving Studio RPC over the emulated **USB CDC** (fast, no BLE pairing cost) — the natural choice for module RPC tests. |
-| **`split`** | A **wired-split** pair: both halves boot and a keypress injected on the peripheral is relayed over the wired split UART to the central. |
+| **`wired-split`** | A **wired-split** pair whose central still speaks Studio over the emulated **USB CDC**: a Studio round trip over USB, plus a keypress injected on the peripheral relayed over the wired split UART to the central. |
 | **`ble-split`** | A **wireless split** end to end: the encrypted split link comes up, then the host does an encrypted Studio read *through* the central. |
 
 ```bash
