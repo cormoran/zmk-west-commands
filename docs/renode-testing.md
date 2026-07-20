@@ -328,6 +328,33 @@ full Studio request/response script via [`ble-studio-host`](../ble-studio-host/)
 ble mode here instead runs the **real ARM binary** under Renode and only proves
 the encrypted-link Studio read reaches the DUT. They are complementary.
 
+## GitHub Action
+
+A thin composite action wraps the command for CI (it installs protobuf/protoc,
+caches Renode, and calls `west zmk-renode-test`). It assumes the caller already
+ran checkout + `west init`/`west update` with `zmk-west-commands` in the
+manifest:
+
+```yaml
+- uses: cormoran/zmk-west-commands/.github/actions/zmk-renode-test@main
+  with:
+    # default mode is `ble`: elf-path is the real studio-rpc-usb-uart image.
+    elf-path: build/ble/zephyr/zmk.elf
+    host-elf: build/zephyr/zephyr.elf   # optional; ble full S4/S5 (else liveness)
+    # mode: usb                          # same elf-path image, Studio over USB CDC
+    tests: tests/renode                  # optional
+```
+
+See [`.github/actions/zmk-renode-test/README.md`](../.github/actions/zmk-renode-test/README.md)
+for the full contract.
+
+## Requirements
+
+The usb mode Studio RPC check compiles the workspace's `zmk-studio-messages`
+protos, so it needs the python `protobuf` runtime and the `protoc` compiler:
+`pip install -r requirements-test.txt` (`protoc` is a system package, e.g.
+`apt-get install protobuf-compiler`).
+
 ## Troubleshooting
 
 | Symptom (on stderr / in the smoke output) | Likely cause / fix |

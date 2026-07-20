@@ -18,25 +18,33 @@ manifest:
       import: true
 ```
 
-Then, you can use `west zmk-build` and `west zmk-test` commands.
+Then, you can use `west zmk-*` commands like below.
 
 ```bash
 $ west update
 $ west -h
 ...
 extension commands from project manifest (path: zmk-west-commands):
-  zmk-test:             Run ZMK unit tests
   zmk-build:            Build ZMK firmware for given zmk-config
+  zmk-test:             Run ZMK unit tests
+  zmk-renode-test:      Run ZMK Renode emulator tests against a pre-built ELF
+  zmk-ble-test:         Run ZMK module BabbleSim (bsim) BLE tests
 ...
 # Optionally required to use interactive option
 $ pip install -r <path to zmk-west-commands>/requirements.txt
 ```
 
+| Command | What it does | Details |
+|---|---|---|
+| `west zmk-build` | Build (and flash) ZMK firmware for a zmk-config, driven by its `build.yaml`. | [docs/zmk-build.md](docs/zmk-build.md) |
+| `west zmk-test` | Run ZMK's `native_sim` unit tests with the environment set up automatically. | [docs/zmk-test.md](docs/zmk-test.md) |
+| `west zmk-renode-test` | Boot a pre-built firmware ELF in the Renode emulator and run boot + Studio smoke tests — no hardware. | [docs/renode-testing.md](docs/renode-testing.md) |
+| `west zmk-ble-test` | Run a module's BabbleSim (bsim) BLE tests — no hardware. | [docs/zmk-ble-test.md](docs/zmk-ble-test.md) |
+
 ### west zmk-build
 
-A small `west build` wrapper command for zmk modules.
-
-This command reads zmk's `build.yaml` and automatically configures options for `west build`.
+A small `west build` wrapper command for zmk modules. This command reads zmk's
+`build.yaml` and automatically configures options for `west build`.
 
 ```bash
 $ cd <path to your zmk-config>
@@ -55,57 +63,9 @@ $ west zmk-build -a mykbd
 $ west zmk-build -af 'mykbd-*'
 ```
 
-You can also flash directly after the build. It internally executes `west flash -d <build dir> --skip-build`.
-
-```bash
-# Using the default runner of the target board (e.g. UF2 for XIAO nrf52840)
-$ west zmk-build --flash
-# Specify runner arguments with `+` prefix
-$ west zmk-build --flash +r jlink
-# Skip build
-$ west zmk-build --flash -sb
-```
-
-There are some useful shortcuts to specify cmake arguments:
-
-```bash
-# Erase persistent settings (e.g. BLE pairing setting) on restart
-# It's the same as --cmake-args ' -DCONFIG_ZMK_SETTINGS_RESET_ON_START'
-$ west zmk-build --reset
-# Enable USB logging by building with -S zmk-usb-logging
-$ west zmk-build --debug-print
-# Build with debug mode and enable RTT console for segger jlink
-$ west zmk-build --debug-jlink
-```
-
-#### VSCode Integration
-
-You can generate VSCode settings for IntelliSense and debugging:
-
-```bash
-# Generate .vscode/c_cpp_properties.json and .vscode/launch.json
-$ west zmk-build --vscode
-```
-
-This creates:
-
-- `.vscode/c_cpp_properties.json` - IntelliSense configuration using compile_commands.json
-- `.vscode/launch.json` - Debugging configuration for Cortex-Debug extension with J-Link
-
-Note: Currently only supports nRF52840 boards.
-
-##### Extended behavior
-
-As an extended behavior, this command recognizes the `snippets` field in `build.yaml` to allow specifying multiple snippets.
-
-```yaml:build.yaml
-include:
-  - artifact: foo
-    # snippet: zmk-usb-logging # ZMK's official definition
-    snippets:
-      - zmk-usb-logging
-      - studio-rpc-usb-uart
-```
+See **[docs/zmk-build.md](docs/zmk-build.md)** for flashing (`--flash`), the
+shortcut flags (`--reset` / `--debug-print` / `--debug-jlink`), VSCode
+integration (`--vscode`), and the extended `build.yaml` `snippets` behavior.
 
 ### west zmk-test
 
@@ -134,6 +94,9 @@ options:
   -v, --verbose         Enable verbose output for west itself and tests.
 ```
 
+See **[docs/zmk-test.md](docs/zmk-test.md)** for the test-case directory layout
+(how cases are discovered and what each file means).
+
 ### west zmk-renode-test
 
 Boot an **already-built** ZMK firmware ELF in the [Renode](https://renode.io/)
@@ -141,207 +104,34 @@ emulator, run a boot + Studio smoke test, then (optionally) the module's own
 `tests/renode/*_test.py` files. Hardware-free — no J-Link, no physical board.
 This command never builds firmware; the caller builds the ELF.
 
-There are **four modes** (`--mode`, default `ble`). `--elf` is the DUT (the
+There are **four modes** (`--mode`, default `ble`); `--elf` is the DUT (the
 central half in `split` / `ble-split`):
 
-| Mode | DUT you build | What the smoke proves | Runtime |
-|---|---|---|---|
-| **`ble`** (default) | the exact `studio-rpc-usb-uart` **hardware** image you would flash — **no extra config** | With `--host-elf`: LE pairing + an encrypted Studio GATT read (S4/S5). Without it: the image boots and stays alive (no Zephyr fatal). | ~35–90 s |
-| **`usb`** | the **same** real hardware image as ble mode (one build serves both) | The image enumerates over emulated USB and answers a core Studio `GetDeviceInfo` over its **real USB CDC** transport (+ boot banner when the image also has a console CDC) | ~45 s |
-| **`ble-split`** | both halves of a wireless split: `--elf` = split CENTRAL (Studio), `--peripheral-elf` = split PERIPHERAL, `--host-elf` = host | The encrypted split link comes up (peripheral↔central L2) **then** the host does an encrypted Studio read **through** the central (peripheral → central → host) | ~3–6 min |
-| **`split`** | a **wired-split** pair: `--elf` central + `--peripheral-elf` peripheral (this repo's `renode_wired_split` shield) | BOTH halves boot (ZMK banner) **and** a keypress injected on the peripheral is relayed over the wired split UART and processed by the central | ~20 s |
-
-ble is the default because it boots the **exact image you flash** — a module
-needs no Renode-specific build artifact. usb mode runs that **same** image but
-drives Studio RPC bidirectionally over the emulated USB CDC — real image *and*
-a fast direct RPC round trip (no BLE pairing / time-sync-quantum cost), making
-it the natural choice for module RPC tests against the real artifact.
-
-Renode is downloaded automatically on first use (a portable tarball, cached
-under `$RENODE_ROOT`, default `~/.renode`). Each `tests_dir/*_test.py` file is
-run non-recursively as `python3 <file> -v` with the harness (`scripts/lib/renode/`)
-on `PYTHONPATH` and the `ZMK_RENODE_*` env contract set — see
-[docs/renode-testing.md](docs/renode-testing.md).
-
-#### ble mode (default)
-
-The DUT is the **real flashable image** (ZMK's own `studio-rpc-usb-uart`
-snippet: USB CDC + QSPI NOR + BLE), with **zero firmware-side deviation** —
-platform stubs make that exact image boot under Renode, so there is nothing
-module-specific to build. Build the [`renode-ble-host`](renode-ble-host/) app
-(the simulated computer) once, then run the two-machine BLE smoke:
+| Mode | What it proves |
+|---|---|
+| **`ble`** (default) | Boots the exact `studio-rpc-usb-uart` **hardware** image with no extra config. With `--host-elf`: LE pairing + an encrypted Studio GATT read. Without it: boot liveness. |
+| **`usb`** | The same real image, driving Studio RPC over the emulated **USB CDC** (fast, no BLE pairing cost) — the natural choice for module RPC tests. |
+| **`split`** | A **wired-split** pair: both halves boot and a keypress injected on the peripheral is relayed over the wired split UART to the central. |
+| **`ble-split`** | A **wireless split** end to end: the encrypted split link comes up, then the host does an encrypted Studio read *through* the central. |
 
 ```bash
-# build the exact hardware image:
+# ble mode (default): build the exact hardware image, then smoke it
 $ west zmk-build <your-zmk-config> -af <your studio-rpc-usb-uart artifact>
-# build the host app once (match its target-name prefix to your DUT's
-# advertised CONFIG_ZMK_KEYBOARD_NAME; default prefix is "Module"):
-$ west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host \
-      -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your DUT name>"'
-$ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf \
-      --host-elf build/zephyr/zephyr.elf
-```
-
-The host pairs (LE SC Just Works) and does an encrypted Studio GATT read — the
-same code paths as a hardware Studio-over-BLE session. **Without `--host-elf`**
-it degrades to a boot-liveness check (the real image boots and is not parked in
-a Zephyr fatal), handy to smoke a real image when you have no host app:
-
-```bash
 $ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
 ```
 
-> ble mode's encrypted read is a **functional** check, **not** a cryptographic
-> one — Renode has no AES-CCM engine, so both machines share a *fake*
-> identity-transform CCM. Do not use it to validate crypto. Details, and how a
-> real image boots at all under Renode, are in
-> [docs/renode-internals.md](docs/renode-internals.md).
-
-#### usb mode
-
-The DUT is the **same real flashable image** as ble mode — nothing extra to
-build — but the smoke drives Studio RPC over the image's **real USB transport**:
-a forked `NRF_USBD_Full` C# model performs real register-level USB enumeration
-and a `DualCdcAcmBridge` USB-host external exposes the composite's CDC-ACM
-function(s) as TCP sockets (see
-[docs/renode-internals.md](docs/renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)):
-
-```bash
-# the exact hardware image you already built for ble mode:
-$ west zmk-renode-test --mode usb --elf build/<artifact>/zephyr/zmk.elf
-# smoke + the module's own tests:
-$ west zmk-renode-test tests/renode --mode usb --elf build/<artifact>/zephyr/zmk.elf
-```
-
-The smoke always asserts a core Studio `GetDeviceInfo` round trip over the
-Studio CDC. A standard `studio-rpc-usb-uart` image has one CDC function
-(Studio) + HID; if the image *also* enables `CONFIG_ZMK_USB_LOGGING`, the board
-console CDC enumerates first and the smoke additionally asserts the Zephyr boot
-banner on it (auto-detected from the image's real USB descriptors — no flag
-needed). Single machine, no BLE time-sync quantum: real-image coverage at
-high speed.
-
-#### ble-split mode
-
-Tests a **wireless split** keyboard end to end — three emulated nRF52840s on one
-BLE medium:
-
-```
-split PERIPHERAL half  ──BLE (split, encrypted)──▶  split CENTRAL half  ──BLE (Studio, encrypted)──▶  host
-```
-
-The split CENTRAL half is BOTH a GAP central (it connects+pairs to the
-peripheral half) **and** a GAP peripheral (it advertises ZMK Studio and the host
-connects+pairs to *it*). The smoke asserts, in order: (1) the encrypted split
-link comes up — the peripheral reaches BT security L2 with the central; then
-(2) the host reaches an encrypted Studio GATT read (S4/S5) **through** the
-central. Reaching S5 through the split central proves the whole
-peripheral → central → host encrypted chain. It also asserts **0** radio
-"trimming" warnings (every on-air PDU stayed within Renode's 31-byte cap).
-
-```bash
-# build both split halves + the host (both halves cap DLE to 27 via the shield):
-$ west zmk-build <your-zmk-config> --build-yaml <...>/build-ble-split.yaml -af <central-artifact> -d build
-$ west zmk-build <your-zmk-config> --build-yaml <...>/build-ble-split.yaml -af <peripheral-artifact> -d build
-$ west build -b nrf52840dk/nrf52840 -s <this repo>/renode-ble-host \
-      -- -DCONFIG_RENODE_BLE_HOST_TARGET_NAME='"<your central's name>"'
-$ west zmk-renode-test --mode ble-split \
-      --elf build/<central-artifact>/zephyr/zmk.elf \
-      --peripheral-elf build/<peripheral-artifact>/zephyr/zmk.elf \
-      --host-elf build/ble-host/zephyr/zephyr.elf
-```
-
-See `tests/zmk-config/boards/shields/renode_split/` and `build-ble-split.yaml`
-for a worked example (central = `renode_split_left`, peripheral =
-`renode_split_right`).
-
-> **Heavy / opt-in.** Three CPUs re-syncing every 10 µs of virtual time run
-> ~0.1× realtime; both pairings settle by ~18 s virtual (~3 min wall observed,
-> longer on a shared CI runner). Same fake-CCM disclaimer as ble mode — plus
-> the split link is itself encrypted, so it uses the fake CCM too.
-
-#### split mode (wired)
-
-The DUT is a **wired split pair**: two ZMK images — a central and a peripheral —
-booted as two Renode machines whose split-link UARTs (`uart1`) are
-cross-connected through a Renode UART hub, so the emulated boards talk over
-ZMK's `zmk,wired-split` transport (no BLE). Each half's console is on `uart0`.
-The nRF52840 has only two UARTEs, so console + split link leave **no** UART for
-a Studio RPC transport — the smoke proves the split *pairing/relay*, not Studio:
-both halves reach the boot banner, then a keypress injected on the peripheral is
-relayed over the wire and processed by the central (which logs the relayed key
-position).
-
-Build both halves from this repo's one `renode_wired_split` shield (they differ
-only by `CONFIG_ZMK_SPLIT_ROLE_CENTRAL`), e.g. via
-[`tests/zmk-config/build-split.yaml`](tests/zmk-config/build-split.yaml):
-
-```yaml
-include:
-  - artifact: split-central
-    board: xiao_ble//zmk
-    shield: renode_wired_split
-    cmake-args: -DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y
-  - artifact: split-peripheral
-    board: xiao_ble//zmk
-    shield: renode_wired_split
-```
-
-```bash
-$ west zmk-build <your-zmk-config> --build-yaml tests/zmk-config/build-split.yaml -af split -d build
-$ west zmk-renode-test --mode split \
-      --elf build/split-central/zephyr/zmk.elf \
-      --peripheral-elf build/split-peripheral/zephyr/zmk.elf
-```
-
-#### Requirements
-
-The usb mode Studio RPC check compiles the workspace's
-`zmk-studio-messages` protos, so it needs the python `protobuf` runtime and the
-`protoc` compiler: `pip install -r requirements-test.txt` (`protoc` is a system
-package, e.g. `apt-get install protobuf-compiler`).
-
-#### GitHub Action
-
-A thin composite action wraps the command for CI (it installs protobuf/protoc,
-caches Renode, and calls `west zmk-renode-test`). It assumes the caller already
-ran checkout + `west init`/`west update` with `zmk-west-commands` in the
-manifest:
-
-```yaml
-- uses: cormoran/zmk-west-commands/.github/actions/zmk-renode-test@main
-  with:
-    # default mode is `ble`: elf-path is the real studio-rpc-usb-uart image.
-    elf-path: build/ble/zephyr/zmk.elf
-    host-elf: build/zephyr/zephyr.elf   # optional; ble full S4/S5 (else liveness)
-    # mode: usb                          # same elf-path image, Studio over USB CDC
-    tests: tests/renode                  # optional
-```
-
-See `.github/actions/zmk-renode-test/README.md` for the full contract.
-
-#### Going deeper
-
-- **[docs/renode-testing.md](docs/renode-testing.md)** — the advanced knobs
-  (`--rtt`, `--steady-quantum`, `--min-virtual`, storage overrides), the
-  `ZMK_RENODE_*` module-test env contract, observing a real image over SEGGER
-  RTT, BLE-mode performance + the fine-then-coarse quantum, a troubleshooting
-  table, and limitations.
-- **[docs/renode-internals.md](docs/renode-internals.md)** — how a real
-  hardware image boots under Renode at all: the QSPI/USBD/FICR/NVMC stubs, the
-  NVS preload, the fake-CCM identity transform (with the two load-bearing
-  gotchas and the crypto disclaimer), the DLE-27 / 10 µs quantum constraints,
-  and usb mode's `NRF_USBD_Full` fork + `DualCdcAcmBridge` USB host.
+See **[docs/renode-testing.md](docs/renode-testing.md)** for per-mode build +
+run recipes, all flags, the `ZMK_RENODE_*` module-test env contract, RTT
+observation, performance, requirements, and troubleshooting; and
+**[docs/renode-internals.md](docs/renode-internals.md)** for how a real image
+boots under emulation at all (platform stubs, fake CCM, USB model fork).
 
 ### west zmk-ble-test
 
 Run a module's **BabbleSim (bsim) BLE tests** with no hardware: build the DUT
-from the workspace ZMK app with your module added via `ZMK_EXTRA_MODULES`,
-build any split peripherals and host ("computer") apps, launch them all under
-the bsim 2G4 phy, and diff the filtered device output against a checked-in
-snapshot. This is a Python port of the template repo's
-`tests/ble/run-ble-test.sh`, kept byte-compatible with its
-`sort | sed | diff` pass/fail pipeline.
+from the workspace ZMK app with your module added via `ZMK_EXTRA_MODULES`, build
+any split peripherals and host ("computer") apps, launch them all under the bsim
+2G4 phy, and diff the filtered device output against a checked-in snapshot.
 
 ```bash
 # Run every case under tests/ble, with this module added via ZMK_EXTRA_MODULES
@@ -362,245 +152,23 @@ usage: west zmk-ble-test [-h] [-m MODULE] [--auto-accept] [--sim-prefix NAME]
                          [--bsim PATH] [-j PARALLEL] [-v] [tests_path]
 ```
 
-A directory is a **test case** iff it contains `nrf52_bsim.keymap`; discovery
-recurses from `tests_path` (default: current directory). Per-case files:
+See **[docs/zmk-ble-test.md](docs/zmk-ble-test.md)** for the test-case directory
+layout, the `siblings.txt` placeholder / device-numbering rules, determinism
+guidance, BabbleSim setup, the ZMK revision prerequisite, and the
+Studio-over-BLE host-app JSON DSL.
 
-| File | Meaning |
-|---|---|
-| `nrf52_bsim.keymap` | marks the case; DUT keymap (needs a keys'd physical layout for Studio) |
-| `nrf52_bsim.conf` | Kconfig shared by the DUT and peripherals (via `ZMK_CONFIG`) |
-| `central.conf` | extra Kconfig applied to the DUT (central) only (via `EXTRA_CONF_FILE`) |
-| `peripheral.conf` | extra Kconfig applied to peripheral builds only |
-| `peripheral*.overlay` | one split-peripheral build each; presence ⇒ DUT built as a split central (`-DCONFIG_ZMK_SPLIT_ROLE_CENTRAL=y`) |
-| `siblings.txt` | one command line per extra simulated device (`-d=2…`; `-d=0` is the DUT, `-d=1` the handbrake) |
-| `studio_requests.json` | declarative `zmk.studio.Request` list (JSON DSL); if present, the shared `ble-studio-host` app is built for this case with these payloads embedded (see below) |
-| `studio_requests.hex` | byte-exact escape hatch for the same (one framed request per hex line); mutually exclusive with the `.json` |
-| `events.patterns` | `sed -E -n` script filtering the combined output log |
-| `events.snapshot` | expected filtered output |
-| `pending` | if present, a snapshot mismatch is PENDING instead of FAILED |
+## GitHub Actions
 
-Builds land under `<west topdir>/build/ble/`; each case's `output.log`,
-`filtered_output.log` and the aggregate `tests/pass-fail.log` are kept there.
+Thin composite actions wrap the commands above for CI. Each assumes the caller
+already ran checkout + `west init`/`west update` with `zmk-west-commands` in the
+manifest. Usage and the full input contract are documented alongside each
+command:
 
-**Placeholders in `siblings.txt`.** `--sim-prefix NAME` (default: the
-sanitized module directory name) sets the bsim simulation id
-(`<prefix>_<case>`) and the staged executable-name prefix. In `siblings.txt`:
-
-- `{prefix}` expands to the active prefix. Lines without placeholders run
-  unchanged, so existing case data keeps working.
-- `{studio_host}` expands to the case's staged shared-host executable name
-  (`<sim id>_studio_host.exe` — only meaningful for cases with a
-  `studio_requests.json`/`.hex`).
-
-Custom module host apps (`tests/ble/*_host/`, the documented convention; the
-legacy `tests/ble/*_central/` is still auto-discovered for backward compat)
-are staged as both `<prefix>_<appname>.exe` and a plain `<appname>.exe`
-alias.
-
-**Device numbering & asserting any device (incl. peripherals).** The runner
-assigns `-d=0` to the DUT and `-d=1` to the bsim handbrake; **every other
-device gets its id from its own `siblings.txt` line** (`-d=2`, `-d=3`, … as
-written there — split peripherals are ordinary siblings: the runner stages
-`<sim id>_<peripheral>.exe`, the case launches it). Each device prefixes its
-stdout with `d_NN: @<sim time>`; the combined `output.log` captures the DUT
-and all siblings (the handbrake is not captured). The evaluation pipeline's
-stable `sort -t: -k1,1` groups lines per device (ascending id: the `d_00`
-block, then `d_02`, `d_03`, …) while preserving each device's own
-chronological order — so a snapshot lists one deterministic block per
-asserted device, and **any device's lines can be asserted**, not just the
-DUT/host. Relabel with a keyword-guarded substitution so only the intended
-lines print (a substitution only prints when it matches, so the same keyword
-appearing on another device's line is harmless), e.g. `split/basic`'s
-peripheral rule:
-
-```sed
-/Welcome to ZMK!|security_changed: Security changed|kscan_process_msgq/s/^d_03: @[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}  .{19}/peripheral /p
-```
-
-Determinism guidance — bsim runs are deterministic per firmware build, but
-prefer lines that stay stable across dependency bumps and avoid:
-`*** Booting Zephyr OS build <hash> ***` (changes with every Zephyr/ZMK
-revision), raw kscan-mock event encodings (`ev <number> …` — prefer the
-decoded `…kscan_process_msgq: Row: …, pressed: …` lines), and HCI
-version/build banner lines. Semantic lines (connection/security changes,
-CCC subscriptions, position events) are stable and meaningful. When in
-doubt, run the case at least twice (ideally with different `--sim-prefix`)
-and confirm identical `filtered_output.log`.
-
-**BabbleSim setup.** bsim is Linux-only and comes from ZMK's manifest. Fetch
-and build it once, then point the command at it:
-
-```bash
-$ west config manifest.group-filter -- +babblesim
-$ west update --narrow
-$ make -C "$(west topdir)/dependencies/tools/bsim" everything -j"$(nproc)"
-$ export BSIM_OUT_PATH="$(west topdir)/dependencies/tools/bsim"
-$ export BSIM_COMPONENTS_PATH="$BSIM_OUT_PATH/components"
-```
-
-`BSIM_OUT_PATH`/`BSIM_COMPONENTS_PATH` (or `--bsim PATH`) select the compiled
-tree; the command errors with these instructions if it is missing or
-uncompiled.
-
-**ZMK revision prerequisite.** The bsim BLE tests need two fixes not yet on
-`zmkfirmware/zmk` main — a writable behavior local-id map section, and
-`settings_subsys_init` before dynamic BLE handler registration (without them
-the split central segfaults or never starts BLE on `nrf52_bsim`). Until they
-land upstream, pin `cormoran/zmk@fffa339cf6f5c45366ab332d2b512f1c3c300753` in
-your test manifest (this repo's `scripts/west-test-ble.yml` does exactly that,
-with a TODO to unpin).
-
-**Studio-over-BLE host app (no C, no Python in your module).** To exercise
-Studio RPC over BLE (including while the split link is active), your case
-ships **one data file**: `studio_requests.json`, an ordered list of
-`zmk.studio.Request` messages in protobuf's canonical JSON mapping. A bytes
-field (e.g. a custom-subsystem `Call.payload`) may be written as
-`{"$type": "<full.message.name>", ...fields}` — the infrastructure resolves
-the name against the workspace's Studio protos plus your module's own
-`proto/` directory, encodes the message and substitutes the bytes
-(recursively); `request_id` is auto-assigned (1-based) when omitted:
-
-```json
-[
-  { "custom": { "listCustomSubsystems": {} } },
-  { "custom": { "call": {
-      "subsystemIndex": 0,
-      "payload": { "$type": "your_name.template.Request",
-                   "sample": { "value": 42 } } } } }
-]
-```
-
-The runner converts the JSON at test time (needs python `protobuf` + `protoc`
-— see `requirements-test.txt`; the CI action installs both), automatically
-builds this repo's shared [`ble-studio-host/`](ble-studio-host/) app with the
-payloads embedded, and stages it per case; reference it from `siblings.txt`
-as `./{studio_host} -d=2`. See
-[`ble-studio-host/README.md`](ble-studio-host/README.md) for the full DSL
-spec and [`tests/ble/studio/core/`](tests/ble/studio/core/) for a complete
-sample case. **Escape hatches:** a byte-exact `studio_requests.hex` (or the
-programmatic API in `scripts/lib/ble/studio_requests.py`) for payloads the
-JSON mapping cannot express, and a custom host app as
-`tests/ble/<name>_host/` (legacy `tests/ble/<name>_central/` still
-auto-discovered) for custom host-side logic. Prefer the shared app + JSON
-whenever "send requests in order, snapshot the response hexdumps" is enough.
-
-#### GitHub Action
-
-A thin composite action wraps the command for CI (enables the `+babblesim`
-group, builds and caches the bsim tree, exports `BSIM_OUT_PATH` /
-`BSIM_COMPONENTS_PATH`, and calls `west zmk-ble-test`). It assumes the caller
-already ran checkout + `west init`/`west update` with `zmk-west-commands` in
-the manifest, and runs in the `zmkfirmware/zmk-build-arm:4.1` container:
-
-```yaml
-- uses: cormoran/zmk-west-commands/.github/actions/zmk-ble-test@main
-  with:
-    tests: tests/ble
-    module: .
-```
-
-See `.github/actions/zmk-ble-test/README.md` for the full contract.
-
-## Use case
-
-TODO
-
-###
+- **`zmk-renode-test`** — see [docs/renode-testing.md § GitHub Action](docs/renode-testing.md#github-action)
+- **`zmk-ble-test`** — see [docs/zmk-ble-test.md § GitHub Action](docs/zmk-ble-test.md#github-action)
 
 ## Development Guide
 
-### Setup
-
-There are two west workspace layout options.
-
-**Option 1: Download dependencies in parent directory**
-
-This option is west's standard way. Choose this option if you want to re-use dependent projects in other zephyr module development.
-
-```bash
-mkdir west-workspace
-cd west-workspace
-git clone https://github.com/cormoran/zmk-west-commands.git
-west init -l . --mf scripts/west-test.yml
-west update --narrow
-west zephyr-export
-```
-
-The directory structure becomes as follows:
-
-```
-west-workspace
-  - .west/config
-  - build : build output directory
-  - zmk-west-commands: this repository
-  # other dependencies
-  - zmk
-  - zephyr
-  - ...
-  # You can develop other zephyr modules in this workspace
-  - your-other-repo
-```
-
-**Option 2: Download dependencies in ./dependencies (Enabled in dev-container)**
-
-Choose this option if you want to download dependencies under this directory (like `node_modules` in npm).
-This option is useful for specifying cache target in CI. This layout is easier to understand if you want to isolate dependencies.
-
-Note that `.west` is placed in the parent directory. Creating an empty parent directory is required like option 1 to avoid conflicts with other zephyr module development.
-
-```bash
-mkdir west-workspace
-cd west-workspace
-west init -l . --mf scripts/west-test-standalone.yml
-# If you use dev container, start from the following commands. Above commands are executed
-# automatically. (but directory name is /workspace instead of west-workspace for dev container)
-west update --narrow
-west zephyr-export
-```
-
-The directory structure becomes as follows:
-
-```
-west-workspace
-  - .west/config
-  - build : build output directory
-  - zmk-west-commands: this repository
-    - dependencies
-      - zmk
-      - zephyr
-      - ...
-```
-
-#### Dev container
-
-The dev container is configured for setup option 2. The container creates the following volumes to re-use resources among containers.
-
-- zmk-dependencies: dependencies dir for setup option 2
-- zmk-build: build output directory
-- zmk-root-user: /root, the same as ZMK's official dev container
-
-If you don't want to share resources, please rename the volume name in `devcontainer.json`.
-
-### Test
-
-The `./tests` directory contains zmk-config to test west commands.
-You can try it with the following commands.
-
-```bash
-west zmk-test tests
-west zmk-build tests/build_yaml
-```
-
-The following test script verifies the output of the above commands to detect regressions.
-
-```bash
-python -m unittest
-```
-
-### Linting & formatting
-
-```bash
-pip install -r requirements-dev.txt
-ruff format .
-ruff check .
-```
+See **[docs/development.md](docs/development.md)** for how to set up a west
+workspace to develop and test `zmk-west-commands` itself (workspace layouts, the
+dev container, running the tests, linting & formatting).
