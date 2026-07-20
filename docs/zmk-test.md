@@ -36,6 +36,21 @@ At run time the firmware output is piped through `events.patterns` and diffed
 against the snapshot: matching ⇒ PASS, differing ⇒ FAIL. This is the same
 `sed | diff` model ZMK uses upstream, so existing ZMK-style cases work unchanged.
 
+```mermaid
+graph LR
+    keymap["native_sim.keymap<br/>(+ mock key events)"]
+    fw["native_sim firmware<br/>run"]
+    filter["events.patterns<br/>(sed filter)"]
+    snap["*.snapshot"]
+    diff{"diff"}
+    keymap --> fw
+    fw -- "raw output" --> filter
+    filter --> diff
+    snap --> diff
+    diff -- "match" --> pass(["PASS"])
+    diff -- "differ" --> fail(["FAIL"])
+```
+
 Example — [`tests/test1/native_sim.keymap`](../tests/test1/native_sim.keymap)
 presses/releases position 0 twice, [`events.patterns`](../tests/test1/events.patterns)
 strips everything up to the `on_keymap_binding_` prefix, and

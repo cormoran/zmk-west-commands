@@ -6,8 +6,8 @@ two on-air constraints that make `--mode ble` work, and the USB model fork +
 host bridge behind `--mode usb`. You do not need any of this
 to *use* `west zmk-renode-test`; it is here for the curious and for anyone
 extending the harness. For usage, flags, and troubleshooting see
-[renode-testing.md](renode-testing.md); for the mode overview see the
-repo [README](../README.md).
+[renode-testing.md](../renode-testing.md); for the mode overview see the
+repo [README](../../README.md).
 
 The default **ble mode** boots the *exact* `studio-rpc-usb-uart` hardware
 artifact (USB CDC + QSPI NOR + BLE all enabled), with **zero firmware-side
@@ -65,7 +65,7 @@ DUT and host advertise different addresses; `boot_ble_split` extends it to
 
 Renode has no AES-CCM engine, so every machine in ble / ble-split mode shares a
 *fake* CCM peripheral
-([`platforms/models/ccm.py`](../scripts/lib/renode/platforms/models/ccm.py))
+([`platforms/models/ccm.py`](../../scripts/lib/renode/platforms/models/ccm.py))
 that is an **identity transform**: it just appends/strips 4 dummy MIC bytes and
 reports MIC-OK. It only has to be self-consistent because both endpoints run the
 same fake. This is perfect for a **functional** test — the encrypted code paths
@@ -112,7 +112,7 @@ a real failure mode):
   pairing* (the soft link-layer's radio-event prepare runs late and asserts
   otherwise), but once the encrypted link is up (host `STAGE:S4`) the link-layer
   tolerates a 100×-coarser quantum — the basis of the `--steady-quantum`
-  fine-then-coarse lever (see [renode-testing.md](renode-testing.md#ble-mode-performance)).
+  fine-then-coarse lever (see [renode-testing.md](../renode-testing.md#ble-mode-performance)).
   In **ble-split** the same 10 µs quantum is load-bearing through **both**
   pairings (`three_machine_ble.resc`), and with three CPUs re-syncing it is the
   heaviest run here (~0.1× realtime; both pairings settle by ~18 s virtual).
@@ -122,7 +122,7 @@ a real failure mode):
 `--mode usb` boots the same real image on `xiao_nrf52840_usb.repl`, which
 differs from the real platform in exactly one entry: the python `usbd` stub is
 replaced by **`NRF_USBD_Full`**
-([`platforms/models/NRF_USBD_Full.cs`](../scripts/lib/renode/platforms/models/NRF_USBD_Full.cs)),
+([`platforms/models/NRF_USBD_Full.cs`](../../scripts/lib/renode/platforms/models/NRF_USBD_Full.cs)),
 a fork of Renode 1.16.1's stock `USB.NRF_USBD` model, compiled **at load time**
 via `preinit: include` (the ad-hoc C# compiler — no Renode rebuild, exactly
 like the python stubs). The full design study + phase log lives in
@@ -162,7 +162,7 @@ subclassed. The fork is pinned to the exact upstream commit of the 1.16.1 tag
   whose ids match the nRF endpoint numbers and routes accordingly.
 
 **The DualCdcAcmBridge**
-([`platforms/models/DualCdcAcmBridge.cs`](../scripts/lib/renode/platforms/models/DualCdcAcmBridge.cs))
+([`platforms/models/DualCdcAcmBridge.cs`](../../scripts/lib/renode/platforms/models/DualCdcAcmBridge.cs))
 is the USB *host*: a `USBHost` external that enumerates the device once and
 exposes up to **two IUART channels** — one per CDC-ACM function of the
 composite, in configuration-descriptor interface order. It discovers the CDC

@@ -5,7 +5,7 @@ quickstart: the advanced flags, the `ZMK_RENODE_*` module-test env contract,
 observing a real image over SEGGER RTT, ble-mode performance, troubleshooting,
 and limitations. For how a real hardware image boots under emulation at all
 (platform stubs, fake CCM, on-air constraints) see
-[renode-internals.md](renode-internals.md).
+[renode-internals.md](design/renode-internals.md).
 
 `west zmk-renode-test` has **four modes** (`--mode`, default `ble` — it boots
 the exact hardware-flashable image with no extra module config); `--elf` is the
@@ -51,6 +51,13 @@ Advanced (rarely needed):
 
 ## ble mode: what it proves
 
+```mermaid
+graph LR
+    host["renode-ble-host<br/>(simulated computer)"]
+    dut["ZMK DUT<br/>(real hardware image)"]
+    host -- "LE pairing +<br/>encrypted Studio GATT read" --> dut
+```
+
 ble mode boots **two real ARM images** on one emulated Renode BLE medium — the
 unmodified ZMK DUT (advertiser) and the [`renode-ble-host`](../renode-ble-host/)
 app (the simulated computer) — and asserts the host reaches
@@ -60,7 +67,7 @@ Just Works pairing and an encrypted GATT read run end-to-end on the real
 firmware — the same code paths as a hardware Studio-over-BLE session — with
 **zero firmware-side deviation** on the DUT. It is a **functional** check, not a
 cryptographic one (see the fake-CCM disclaimer in
-[renode-internals.md](renode-internals.md#fake-ccm--not-cryptographically-real)).
+[renode-internals.md](design/renode-internals.md#fake-ccm--not-cryptographically-real)).
 
 The smoke passes as soon as S4+S5 appear; `--virtual-budget` (default 20 virtual
 seconds) caps how long it waits, and a wall-clock safety net stops a wedged run.
@@ -80,6 +87,15 @@ console output is not required.
 
 ## usb mode: what it proves (and when to pick it)
 
+```mermaid
+graph LR
+    smoke["smoke test<br/>(Studio RPC client)"]
+    bridge["DualCdcAcmBridge<br/>(USB host model)"]
+    dut["ZMK DUT<br/>(real hardware image)"]
+    smoke <-- "TCP socket" --> bridge
+    bridge <-- "real USB CDC<br/>(GetDeviceInfo)" --> dut
+```
+
 usb mode boots the **same real flashable image ble mode runs** — no extra build
 — on the `xiao_nrf52840_usb.repl` platform, where the python USBD stub is
 replaced by the forked `NRF_USBD_Full` C# model. The `DualCdcAcmBridge` USB
@@ -88,7 +104,7 @@ USB composite (SETUP/EP0, SET_CONFIGURATION, descriptor parsing, DTR) and
 exposes its CDC-ACM function(s) as TCP sockets, over which the smoke asserts a
 core Studio `GetDeviceInfo` round trip — the image's **real USB Studio
 transport**, bidirectionally. See
-[renode-internals.md](renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)
+[renode-internals.md](design/renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)
 for the model internals.
 
 The smoke adapts to the composite it finds (auto-detected from the real
@@ -118,6 +134,17 @@ $ west zmk-renode-test tests/renode --mode usb --elf build/<artifact>/zephyr/zmk
 ```
 
 ## split mode: what it proves
+
+```mermaid
+graph LR
+    key(["injected keypress"])
+    periph["peripheral half<br/>(renode_wired_split)"]
+    central["central half<br/>(renode_wired_split)"]
+    log(["central logs<br/>position: 0"])
+    key --> periph
+    periph -- "wired split link<br/>(uart1 ↔ uart1)" --> central
+    central --> log
+```
 
 split mode boots a **wired split pair** — a central (`--elf`) and a peripheral
 (`--peripheral-elf`) — as two Renode machines whose split-link UARTs (`uart1`)
@@ -157,8 +184,13 @@ $ west zmk-renode-test --mode split \
 ble-split mode boots **three real ARM images** on one emulated Renode BLE medium
 and proves a whole **wireless split** works end to end:
 
-```
-split PERIPHERAL half  ──BLE (split, encrypted)──▶  split CENTRAL half  ──BLE (Studio, encrypted)──▶  host
+```mermaid
+graph LR
+    periph["split PERIPHERAL half"]
+    central["split CENTRAL half<br/>(GAP central + peripheral)"]
+    host["host<br/>(renode-ble-host)"]
+    periph -- "BLE split link<br/>(encrypted)" --> central
+    central -- "BLE Studio<br/>(encrypted)" --> host
 ```
 
 The split **central** half (`--elf`) is BOTH a GAP central — it scans, connects
@@ -180,7 +212,7 @@ peripheral → central → host encrypted chain: the same central that holds the
 encrypted split link is serving the host's encrypted Studio read. The smoke also
 asserts **0** radio `trimming` warnings — every on-air PDU on **both** links
 stayed within Renode's 31-byte cap (see the DLE-27 note in
-[renode-internals.md](renode-internals.md#the-two-on-air-constraints-both-load-bearing)).
+[renode-internals.md](design/renode-internals.md#the-two-on-air-constraints-both-load-bearing)).
 Both the split link and the Studio link are encrypted, so **all three** machines
 carry the fake CCM.
 
@@ -363,18 +395,18 @@ protos, so it needs the python `protobuf` runtime and the `protoc` compiler:
 | usb: `no Studio RPC response frame received` | the composite's CDC mapping surprised the auto-detect (check the smoke's `N CDC functions found` line: with two CDCs the console is FIRST, Studio SECOND) or the image doesn't enable `CONFIG_ZMK_STUDIO`. |
 | ble liveness: `CPU parked in a fatal frame -- image faulted` | Zephyr fatal (often FICR/NVS). For a non-xiao_ble board, set `--storage-addr`/`--storage-size` to that board's `storage_partition`. Use `--rtt` to see the real fatal reason. |
 | ble liveness: `only reached Ns virtual ... emulation stalled?` | image spin-hung (e.g. NVMC poll) or the host is very slow — raise the implicit wall budget by lowering `--min-virtual`, or investigate with `--rtt`. |
-| ble host: `virtual-time budget exhausted ... before the encrypted read` | pairing never completed — check the printed DUT/host console tails; usually a DLE / quantum regression (see [renode-internals.md](renode-internals.md#the-two-on-air-constraints-both-load-bearing)). |
+| ble host: `virtual-time budget exhausted ... before the encrypted read` | pairing never completed — check the printed DUT/host console tails; usually a DLE / quantum regression (see [renode-internals.md](design/renode-internals.md#the-two-on-air-constraints-both-load-bearing)). |
 | ble host: nonzero `radio 'trimming' warnings` | an on-air PDU exceeded `27+4` bytes — the host-side `CONFIG_BT_CTLR_DATA_LENGTH_MAX=27` cap or a CCM offset regressed (internals). |
 | ble host: `security_changed err=9`, 30 s SMP timeout | fake-CCM RX transform regressed to lazy (internals). |
 
 ## Limitations
 
 - **ble mode is functional, not cryptographic** — the shared fake CCM is an
-  identity transform (see [renode-internals.md](renode-internals.md)).
+  identity transform (see [renode-internals.md](design/renode-internals.md)).
 - **In ble mode, USB stays intentionally idle** (unplugged cable) — never
   enumerate USB there, or ZMK switches its preferred transport to USB and the
   BLE Studio smoke breaks (see
-  [renode-internals.md](renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)).
+  [renode-internals.md](design/renode-internals.md#usb-mode-the-nrf_usbd_full-fork--the-dualcdcacmbridge)).
   Use usb mode for the USB Studio round trip.
 - **usb mode does not (yet) assert HID keystrokes** — the bridge only exposes
   the CDC functions; HID IN report capture is a possible follow-up.

@@ -13,6 +13,23 @@ For the quickstart and the `--help` summary see the
 the placeholder / device-numbering rules, BabbleSim setup, the ZMK revision
 prerequisite, the Studio-over-BLE host app DSL, and the CI action.
 
+All devices share one simulated 2G4 radio (the bsim phy). A typical split +
+Studio case runs four devices — the DUT is always `d=0`, the handbrake `d=1`,
+and every other device takes its id from its own `siblings.txt` line:
+
+```mermaid
+graph TB
+    subgraph phy["bsim 2G4 phy (one simulation id)"]
+        dut["d=0 · DUT<br/>split central + your module"]
+        hb["d=1 · handbrake"]
+        periph["d=2 · split peripheral"]
+        host["d=3 · ble-studio-host<br/>(sends studio_requests)"]
+        periph <-- "BLE split link" --> dut
+        host <-- "BLE Studio RPC" --> dut
+    end
+    dut --> log["output.log → events.patterns → diff vs events.snapshot"]
+```
+
 ## Test case directory layout
 
 A directory is a **test case** iff it contains `nrf52_bsim.keymap`; discovery

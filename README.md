@@ -119,7 +119,7 @@ $ west zmk-renode-test --elf build/<artifact>/zephyr/zmk.elf
 
 See **[docs/renode-testing.md](docs/renode-testing.md)** for per-mode recipes,
 flags, the CI action, and troubleshooting.
-**[docs/renode-internals.md](docs/renode-internals.md)** covers how a real image
+**[docs/renode-internals.md](docs/design/renode-internals.md)** covers how a real image
 boots under emulation.
 
 ### west zmk-ble-test

@@ -1,7 +1,7 @@
 """`west zmk-renode-test` -- boot a built ZMK ELF in the Renode emulator, run a
 boot + Studio smoke test, then a module's own `tests/renode/*_test.py` files.
 
-The test has two independent axes (see docs/renode-transport-orthogonal.md):
+The test has two independent axes (see docs/design/renode-transport-orthogonal.md):
 `--host-link {usb,ble,none}` (how the central answers Studio RPC) and
 `--split-link {none,wired,ble}` (how the central reaches the peripheral).
 `--mode` is retained as a backward-compatible preset expanding to a
@@ -104,7 +104,7 @@ class ZMKRenodeTest(WestCommand):
                 "split CENTRAL, --peripheral-elf the split PERIPHERAL, --host-elf the "
                 "host. split: wired-split central (--elf) + --peripheral-elf on a Renode "
                 "UART hub. Mutually exclusive with --host-link/--split-link. See "
-                "docs/renode-transport-orthogonal.md and docs/renode-testing.md."
+                "docs/design/renode-transport-orthogonal.md and docs/renode-testing.md."
             ),
         )
         parser.add_argument(
@@ -116,7 +116,7 @@ class ZMKRenodeTest(WestCommand):
                 "(emulated BLE GATT), none (boot-liveness only). Mutually exclusive with "
                 "--mode; pair with --split-link. The headline new combination is "
                 "--host-link usb --split-link wired (a wired split whose central still "
-                "speaks Studio). See docs/renode-transport-orthogonal.md."
+                "speaks Studio). See docs/design/renode-transport-orthogonal.md."
             ),
         )
         parser.add_argument(
@@ -157,7 +157,7 @@ class ZMKRenodeTest(WestCommand):
         )
 
         # Advanced knobs -- rarely needed; see docs/renode-testing.md and
-        # docs/renode-internals.md. Kept out of the common story on purpose.
+        # docs/design/renode-internals.md. Kept out of the common story on purpose.
         adv = parser.add_argument_group(
             "advanced", "rarely-needed knobs (see docs/renode-testing.md)"
         )
@@ -510,7 +510,7 @@ class ZMKRenodeTest(WestCommand):
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(LIB_RENODE_DIR) + (os.pathsep + existing if existing else "")
-        # Module-test env contract (see docs/renode-transport-orthogonal.md):
+        # Module-test env contract (see docs/design/renode-transport-orthogonal.md):
         #   ZMK_RENODE_HOST_LINK  = usb | ble | none
         #   ZMK_RENODE_SPLIT_LINK = none | wired | ble
         #   ZMK_RENODE_MODE       = the preset name when the pair is a preset, else
