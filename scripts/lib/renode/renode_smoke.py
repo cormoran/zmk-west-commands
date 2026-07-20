@@ -72,6 +72,85 @@ FATAL_SYMBOLS = ("arch_system_halt", "z_fatal_error", "k_sys_fatal_error_handler
 # Console markers (observation builds only) that also mean a fatal.
 FATAL_CONSOLE_MARKERS = ("FATAL ERROR", "Halting system")
 
+# ---------------------------------------------------------------------------
+# Transport orthogonalization: the test's two independent axes are the
+# host-link (how the central answers Studio RPC) and the split-link (how the
+# central reaches the peripheral). `--mode` is retained as a preset that
+# expands to a (host-link, split-link) pair. See docs/renode-transport-orthogonal.md.
+# ---------------------------------------------------------------------------
+HOST_LINKS = ("usb", "ble", "uart", "none")
+SPLIT_LINKS = ("none", "wired", "ble")
+
+# The five backward-compatible presets, each a (host-link, split-link) pair.
+MODE_PRESETS: dict[str, tuple[str, str]] = {
+    "uart": ("uart", "none"),
+    "ble": ("ble", "none"),
+    "usb": ("usb", "none"),
+    "split": ("none", "wired"),
+    "ble-split": ("ble", "ble"),
+}
+
+# (host-link, split-link) cells the harness knows how to run. The five presets
+# plus the orthogonal combinations reachable only via the axis flags. Cells not
+# listed here are rejected with an explanatory error (see resolve_links).
+SUPPORTED_LINKS: set[tuple[str, str]] = {
+    ("uart", "none"),
+    ("ble", "none"),
+    ("usb", "none"),
+    ("none", "wired"),
+    ("ble", "ble"),
+    ("usb", "wired"),  # the headline new combination
+}
+
+
+def canonical_mode(host_link: str, split_link: str) -> str:
+    """The preset name for a (host, split) pair, or the canonical
+    "<host>+<split>" string when the pair is not one of the five presets. Used
+    for the backward-compatible ZMK_RENODE_MODE env var / logging."""
+    for name, pair in MODE_PRESETS.items():
+        if pair == (host_link, split_link):
+            return name
+    return f"{host_link}+{split_link}"
+
+
+def resolve_links(
+    mode: str | None, host_link: str | None, split_link: str | None
+) -> tuple[str, str]:
+    """Resolve the (host-link, split-link) pair from either a --mode preset or
+    the explicit --host-link/--split-link axis flags, enforcing mutual
+    exclusion. Raises ValueError with a user-facing message on any conflict,
+    unknown value, or unsupported combination.
+
+    * no flags at all -> the default preset ("ble" == host ble, split none);
+    * --mode X         -> MODE_PRESETS[X];
+    * axis flags       -> (host_link or "none", split_link or "none").
+    --mode may not be combined with either axis flag."""
+    axes_given = host_link is not None or split_link is not None
+    if mode is not None and axes_given:
+        raise ValueError(
+            "--mode and --host-link/--split-link are mutually exclusive; use one vocabulary"
+        )
+    if mode is not None:
+        if mode not in MODE_PRESETS:
+            raise ValueError(f"unknown --mode {mode!r} (choices: {', '.join(MODE_PRESETS)})")
+        return MODE_PRESETS[mode]
+    if not axes_given:
+        return MODE_PRESETS["ble"]
+
+    host = host_link or "none"
+    split = split_link or "none"
+    if host not in HOST_LINKS:
+        raise ValueError(f"unknown --host-link {host!r} (choices: {', '.join(HOST_LINKS)})")
+    if split not in SPLIT_LINKS:
+        raise ValueError(f"unknown --split-link {split!r} (choices: {', '.join(SPLIT_LINKS)})")
+    if (host, split) not in SUPPORTED_LINKS:
+        supported = ", ".join(f"{h}x{s}" for h, s in sorted(SUPPORTED_LINKS))
+        raise ValueError(
+            f"unsupported combination host-link={host} x split-link={split}. "
+            f"Supported: {supported}. See docs/renode-transport-orthogonal.md."
+        )
+    return host, split
+
 
 def _parse_virtual_seconds(text: str) -> float | None:
     """Pull an 'Elapsed Virtual Time: HH:MM:SS.ffffff' value (in seconds) out
@@ -594,6 +673,200 @@ def run_split_smoke(
             file=sys.stderr,
         )
     finally:
+        peripheral_console.close()
+        central_console.close()
+        session.stop()
+
+
+def run_usb_wired_smoke(
+    central_elf: Path,
+    peripheral_elf: Path,
+    renode_path: str,
+    studio_proto_dir: Path,
+    boot_settle: float = 8.0,
+    wiring_timeout: float = 30.0,
+    boot_timeout: float = 20.0,
+    rpc_timeout: float = 10.0,
+    expect_name_nonempty: bool = True,
+    storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
+    storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
+    settle: float = 3.0,
+    event_timeout: float = 10.0,
+    max_attempts: int = 2,
+) -> None:
+    """usb+wired-split smoke (the orthogonal usb host-link x wired split-link
+    combination -- see docs/renode-transport-orthogonal.md), with the same
+    bounded whole-emulation retry as run_usb_smoke.
+
+    Boots a WIRED split pair (renode_harness.boot_usb_wired_split) whose CENTRAL
+    is a real studio-rpc-usb-uart image on the NRF_USBD_Full usb platform, then
+    asserts BOTH halves of what makes this combination valuable:
+
+      1. the central answers a core Studio RPC GetDeviceInfo over the emulated
+         USB CDC (attach_dual_cdc_bridge, as usb mode) -- Studio RPC on a wired
+         split central, which no UART-bound transport can do (both UARTEs are
+         taken by console + split link); AND
+      2. the wired split link is up -- a keypress injected on the peripheral is
+         relayed over the split UART and processed by the central (its keymap
+         logs "position: 0" on the central's uart0 console).
+
+    Passing both proves the central simultaneously services Studio over USB and
+    the wired split over the UARTEs. The central keeps its console on uart0 (USB
+    carries Studio, not console), so the boot banner and the relayed-key log are
+    read from the UART console; the USB composite is a single Studio CDC (+ HID).
+
+    WHY the retry (one whole-emulation re-boot): as in run_usb_smoke, the
+    wall-clock-paced USB attach/settle can lose a race under heavy host
+    contention; a genuine break fails BOTH attempts."""
+    studio_pb2 = renode_harness.load_studio_pb2(studio_proto_dir)
+
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            print(
+                f"--- usb+wired smoke attempt {attempt}/{max_attempts} "
+                "(fresh emulation; previous attempt failed) ---",
+                file=sys.stderr,
+            )
+        try:
+            _run_usb_wired_attempt(
+                studio_pb2,
+                central_elf=central_elf,
+                peripheral_elf=peripheral_elf,
+                renode_path=renode_path,
+                boot_settle=boot_settle,
+                wiring_timeout=wiring_timeout,
+                boot_timeout=boot_timeout,
+                rpc_timeout=rpc_timeout,
+                expect_name_nonempty=expect_name_nonempty,
+                storage_addr=storage_addr,
+                storage_size=storage_size,
+                settle=settle,
+                event_timeout=event_timeout,
+            )
+            if attempt > 1:
+                print(f"usb+wired smoke OK on attempt {attempt}", file=sys.stderr)
+            return
+        except (AssertionError, TimeoutError, OSError) as err:
+            last_err = err
+            print(
+                f"usb+wired smoke attempt {attempt}/{max_attempts} FAILED: {err!r}",
+                file=sys.stderr,
+            )
+    assert last_err is not None
+    if isinstance(last_err, AssertionError):
+        raise last_err
+    raise AssertionError(repr(last_err))
+
+
+def _run_usb_wired_attempt(
+    studio_pb2,
+    central_elf: Path,
+    peripheral_elf: Path,
+    renode_path: str,
+    boot_settle: float,
+    wiring_timeout: float,
+    boot_timeout: float,
+    rpc_timeout: float,
+    expect_name_nonempty: bool,
+    storage_addr: int,
+    storage_size: int,
+    settle: float,
+    event_timeout: float,
+) -> None:
+    """One usb+wired attempt: boot the pair, assert the central boot banner,
+    attach the USB CDC bridge + GetDeviceInfo, then the peripheral->central wired
+    relay (see run_usb_wired_smoke)."""
+    import random
+
+    port_base = random.randint(26000, 40000)
+    print(
+        "booting usb+wired split (central on the NRF_USBD_Full usb platform)...",
+        file=sys.stderr,
+    )
+    session, central_console, peripheral_console = renode_harness.boot_usb_wired_split(
+        renode_path,
+        central_elf=central_elf,
+        peripheral_elf=peripheral_elf,
+        storage_addr=storage_addr,
+        storage_size=storage_size,
+        port_base=port_base,
+    )
+    assert session.mon is not None
+    mon = session.mon
+    cdc: list = []
+    try:
+        # 1. The central boots and prints its banner on uart0 (console stays on
+        #    the UART; USB carries Studio, not console).
+        print("waiting for central ZMK boot banner (uart0 console)...", file=sys.stderr)
+        banner = renode_harness.wait_for_text(
+            central_console._sock, "Welcome to ZMK", timeout=boot_timeout
+        )
+        if "Welcome to ZMK" not in banner:
+            raise AssertionError(f"central never saw the ZMK boot banner on uart0; got:\n{banner}")
+        print("central boot banner OK", file=sys.stderr)
+
+        # 2. Let the guest finish USB bring-up before the host attaches (a SETUP
+        #    fired before the guest's INTEN is set is silently lost). boot_usb_wired_split
+        #    leaves the central machine selected, so sysbus.usbd targets it.
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < boot_settle:
+            renode_harness.drain_text(central_console._sock, timeout=0.5)
+
+        # 3. Attach the USB CDC bridge and assert Studio GetDeviceInfo over it.
+        cdc = list(renode_harness.attach_dual_cdc_bridge(session, port_base + 4, port_base + 5))
+        deadline = time.monotonic() + wiring_timeout
+        while time.monotonic() < deadline:
+            if _mon_flag(mon, f"sysbus.{USB_BRIDGE_NAME}_cdc0 IsWired"):
+                break
+        else:
+            raise AssertionError(
+                "USB enumeration never wired the first CDC channel "
+                f"(no sysbus.{USB_BRIDGE_NAME}_cdc0 IsWired within {wiring_timeout:.0f}s) "
+                "-- is the central a studio-rpc-usb-uart (USB-CDC) image?"
+            )
+        # console is on uart0 here, so the USB composite is normally a single
+        # Studio CDC; auto-detect anyway (an image that also put console on USB
+        # would enumerate console first, Studio second).
+        dual_cdc = bool(_mon_flag(mon, f"sysbus.{USB_BRIDGE_NAME}_cdc1 IsWired"))
+        time.sleep(2.0)
+        studio = cdc[1] if dual_cdc else cdc[0]
+        # Two rounds, as the single-CDC usb smoke does: the device->host pump must
+        # deliver more than the first reply per session (regression guard for the
+        # DualCdcAcmBridge re-arm fix).
+        _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2)
+
+        # 4. Wired split relay: after both sides settle, pulse the peripheral's
+        #    first kscan GPIO and expect the central to log the relayed position.
+        time.sleep(settle)
+        renode_harness.drain_text(central_console._sock, timeout=0.2)
+        print(
+            f"injecting keypress on peripheral ({SPLIT_KEYPRESS_GPIO_PORT} pin "
+            f"{SPLIT_KEYPRESS_GPIO_PIN})...",
+            file=sys.stderr,
+        )
+        mon.execute('mach set "peripheral"')
+        mon.execute(f"sysbus.{SPLIT_KEYPRESS_GPIO_PORT} OnGPIO {SPLIT_KEYPRESS_GPIO_PIN} true")
+        time.sleep(0.3)
+        mon.execute(f"sysbus.{SPLIT_KEYPRESS_GPIO_PORT} OnGPIO {SPLIT_KEYPRESS_GPIO_PIN} false")
+        central_log = renode_harness.wait_for_text(
+            central_console._sock, SPLIT_RELAYED_EVENT_MARKER, timeout=event_timeout
+        )
+        if SPLIT_RELAYED_EVENT_MARKER not in central_log:
+            print("--- central console tail ---", file=sys.stderr)
+            print("\n".join(central_log.splitlines()[-25:]), file=sys.stderr)
+            raise AssertionError(
+                "central never processed a key event relayed from the peripheral "
+                f"(expected {SPLIT_RELAYED_EVENT_MARKER!r}) -- wired split link not up"
+            )
+        print(
+            f"usb+wired OK (Studio RPC over USB CDC + wired relay "
+            f"{SPLIT_RELAYED_EVENT_MARKER!r} on the central)",
+            file=sys.stderr,
+        )
+    finally:
+        for sock in cdc:
+            sock.close()
         peripheral_console.close()
         central_console.close()
         session.stop()
@@ -1165,19 +1438,32 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument(
         "--mode",
-        choices=("uart", "usb", "ble", "split", "ble-split"),
-        default="ble",
-        help="ble (default): real hardware image; with --host-elf a full encrypted "
-        "Studio-over-BLE read (S4/S5), without it a boot-liveness check. usb: the SAME "
-        "real hardware image, Studio GetDeviceInfo over the emulated USB CDC "
-        "(NRF_USBD_Full + DualCdcAcmBridge; + boot banner when the image has a console "
-        "CDC). ble-split: a "
-        "wireless split -- --elf is the split CENTRAL, --peripheral-elf the split "
-        "PERIPHERAL, --host-elf the host; asserts the split link secures then the host "
-        "reads Studio through the central. uart: snippet-built DUT, boot banner + Studio "
-        "GetDeviceInfo over emulated UARTs. split: wired-split central (--elf) + "
-        "--peripheral-elf on a Renode UART hub; smoke = both boot banners + a peripheral "
-        "keypress relayed to the central.",
+        choices=tuple(MODE_PRESETS),
+        default=None,
+        help="Backward-compatible preset expanding to a (host-link, split-link) pair "
+        "(default, no flags: ble). ble: real hardware image; with --host-elf a full "
+        "encrypted Studio-over-BLE read (S4/S5), without it a boot-liveness check. usb: "
+        "the SAME real image, Studio GetDeviceInfo over the emulated USB CDC. ble-split: "
+        "a wireless split -- --elf is the split CENTRAL, --peripheral-elf the split "
+        "PERIPHERAL, --host-elf the host. uart: snippet-built DUT, Studio over emulated "
+        "UARTs. split: wired-split central (--elf) + --peripheral-elf on a Renode UART "
+        "hub; both boot banners + a peripheral keypress relayed to the central. Mutually "
+        "exclusive with --host-link/--split-link.",
+    )
+    ap.add_argument(
+        "--host-link",
+        choices=HOST_LINKS,
+        default=None,
+        help="How the central answers Studio RPC: usb (emulated USB CDC), ble (emulated "
+        "BLE GATT), uart (renode-studio-uart snippet), none (boot-liveness only). "
+        "Mutually exclusive with --mode. See docs/renode-transport-orthogonal.md.",
+    )
+    ap.add_argument(
+        "--split-link",
+        choices=SPLIT_LINKS,
+        default=None,
+        help="How the central reaches the peripheral: none (not a split), wired (UART "
+        "hub), ble (radio + fake CCM). Mutually exclusive with --mode.",
     )
     ap.add_argument(
         "--host-elf",
@@ -1256,15 +1542,25 @@ def main(argv: list[str] | None = None) -> int:
     if not args.elf.is_file():
         print(f"ELF not found: {args.elf}", file=sys.stderr)
         return 2
-    if args.host_elf is not None and args.mode not in ("ble", "ble-split"):
-        print("--host-elf is only valid with --mode ble / ble-split", file=sys.stderr)
+
+    try:
+        host, split = resolve_links(args.mode, args.host_link, args.split_link)
+    except ValueError as err:
+        print(str(err), file=sys.stderr)
         return 2
-    if args.peripheral_elf is not None and args.mode not in ("split", "ble-split"):
-        print("--peripheral-elf is only valid with --mode split / ble-split", file=sys.stderr)
+    print(
+        f"host-link={host} x split-link={split} ({canonical_mode(host, split)})", file=sys.stderr
+    )
+
+    if args.host_elf is not None and host != "ble":
+        print("--host-elf is only valid with a ble host-link", file=sys.stderr)
         return 2
-    if args.mode in ("split", "ble-split"):
+    if args.peripheral_elf is not None and split == "none":
+        print("--peripheral-elf is only valid with a wired/ble split-link", file=sys.stderr)
+        return 2
+    if split != "none":
         if args.peripheral_elf is None:
-            print(f"--mode {args.mode} requires --peripheral-elf", file=sys.stderr)
+            print(f"split-link={split} requires --peripheral-elf", file=sys.stderr)
             return 2
         if not args.peripheral_elf.is_file():
             print(f"peripheral ELF not found: {args.peripheral_elf}", file=sys.stderr)
@@ -1275,31 +1571,31 @@ def main(argv: list[str] | None = None) -> int:
         print("Renode is not installed and could not be auto-installed", file=sys.stderr)
         return 2
 
-    if args.mode == "split":
-        try:
+    # Both usb host-link and a uart host-link with RPC need the Studio protos.
+    def _proto_dir():
+        proto_dir = args.studio_proto_dir
+        if proto_dir is None:
+            if not args.west_topdir:
+                print("either --studio-proto-dir or --west-topdir is required", file=sys.stderr)
+                return None
+            proto_dir = renode_harness.find_studio_proto_dir(args.west_topdir)
+        return proto_dir
+
+    try:
+        if (host, split) == ("none", "wired"):
             run_split_smoke(
                 central_elf=args.elf,
                 peripheral_elf=args.peripheral_elf,
                 renode_path=renode_path,
                 boot_timeout=args.boot_timeout,
             )
-        except AssertionError as err:
-            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
-            return 1
-        print("SMOKE TEST OK", file=sys.stderr)
-        return 0
-
-    if args.mode == "ble-split":
-        if args.peripheral_elf is None or not args.peripheral_elf.is_file():
-            print(f"--peripheral-elf not found: {args.peripheral_elf}", file=sys.stderr)
-            return 2
-        if args.host_elf is None or not args.host_elf.is_file():
-            print(
-                f"--host-elf is required for ble-split; not found: {args.host_elf}",
-                file=sys.stderr,
-            )
-            return 2
-        try:
+        elif (host, split) == ("ble", "ble"):
+            if args.host_elf is None or not args.host_elf.is_file():
+                print(
+                    f"--host-elf is required for ble x ble; not found: {args.host_elf}",
+                    file=sys.stderr,
+                )
+                return 2
             run_ble_split_smoke(
                 central_elf=args.elf,
                 peripheral_elf=args.peripheral_elf,
@@ -1310,14 +1606,21 @@ def main(argv: list[str] | None = None) -> int:
                 storage_size=args.storage_size,
                 steady_quantum=args.steady_quantum,
             )
-        except AssertionError as err:
-            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
-            return 1
-        print("SMOKE TEST OK", file=sys.stderr)
-        return 0
-
-    if args.mode == "ble":
-        try:
+        elif (host, split) == ("usb", "wired"):
+            proto_dir = _proto_dir()
+            if proto_dir is None:
+                return 2
+            run_usb_wired_smoke(
+                central_elf=args.elf,
+                peripheral_elf=args.peripheral_elf,
+                renode_path=renode_path,
+                studio_proto_dir=proto_dir,
+                boot_timeout=args.boot_timeout,
+                rpc_timeout=args.rpc_timeout,
+                storage_addr=args.storage_addr,
+                storage_size=args.storage_size,
+            )
+        elif (host, split) == ("ble", "none"):
             if args.host_elf is not None:
                 if not args.host_elf.is_file():
                     print(f"host ELF not found: {args.host_elf}", file=sys.stderr)
@@ -1333,8 +1636,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 print(
-                    "ble mode without --host-elf: no host given, checking DUT boot liveness "
-                    "only (no encrypted Studio read).",
+                    "ble host-link without --host-elf: checking DUT boot liveness only "
+                    "(no encrypted Studio read).",
                     file=sys.stderr,
                 )
                 run_liveness_smoke(
@@ -1345,24 +1648,10 @@ def main(argv: list[str] | None = None) -> int:
                     storage_size=args.storage_size,
                     rtt=args.rtt,
                 )
-        except AssertionError as err:
-            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
-            return 1
-        print("SMOKE TEST OK", file=sys.stderr)
-        return 0
-
-    # uart / usb mode: both need the Studio protos (usb always checks RPC).
-    proto_dir = None
-    if args.mode == "usb" or not args.no_rpc:
-        proto_dir = args.studio_proto_dir
-        if proto_dir is None:
-            if not args.west_topdir:
-                print("either --studio-proto-dir or --west-topdir is required", file=sys.stderr)
+        elif (host, split) == ("usb", "none"):
+            proto_dir = _proto_dir()
+            if proto_dir is None:
                 return 2
-            proto_dir = renode_harness.find_studio_proto_dir(args.west_topdir)
-
-    if args.mode == "usb":
-        try:
             run_usb_smoke(
                 elf=args.elf,
                 renode_path=renode_path,
@@ -1372,21 +1661,25 @@ def main(argv: list[str] | None = None) -> int:
                 storage_addr=args.storage_addr,
                 storage_size=args.storage_size,
             )
-        except AssertionError as err:
-            print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
-            return 1
-        print("SMOKE TEST OK", file=sys.stderr)
-        return 0
-
-    try:
-        run_uart_smoke(
-            elf=args.elf,
-            renode_path=renode_path,
-            studio_proto_dir=proto_dir,
-            check_rpc=not args.no_rpc,
-            boot_timeout=args.boot_timeout,
-            rpc_timeout=args.rpc_timeout,
-        )
+        elif (host, split) == ("uart", "none"):
+            proto_dir = None
+            if not args.no_rpc:
+                proto_dir = _proto_dir()
+                if proto_dir is None:
+                    return 2
+            run_uart_smoke(
+                elf=args.elf,
+                renode_path=renode_path,
+                studio_proto_dir=proto_dir,
+                check_rpc=not args.no_rpc,
+                boot_timeout=args.boot_timeout,
+                rpc_timeout=args.rpc_timeout,
+            )
+        else:  # unreachable: resolve_links already gated SUPPORTED_LINKS
+            print(
+                f"unsupported combination host-link={host} x split-link={split}", file=sys.stderr
+            )
+            return 2
     except AssertionError as err:
         print(f"SMOKE TEST FAILED: {err}", file=sys.stderr)
         return 1

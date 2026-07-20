@@ -69,6 +69,7 @@ __all__ = [
     "attach_dual_cdc_bridge",
     "boot_ble_pair",
     "boot_split_wired",
+    "boot_usb_wired_split",
     "boot_ble_split",
     "STORAGE_ADDR_DEFAULT",
     "STORAGE_SIZE_DEFAULT",
@@ -829,6 +830,90 @@ def boot_split_wired(
     central_console = session.connect_uart(port_base + 1)
     peripheral_console = session.connect_uart(port_base + 2)
     session.go()
+    return session, central_console, peripheral_console
+
+
+# --------------------------------------------------------------------------
+# Convenience: boot a WIRED split whose CENTRAL still speaks Studio RPC -- the
+# orthogonal usb-host-link x wired-split-link combination (platforms/
+# usb_wired_split.resc). The central boots a real studio-rpc-usb-uart image on
+# the NRF_USBD_Full usb platform (Studio over emulated USB CDC, console on
+# uart0, wired-split link on uart1); the peripheral is the plain wired-split
+# half. Studio RPC is reached by attach_dual_cdc_bridge() after boot, exactly as
+# in usb mode. See docs/renode-transport-orthogonal.md.
+# --------------------------------------------------------------------------
+
+
+def boot_usb_wired_split(
+    renode_path: str,
+    central_elf: Path,
+    peripheral_elf: Path,
+    storage_addr: int = STORAGE_ADDR_DEFAULT,
+    storage_size: int = STORAGE_SIZE_DEFAULT,
+    boot_wait: float = 4.0,
+    port_base: int | None = None,
+) -> tuple["RenodeSession", "RpcSocket", "RpcSocket"]:
+    """Boot a usb+wired split pair under Renode using platforms/usb_wired_split.resc:
+    two machines whose split-link UARTEs (uart1) are cross-connected through a
+    Renode UART hub, where the CENTRAL boots a real studio-rpc-usb-uart image on
+    the NRF_USBD_Full usb platform so it can answer Studio RPC over the emulated
+    USB CDC (attach it with attach_dual_cdc_bridge after boot, as usb mode does).
+
+    Returns (session, central_console, peripheral_console). central_console is the
+    central's uart0 terminal (its boot banner + relayed-key log; console stays on
+    the UART because USB carries Studio, not console); peripheral_console is the
+    peripheral's uart0. As with boot_split_wired the caller owns cleanup
+    (session.stop() + closing the sockets); both consoles are connected before
+    `start` so no early boot-banner bytes are lost.
+
+    The central runs the real image (USB/QSPI/FICR/NVMC stubs), so -- as in
+    boot_single_real / boot_ble_pair -- its NVS storage partition is preloaded
+    with erased 0xFF sectors before `start`. The peripheral is a plain
+    wired-split image (USB/QSPI/BLE off) and needs no preload, so it stays on the
+    plain xiao_nrf52840.repl.
+    """
+    if port_base is None:
+        import random
+
+        port_base = random.randint(26000, 40000)
+
+    central_repl = _materialize_real_repl(template_name="xiao_nrf52840_usb.repl")
+    ff_path = _write_ff_binary(storage_size)
+    session = RenodeSession(
+        renode_path,
+        PLATFORMS_DIR / "usb_wired_split.resc",
+        monitor_port=port_base,
+        variables={
+            "central_bin": f"@{central_elf}",
+            "peripheral_bin": f"@{peripheral_elf}",
+            "central_platform": f"@{central_repl}",
+            "central_console_port": port_base + 1,
+            "peripheral_console_port": port_base + 2,
+        },
+        cwd=SKILL_DIR,
+    )
+    try:
+        session.start(boot_wait=boot_wait)
+        central_console = session.connect_uart(port_base + 1)
+        peripheral_console = session.connect_uart(port_base + 2)
+        assert session.mon is not None
+        # Preload the CENTRAL's erased NVS sectors before the CPUs run. LoadBinary
+        # is machine-scoped, so select the central first (the resc leaves the
+        # peripheral, created last, selected). The plain peripheral has no NVS
+        # backend to preload. Leave the central selected so the caller's
+        # attach_dual_cdc_bridge (sysbus.usbd ...) targets it.
+        session.mon.execute('mach set "central"')
+        session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
+        session.go()
+    except Exception:
+        session.stop()
+        raise
+    finally:
+        for tmp in (central_repl, ff_path):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return session, central_console, peripheral_console
 
 

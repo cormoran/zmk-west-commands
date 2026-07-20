@@ -1,0 +1,122 @@
+/*
+ * CENTRAL half of the usb+wired split shield, used only by `west zmk-renode-test
+ * --host-link usb --split-link wired` (see docs/renode-transport-orthogonal.md).
+ * The peripheral half is the plain renode_wired_split shield (role peripheral).
+ *
+ * Layout:
+ *   - console (boot banner + relayed "position: %d" log) on uart0, on a Renode
+ *     TCP socket;
+ *   - ZMK's `zmk,wired-split` transport on uart1 -- cross-connected to the
+ *     peripheral's uart1 through a Renode UART hub (platforms/usb_wired_split.resc);
+ *   - USB stays ENABLED: the studio-rpc-usb-uart snippet (added by
+ *     build-usb-split.yaml) puts the Studio RPC CDC on &zephyr_udc0, and the
+ *     harness attaches a DualCdcAcmBridge to it after boot;
+ *   - Studio-ready like renode_tester / renode_split: a zmk,physical-layout with
+ *     key_physical_attrs and NO chosen zmk,matrix-transform (CONFIG_ZMK_STUDIO
+ *     build-asserts on exactly that shape -- the transform is referenced from
+ *     the physical layout instead);
+ *   - a 2x2 direct-GPIO kscan + transform so the peripheral's first key (xiao_d
+ *     0 == gpio0 pin 2) relays to the central as keymap position 0 (the smoke
+ *     asserts the central logs "position: 0").
+ *
+ * Renode gotchas (as in the renode-studio-uart snippet / renode_wired_split):
+ * the stock xiao_ble enables &qspi/&p25q16h (external NOR) whose readiness
+ * events Renode does not model, so that driver busy-waits forever -- disable it.
+ * Unlike renode_wired_split, DO NOT disable &usbd here (USB carries Studio); the
+ * NRF_USBD_Full model handles USB. Disable only the board's console-over-USB CDC
+ * (board_cdc_acm_uart) so console stays on uart0 and USB presents a single CDC.
+ */
+#include <dt-bindings/zmk/matrix_transform.h>
+#include <physical_layouts.dtsi>
+
+&qspi {
+	status = "disabled";
+};
+
+&p25q16h {
+	status = "disabled";
+};
+
+&board_cdc_acm_uart {
+	status = "disabled";
+};
+
+&pinctrl {
+	uart1_default: uart1_default {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 2)>;
+		};
+		group2 {
+			psels = <NRF_PSEL(UART_RX, 0, 3)>;
+			bias-pull-up;
+		};
+	};
+
+	uart1_sleep: uart1_sleep {
+		group1 {
+			psels = <NRF_PSEL(UART_TX, 0, 2)>,
+					<NRF_PSEL(UART_RX, 0, 3)>;
+			low-power-enable;
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&uart1 {
+	compatible = "nordic,nrf-uarte";
+	status = "okay";
+	current-speed = <115200>;
+	pinctrl-0 = <&uart1_default>;
+	pinctrl-1 = <&uart1_sleep>;
+	pinctrl-names = "default", "sleep";
+};
+
+/ {
+	chosen {
+		zephyr,console = &uart0;
+		zephyr,shell-uart = &uart0;
+		zmk,kscan = &kscan0;
+		/* NO zmk,matrix-transform chosen -- CONFIG_ZMK_STUDIO build-asserts
+		 * against it; the transform is referenced from the physical layout. */
+	};
+
+	kscan0: kscan {
+		compatible = "zmk,kscan-gpio-direct";
+		input-gpios
+			= <&xiao_d 0 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 1 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			, <&xiao_d 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>
+			;
+	};
+
+	transform0: keymap_transform {
+		compatible = "zmk,matrix-transform";
+		columns = <2>;
+		rows = <2>;
+		map = <
+		RC(0,0)  RC(0,1)
+		RC(1,0)  RC(1,1)
+		>;
+	};
+
+	physical_layout0: physical_layout0 {
+		compatible = "zmk,physical-layout";
+		display-name = "RenodeUsbWired";
+		transform = <&transform0>;
+		keys  /* w   h    x    y   rot  rx  ry */
+			= <&key_physical_attrs 100 100   0   0 0 0 0>
+			, <&key_physical_attrs 100 100 100   0 0 0 0>
+			, <&key_physical_attrs 100 100   0 100 0 0 0>
+			, <&key_physical_attrs 100 100 100 100 0 0 0>
+			;
+	};
+
+	wired_split: wired_split {
+		compatible = "zmk,wired-split";
+		device = <&uart1>;
+	};
+};

@@ -1,0 +1,37 @@
+# usb+wired split DUT pair for `west zmk-renode-test --host-link usb --split-link
+# wired` -- the orthogonal combination the fixed --mode presets could never
+# express: a WIRED split whose CENTRAL still answers Studio RPC (over emulated
+# USB CDC, since USB consumes no UARTE). See docs/renode-transport-orthogonal.md.
+#
+# Kept in its own file (like build-split.yaml / build-ble.yaml) because it
+# targets ZMK's HWv2 `xiao_ble//zmk` board (only in newer ZMK; see
+# scripts/west-test-renode.yml). Build both halves with:
+#   west zmk-build tests/zmk-config --build-yaml tests/zmk-config/build-usb-split.yaml \
+#       -af usb-wired -d build
+#
+# Produces build/usb-wired-central/zephyr/zmk.elf and
+# build/usb-wired-peripheral/zephyr/zmk.elf.
+#
+#   * usb-wired-central = renode_usb_wired_split shield = split CENTRAL. Runs ZMK
+#     Studio (CONFIG_ZMK_STUDIO=y + the studio-rpc-usb-uart snippet -- Studio RPC
+#     over USB CDC), console on uart0, the zmk,wired-split link on uart1, USB on,
+#     BLE off. Boots on the real-image USB platform (NRF_USBD_Full).
+#   * usb-wired-peripheral = renode_wired_split shield, role peripheral -- the
+#     SAME plain wired peripheral build-split.yaml produces (console uart0, split
+#     link uart1, USB/BLE off). Reused unchanged; it needs no USB.
+#
+# The two halves' uart1 split links are cross-connected through a Renode UART hub
+# (platforms/usb_wired_split.resc); the harness then attaches a DualCdcAcmBridge
+# to the central for Studio RPC. The smoke asserts BOTH: a Studio GetDeviceInfo
+# round trip over the central's USB CDC AND a peripheral keypress relayed over
+# the wired link to the central ("position: 0").
+include:
+  - artifact: usb-wired-central
+    board: xiao_ble//zmk
+    shield: renode_usb_wired_split
+    cmake-args: -DCONFIG_ZMK_STUDIO=y
+    snippets:
+      - studio-rpc-usb-uart
+  - artifact: usb-wired-peripheral
+    board: xiao_ble//zmk
+    shield: renode_wired_split

@@ -1,0 +1,14 @@
+if SHIELD_RENODE_USB_WIRED_SPLIT
+
+# This shield is the CENTRAL half of the usb+wired split (the peripheral half is
+# the plain renode_wired_split shield, role peripheral). It runs Studio over USB.
+config ZMK_KEYBOARD_NAME
+    default "RenodeUsbWired"
+
+config ZMK_SPLIT
+    default y
+
+config ZMK_SPLIT_ROLE_CENTRAL
+    default y
+
+endif

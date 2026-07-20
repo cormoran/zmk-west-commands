@@ -40,8 +40,27 @@ inputs:
       `peripheral-elf` the split PERIPHERAL, `host-elf` the host; asserts the
       encrypted split link comes up then the host reads Studio through the
       central). See README.md.
+
+      Mutually exclusive with host-link/split-link (the orthogonal axes). Leave
+      mode at its default and set host-link/split-link to reach combinations the
+      presets cannot, e.g. host-link=usb + split-link=wired.
     required: false
     default: "ble"
+  host-link:
+    description: >-
+      Orthogonal axis: how the central answers Studio RPC -- `usb`, `ble`,
+      `uart`, or `none`. Mutually exclusive with `mode`; set together with
+      `split-link`. Leave empty to use `mode`. See
+      docs/renode-transport-orthogonal.md.
+    required: false
+    default: ""
+  split-link:
+    description: >-
+      Orthogonal axis: how the central reaches the peripheral -- `none`,
+      `wired`, or `ble`. Mutually exclusive with `mode`. Leave empty to use
+      `mode`.
+    required: false
+    default: ""
   peripheral-elf:
     description: >-
       split / ble-split mode: path to the built split PERIPHERAL half's firmware
@@ -123,6 +142,8 @@ runs:
       env:
         IN_ELF_PATH: ${{ inputs.elf-path }}
         IN_MODE: ${{ inputs.mode }}
+        IN_HOST_LINK: ${{ inputs.host-link }}
+        IN_SPLIT_LINK: ${{ inputs.split-link }}
         IN_HOST_ELF: ${{ inputs.host-elf }}
         IN_PERIPHERAL_ELF: ${{ inputs.peripheral-elf }}
         IN_TESTS: ${{ inputs.tests }}
@@ -141,7 +162,17 @@ runs:
           exit 1
         fi
 
-        args=(--elf "$elf_path" --mode "$IN_MODE" --renode-version "$IN_RENODE_VERSION" --boot-timeout "$IN_BOOT_TIMEOUT")
+        args=(--elf "$elf_path" --renode-version "$IN_RENODE_VERSION" --boot-timeout "$IN_BOOT_TIMEOUT")
+        # The two orthogonal axes and the `mode` preset are mutually exclusive:
+        # if either axis is set, pass those and NOT --mode (whose default is
+        # "ble"); otherwise fall back to the preset. See
+        # docs/renode-transport-orthogonal.md.
+        if [ -n "$IN_HOST_LINK" ] || [ -n "$IN_SPLIT_LINK" ]; then
+          [ -n "$IN_HOST_LINK" ] && args+=(--host-link "$IN_HOST_LINK")
+          [ -n "$IN_SPLIT_LINK" ] && args+=(--split-link "$IN_SPLIT_LINK")
+        else
+          args+=(--mode "$IN_MODE")
+        fi
         if [ -n "$IN_HOST_ELF" ]; then
           args+=(--host-elf "$(abspath "$IN_HOST_ELF")")
         fi
