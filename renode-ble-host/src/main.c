@@ -74,12 +74,25 @@ static const uint8_t rpc_get_device_info_req[] = {0xAB, 0x08, 0x01, 0x1A,
 
 static void do_rpc_roundtrip(struct bt_conn *conn);
 
+/* The ZMK Studio primary service (base UUID, num 0x00000000); the RPC char
+ * (0x00000001) lives inside it. Discovery is scoped service -> characteristic ->
+ * CCC (the canonical central pattern), which is more robust than a global
+ * characteristic-by-UUID discover. */
+static struct bt_uuid_128 rpc_svc_uuid = BT_UUID_INIT_128(ZMK_STUDIO_UUID(0x00000000));
+
 static uint16_t rpc_value_handle;
+static uint16_t rpc_svc_end_handle;
 static struct bt_gatt_discover_params rpc_disc_params;
 static struct bt_gatt_subscribe_params rpc_sub_params;
 static struct bt_gatt_write_params rpc_write_params;
 static bool rpc_frame_open;   /* inside a response frame (SOF seen, EOF not yet) */
 static bool rpc_prev_escape;  /* previous response byte was an unescaped ESC */
+
+/* Kick S6 off the BT RX callback context (bt_gatt_discover from within the S5
+ * read-complete callback can race that procedure's teardown); run it on the
+ * system workqueue instead. */
+static void rpc_start_work_handler(struct k_work *work);
+static K_WORK_DEFINE(rpc_start_work, rpc_start_work_handler);
 
 static bool name_cb(struct bt_data *data, void *user_data)
 {
@@ -224,31 +237,43 @@ static uint8_t rpc_discover_func(struct bt_conn *conn, const struct bt_gatt_attr
 	int err;
 
 	if (!attr) {
-		printk("STAGE:S6-RPC-DISCOVER FAIL (RPC characteristic/CCC not found)\n");
+		printk("STAGE:S6-RPC-DISCOVER FAIL (not found at step type=%u)\n", params->type);
 		return BT_GATT_ITER_STOP;
 	}
 
-	if (params->type == BT_GATT_DISCOVER_CHARACTERISTIC) {
-		/* Found the RPC characteristic declaration; its value handle is the
-		 * next handle. Now discover its CCC descriptor to subscribe. */
-		rpc_value_handle = bt_gatt_attr_value_handle(attr);
-		rpc_disc_params.uuid = BT_UUID_GATT_CCC;
-		rpc_disc_params.start_handle = attr->handle + 2;
-		rpc_disc_params.end_handle = 0xffff;
-		rpc_disc_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+	if (params->type == BT_GATT_DISCOVER_PRIMARY) {
+		/* Found the ZMK Studio primary service; scope the characteristic
+		 * discovery to its handle range. */
+		struct bt_gatt_service_val *svc = attr->user_data;
+
+		rpc_svc_end_handle = svc->end_handle;
+		printk("STAGE:S6-RPC-DISCOVER service [%u..%u]\n", attr->handle, svc->end_handle);
+		rpc_disc_params.uuid = &rpc_chrc_uuid.uuid;
+		rpc_disc_params.start_handle = attr->handle + 1;
+		rpc_disc_params.end_handle = rpc_svc_end_handle;
+		rpc_disc_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
 		err = bt_gatt_discover(conn, &rpc_disc_params);
 		if (err) {
-			printk("STAGE:S6-RPC-DISCOVER FAIL ccc-discover err=%d\n", err);
+			printk("STAGE:S6-RPC-DISCOVER FAIL chrc-discover err=%d\n", err);
 		}
 		return BT_GATT_ITER_STOP;
 	}
 
-	/* CCC descriptor: subscribe to indications, then write the request. */
+	/* BT_GATT_DISCOVER_CHARACTERISTIC: found the RPC characteristic declaration.
+	 * Its value handle is the next handle, and for the ZMK Studio service the CCC
+	 * descriptor is always immediately after the value (BT_GATT_CHARACTERISTIC +
+	 * BT_GATT_CCC are adjacent in the service definition), so subscribe with an
+	 * explicit ccc_handle = value_handle + 1 rather than a separate descriptor
+	 * discovery (a single-handle descriptor-by-UUID discover proved unreliable
+	 * under Renode's ATT). */
+	rpc_value_handle = bt_gatt_attr_value_handle(attr);
+	printk("STAGE:S6-RPC-DISCOVER chrc value_handle=%u ccc_handle=%u\n", rpc_value_handle,
+	       rpc_value_handle + 1);
 	rpc_sub_params.notify = rpc_notify_func;
 	rpc_sub_params.subscribe = rpc_subscribed;
 	rpc_sub_params.value = BT_GATT_CCC_INDICATE;
 	rpc_sub_params.value_handle = rpc_value_handle;
-	rpc_sub_params.ccc_handle = attr->handle;
+	rpc_sub_params.ccc_handle = rpc_value_handle + 1;
 	err = bt_gatt_subscribe(conn, &rpc_sub_params);
 	if (err && err != -EALREADY) {
 		printk("STAGE:S6-RPC-SUBSCRIBE FAIL bt_gatt_subscribe err=%d\n", err);
@@ -256,25 +281,36 @@ static uint8_t rpc_discover_func(struct bt_conn *conn, const struct bt_gatt_attr
 	return BT_GATT_ITER_STOP;
 }
 
-static void do_rpc_roundtrip(struct bt_conn *conn)
+static void rpc_start_work_handler(struct k_work *work)
 {
+	struct bt_conn *conn = default_conn;
 	int err;
 
-	if (tried_rpc) {
+	if (!conn) {
 		return;
 	}
-	tried_rpc = true;
 
-	printk("STAGE:S6-RPC-START (discovering ZMK Studio RPC characteristic)\n");
-	rpc_disc_params.uuid = &rpc_chrc_uuid.uuid;
+	printk("STAGE:S6-RPC-START (discovering ZMK Studio service)\n");
+	rpc_disc_params.uuid = &rpc_svc_uuid.uuid;
 	rpc_disc_params.func = rpc_discover_func;
 	rpc_disc_params.start_handle = 0x0001;
 	rpc_disc_params.end_handle = 0xffff;
-	rpc_disc_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	rpc_disc_params.type = BT_GATT_DISCOVER_PRIMARY;
 	err = bt_gatt_discover(conn, &rpc_disc_params);
 	if (err) {
 		printk("STAGE:S6-RPC-START FAIL bt_gatt_discover err=%d\n", err);
 	}
+}
+
+static void do_rpc_roundtrip(struct bt_conn *conn)
+{
+	ARG_UNUSED(conn); /* the work handler uses default_conn */
+	if (tried_rpc) {
+		return;
+	}
+	tried_rpc = true;
+	/* Defer off the S5 read-complete callback context. */
+	k_work_submit(&rpc_start_work);
 }
 
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
