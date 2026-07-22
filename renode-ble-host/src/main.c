@@ -45,6 +45,39 @@ static struct bt_uuid_128 rpc_chrc_uuid = BT_UUID_INIT_128(ZMK_STUDIO_UUID(0x000
 
 static struct bt_conn *default_conn;
 static bool tried_read;
+static bool tried_rpc;
+
+/*
+ * S6: a REAL framed Studio GetDeviceInfo round trip over the encrypted BLE link
+ * (not just the S5 raw GATT read). The ZMK Studio BLE transport frames RPC
+ * exactly like the UART transport (msg_framing.c: SOF=0xAB, ESC=0xAC, EOF=0xAD;
+ * ESC-escape any special byte). The host WRITEs the framed request to the RPC
+ * characteristic and the DUT streams the framed response back as one or more
+ * INDICATIONs on the same characteristic (gatt_rpc_transport.c). So S6:
+ *   1. discovers the RPC char value handle + its CCC descriptor handle,
+ *   2. subscribes to indications,
+ *   3. writes the framed GetDeviceInfo request, and
+ *   4. prints every indication chunk's raw bytes as `STAGE:S6-RPC-CHUNK <hex>`
+ *      and `STAGE:S6-RPC-DONE` once an unescaped EOF (0xAD) closes the frame.
+ * The Renode harness reassembles the chunks, strips the framing and parses the
+ * protobuf Response (it owns studio_pb2), asserting a non-empty device name --
+ * so this C app needs no protobuf/parse code, only framing-aware reassembly.
+ *
+ * Framed Request{request_id:1, core:{get_device_info:true}} == ab08011a020801ad
+ * (verified against zmk-studio-messages' studio.proto; see the harness).
+ */
+#define FRAME_SOF 0xAB
+#define FRAME_ESC 0xAC
+#define FRAME_EOF 0xAD
+static const uint8_t rpc_get_device_info_req[] = {0xAB, 0x08, 0x01, 0x1A,
+						  0x02, 0x08, 0x01, 0xAD};
+
+static uint16_t rpc_value_handle;
+static struct bt_gatt_discover_params rpc_disc_params;
+static struct bt_gatt_subscribe_params rpc_sub_params;
+static struct bt_gatt_write_params rpc_write_params;
+static bool rpc_frame_open;   /* inside a response frame (SOF seen, EOF not yet) */
+static bool rpc_prev_escape;  /* previous response byte was an unescaped ESC */
 
 static bool name_cb(struct bt_data *data, void *user_data)
 {
@@ -71,6 +104,8 @@ static uint8_t gatt_read_cb(struct bt_conn *conn, uint8_t err,
 		printk("STAGE:S5-GATT-READ FAIL att_err=0x%02x\n", err);
 	} else {
 		printk("STAGE:S5-GATT-READ OK len=%u (encrypted read succeeded)\n", length);
+		/* Chain the real framed GetDeviceInfo round trip (S6). */
+		do_rpc_roundtrip(conn);
 	}
 	return BT_GATT_ITER_STOP;
 }
@@ -98,6 +133,147 @@ static void do_encrypted_read(struct bt_conn *conn)
 }
 
 static void start_scan(void);
+
+/* --- S6: framed Studio GetDeviceInfo round trip (see the block comment above) --- */
+
+static void rpc_scan_response_chunk(const uint8_t *data, uint16_t length)
+{
+	/* Dump the raw indication bytes for the harness to reassemble, and track
+	 * the msg-framing state so we can announce the end of the response frame. */
+	char hex[2 * 27 + 1];
+	uint16_t n = 0;
+
+	for (uint16_t i = 0; i < length && n + 2 < sizeof(hex); i++) {
+		static const char digits[] = "0123456789abcdef";
+		hex[n++] = digits[(data[i] >> 4) & 0xf];
+		hex[n++] = digits[data[i] & 0xf];
+	}
+	hex[n] = '\0';
+	printk("STAGE:S6-RPC-CHUNK %s\n", hex);
+
+	for (uint16_t i = 0; i < length; i++) {
+		uint8_t b = data[i];
+
+		if (rpc_prev_escape) {
+			rpc_prev_escape = false;
+			continue;
+		}
+		if (b == FRAME_ESC) {
+			rpc_prev_escape = true;
+		} else if (b == FRAME_SOF) {
+			rpc_frame_open = true;
+		} else if (b == FRAME_EOF && rpc_frame_open) {
+			rpc_frame_open = false;
+			printk("STAGE:S6-RPC-DONE (framed GetDeviceInfo response received)\n");
+		}
+	}
+}
+
+static uint8_t rpc_notify_func(struct bt_conn *conn, struct bt_gatt_subscribe_params *params,
+			       const void *data, uint16_t length)
+{
+	if (!data) {
+		/* Unsubscribed. */
+		return BT_GATT_ITER_STOP;
+	}
+	rpc_scan_response_chunk(data, length);
+	return BT_GATT_ITER_CONTINUE;
+}
+
+static void rpc_write_cb(struct bt_conn *conn, uint8_t err, struct bt_gatt_write_params *params)
+{
+	if (err) {
+		printk("STAGE:S6-RPC-WRITE FAIL att_err=0x%02x\n", err);
+	} else {
+		printk("STAGE:S6-RPC-WRITE OK (framed GetDeviceInfo request sent)\n");
+	}
+}
+
+static void rpc_write_request(struct bt_conn *conn)
+{
+	int err;
+
+	rpc_write_params.func = rpc_write_cb;
+	rpc_write_params.handle = rpc_value_handle;
+	rpc_write_params.offset = 0;
+	rpc_write_params.data = rpc_get_device_info_req;
+	rpc_write_params.length = sizeof(rpc_get_device_info_req);
+
+	err = bt_gatt_write(conn, &rpc_write_params);
+	if (err) {
+		printk("STAGE:S6-RPC-WRITE FAIL bt_gatt_write err=%d\n", err);
+	}
+}
+
+static void rpc_subscribed(struct bt_conn *conn, uint8_t err,
+			   struct bt_gatt_subscribe_params *params)
+{
+	if (err) {
+		printk("STAGE:S6-RPC-SUBSCRIBE FAIL att_err=0x%02x\n", err);
+		return;
+	}
+	printk("STAGE:S6-RPC-SUBSCRIBE OK (indications enabled)\n");
+	rpc_write_request(conn);
+}
+
+static uint8_t rpc_discover_func(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+				 struct bt_gatt_discover_params *params)
+{
+	int err;
+
+	if (!attr) {
+		printk("STAGE:S6-RPC-DISCOVER FAIL (RPC characteristic/CCC not found)\n");
+		return BT_GATT_ITER_STOP;
+	}
+
+	if (params->type == BT_GATT_DISCOVER_CHARACTERISTIC) {
+		/* Found the RPC characteristic declaration; its value handle is the
+		 * next handle. Now discover its CCC descriptor to subscribe. */
+		rpc_value_handle = bt_gatt_attr_value_handle(attr);
+		rpc_disc_params.uuid = BT_UUID_GATT_CCC;
+		rpc_disc_params.start_handle = attr->handle + 2;
+		rpc_disc_params.end_handle = 0xffff;
+		rpc_disc_params.type = BT_GATT_DISCOVER_DESCRIPTOR;
+		err = bt_gatt_discover(conn, &rpc_disc_params);
+		if (err) {
+			printk("STAGE:S6-RPC-DISCOVER FAIL ccc-discover err=%d\n", err);
+		}
+		return BT_GATT_ITER_STOP;
+	}
+
+	/* CCC descriptor: subscribe to indications, then write the request. */
+	rpc_sub_params.notify = rpc_notify_func;
+	rpc_sub_params.subscribe = rpc_subscribed;
+	rpc_sub_params.value = BT_GATT_CCC_INDICATE;
+	rpc_sub_params.value_handle = rpc_value_handle;
+	rpc_sub_params.ccc_handle = attr->handle;
+	err = bt_gatt_subscribe(conn, &rpc_sub_params);
+	if (err && err != -EALREADY) {
+		printk("STAGE:S6-RPC-SUBSCRIBE FAIL bt_gatt_subscribe err=%d\n", err);
+	}
+	return BT_GATT_ITER_STOP;
+}
+
+static void do_rpc_roundtrip(struct bt_conn *conn)
+{
+	int err;
+
+	if (tried_rpc) {
+		return;
+	}
+	tried_rpc = true;
+
+	printk("STAGE:S6-RPC-START (discovering ZMK Studio RPC characteristic)\n");
+	rpc_disc_params.uuid = &rpc_chrc_uuid.uuid;
+	rpc_disc_params.func = rpc_discover_func;
+	rpc_disc_params.start_handle = 0x0001;
+	rpc_disc_params.end_handle = 0xffff;
+	rpc_disc_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	err = bt_gatt_discover(conn, &rpc_disc_params);
+	if (err) {
+		printk("STAGE:S6-RPC-START FAIL bt_gatt_discover err=%d\n", err);
+	}
+}
 
 static void device_found(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 			 struct net_buf_simple *ad)
@@ -185,6 +361,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	bt_conn_unref(default_conn);
 	default_conn = NULL;
 	tried_read = false;
+	tried_rpc = false;
+	rpc_frame_open = false;
+	rpc_prev_escape = false;
 	start_scan();
 }
 
