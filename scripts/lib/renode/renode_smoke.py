@@ -235,23 +235,52 @@ S6_CHUNK_MARKER = "STAGE:S6-RPC-CHUNK "
 S6_DONE_MARKER = "STAGE:S6-RPC-DONE"
 
 
-def _assert_key_processed(session, log_sock, machine: str | None, source: str, timeout: float):
+def _assert_key_processed(
+    session,
+    log_sock,
+    machine: str | None,
+    source: str,
+    timeout: float,
+    hold: float = 2.0,
+    reinject_every: float = 4.0,
+):
     """CHECK 2/3: inject a keypress at position 0 (on `machine`; the peripheral
     for a split) and wait for the DUT/central to log processing it
-    ("position: 0") on `log_sock` (a console or RTT RpcSocket)."""
-    renode_harness.drain_text(log_sock._sock, timeout=0.2)  # discard buffered
-    print(f"CHECK 2/3 key input: injecting keypress on {source}...", file=sys.stderr)
-    renode_harness.inject_keypress(session, machine=machine)
+    ("position: 0") on `log_sock` (a console or RTT RpcSocket).
+
+    The press is RE-INJECTED every `reinject_every` s across `timeout`, and each
+    press is held `hold` s. Both matter for the split relay: a split link may
+    still be coming up when the first press fires (a lost press then never
+    relays), and on a heavily loaded / coarse-quantum run a single split-relay
+    notification can be dropped or delayed -- so a later press lands. Holding the
+    key for a couple of seconds of wall time also guarantees it spans several
+    kscan poll periods (10 ms virtual each) even when Renode is running well below
+    real time (e.g. the 3-machine ble-split at a 10 us quantum). A single quick
+    tap was reliable for a single DUT but flaky for the peripheral->central relay
+    on some ZMK branches."""
     marker = renode_harness.KEYPRESS_POSITION_MARKER
-    log = renode_harness.wait_for_text(log_sock._sock, marker, timeout=timeout)
-    if marker not in log:
-        print("--- key-log tail ---", file=sys.stderr)
-        print("\n".join(log.splitlines()[-25:]), file=sys.stderr)
-        raise AssertionError(
-            f"keypress injected on {source} was never processed (expected {marker!r} "
-            "-- is the kscan/relay path up and DBG logging enabled?)"
-        )
-    print(f"CHECK 2/3 key input OK ({source} keypress -> {marker!r})", file=sys.stderr)
+    renode_harness.drain_text(log_sock._sock, timeout=0.2)  # discard buffered
+    print(
+        f"CHECK 2/3 key input: injecting keypress on {source} (retry up to {timeout:.0f}s)...",
+        file=sys.stderr,
+    )
+    deadline = time.monotonic() + timeout
+    buf = ""
+    next_inject = 0.0
+    while time.monotonic() < deadline:
+        if time.monotonic() >= next_inject:
+            renode_harness.inject_keypress(session, machine=machine, hold=hold)
+            next_inject = time.monotonic() + reinject_every
+        buf += renode_harness.drain_text(log_sock._sock, timeout=0.5)
+        if marker in buf:
+            print(f"CHECK 2/3 key input OK ({source} keypress -> {marker!r})", file=sys.stderr)
+            return
+    print("--- key-log tail ---", file=sys.stderr)
+    print("\n".join(buf.splitlines()[-25:]), file=sys.stderr)
+    raise AssertionError(
+        f"keypress injected on {source} was never processed (expected {marker!r} "
+        "-- is the kscan/relay path up and DBG logging enabled?)"
+    )
 
 
 def _parse_ble_device_info(studio_pb2, host_buf: str, expect_name_nonempty: bool = True) -> str:
@@ -749,7 +778,7 @@ def run_usb_wired_smoke(
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     settle: float = 3.0,
-    event_timeout: float = 10.0,
+    event_timeout: float = 30.0,  # split relay: re-inject over a wide window (see _assert_key_processed)
     max_attempts: int = 2,
 ) -> None:
     """usb+wired-split smoke (the orthogonal usb host-link x wired split-link
@@ -854,34 +883,23 @@ def _run_usb_wired_attempt(
     mon = session.mon
     cdc: list = []
     try:
-        # CHECK 1/3 connection: the central boots and prints its banner on uart0
-        # (console stays on the UART; USB carries Studio, not console).
+        # CHECK 1/3 connection: the central boots (banner on uart0) AND its USB is
+        # enumerated by the host bridge. Attaching the bridge here -- as part of
+        # the connection check, before the key injection below -- is LOAD-BEARING:
+        # the central is a real USB image that busy-waits in USB init until the
+        # host enumerates it, so until the DualCdcAcmBridge attaches the central
+        # cannot run its main loop and would never process a relayed key event.
+        # (Observed on the main+dya ZMK branch, where that stall is pronounced.)
         print("waiting for central ZMK boot banner (uart0 console)...", file=sys.stderr)
         banner = renode_harness.wait_for_text(
             central_console._sock, "Welcome to ZMK", timeout=boot_timeout
         )
         if "Welcome to ZMK" not in banner:
             raise AssertionError(f"central never saw the ZMK boot banner on uart0; got:\n{banner}")
-        print("CHECK 1/3 connection OK (central booted; wired split link ready)", file=sys.stderr)
 
-        # CHECK 2/3 key input: a keypress injected on the PERIPHERAL is relayed
-        # over the wired split link and processed by the central ("position: 0" on
-        # uart0). Settle first (the split boot-order race -- see boot_split_wired).
-        time.sleep(settle)
-        _assert_key_processed(
-            session,
-            central_console,
-            machine="peripheral",
-            source="the peripheral (relayed over the wired split link)",
-            timeout=event_timeout,
-        )
-        # Injecting on the peripheral selected it; re-select the central so the
-        # USB attach below (sysbus.usbd) targets the central machine.
-        mon.execute('mach set "central"')
-
-        # CHECK 3/3 Studio RPC. Let the guest finish USB bring-up before the host
-        # attaches (a SETUP fired before the guest's INTEN is set is silently
-        # lost), then attach the USB CDC bridge and assert GetDeviceInfo over it.
+        # Let the guest finish USB bring-up before the host attaches (a SETUP
+        # fired before the guest's INTEN is set is silently lost), then attach the
+        # USB CDC bridge and wait for enumeration to wire the Studio CDC.
         t0 = time.monotonic()
         while time.monotonic() - t0 < boot_settle:
             renode_harness.drain_text(central_console._sock, timeout=0.5)
@@ -902,13 +920,32 @@ def _run_usb_wired_attempt(
         dual_cdc = bool(_mon_flag(mon, f"sysbus.{USB_BRIDGE_NAME}_cdc1 IsWired"))
         time.sleep(2.0)
         studio = cdc[1] if dual_cdc else cdc[0]
-        print("CHECK 3/3 Studio RPC GetDeviceInfo over USB CDC...", file=sys.stderr)
-        # Two rounds, as the single-CDC usb smoke does: the device->host pump must
+        print(
+            "CHECK 1/3 connection OK (central booted; USB enumerated; wired split link ready)",
+            file=sys.stderr,
+        )
+
+        # CHECK 2/3 key input: a keypress injected on the PERIPHERAL is relayed
+        # over the wired split link and processed by the now-unblocked central
+        # ("position: 0" on uart0). Settle first (the split boot-order race -- see
+        # boot_split_wired).
+        time.sleep(settle)
+        _assert_key_processed(
+            session,
+            central_console,
+            machine="peripheral",
+            source="the peripheral (relayed over the wired split link)",
+            timeout=event_timeout,
+        )
+
+        # CHECK 3/3 Studio RPC GetDeviceInfo over the central's USB CDC. Two
+        # rounds, as the single-CDC usb smoke does: the device->host pump must
         # deliver more than the first reply per session (regression guard for the
         # DualCdcAcmBridge re-arm fix).
+        print("CHECK 3/3 Studio RPC GetDeviceInfo over USB CDC...", file=sys.stderr)
         _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2)
         print(
-            "usb+wired OK (all 3 checks: central boot + wired relay "
+            "usb+wired OK (all 3 checks: central boot + USB enum + wired relay "
             f"{renode_harness.KEYPRESS_POSITION_MARKER!r} + Studio RPC over USB CDC)",
             file=sys.stderr,
         )
@@ -1245,7 +1282,7 @@ def run_ble_split_smoke(
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
-    event_timeout: float = 10.0,
+    event_timeout: float = 30.0,  # split relay: re-inject over a wide window (see _assert_key_processed)
     max_attempts: int = 2,
 ) -> None:
     """ble-split-mode smoke with a bounded whole-emulation retry.
@@ -1314,7 +1351,7 @@ def _run_ble_split_attempt(
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
-    event_timeout: float = 10.0,
+    event_timeout: float = 30.0,  # split relay: re-inject over a wide window (see _assert_key_processed)
 ) -> None:
     """One ble-split attempt: boot a WIRELESS split keyboard (central + peripheral
     halves) and the renode-ble-host on ONE Renode BLE medium (fake CCM in all
