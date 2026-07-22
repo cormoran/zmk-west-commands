@@ -44,6 +44,7 @@ static struct bt_uuid_128 rpc_chrc_uuid = BT_UUID_INIT_128(ZMK_STUDIO_UUID(0x000
 #define TARGET_NAME CONFIG_RENODE_BLE_HOST_TARGET_NAME
 
 static struct bt_conn *default_conn;
+static bool tried_mtu;
 static bool tried_read;
 static bool tried_rpc;
 
@@ -148,6 +149,56 @@ static void do_encrypted_read(struct bt_conn *conn)
 }
 
 static void start_scan(void);
+
+/*
+ * S4b: raise the ATT MTU before S5/S6.
+ *
+ * The ZMK Studio BLE transport sizes each response INDICATION by the connection
+ * LL data length (gatt_rpc_transport.c: get_notify_size_for_conn ->
+ * data_len->tx_max_len, 27 here), NOT by the ATT MTU. If the ATT MTU is left at
+ * the 23-byte default, a 27-byte chunk becomes a 30-byte ATT PDU that no ATT
+ * channel can carry, so bt_att_create_pdu() fails ("No ATT channel for MTU 30")
+ * and the DUT drops the GetDeviceInfo response ("Failed to notify the response
+ * -12"). Real Studio hosts always exchange the MTU up front; this simulated
+ * host must do the same. Both images advertise RX MTU 65 (BT_BUF_ACL_RX_SIZE
+ * 69 - 4), so the negotiated ATT MTU is ~65 -- well above the 30 the response
+ * needs. The 27-byte LL data-length cap is unaffected (L2CAP fragments the
+ * 30-byte PDU across two on-air packets, each still <= Renode's 31-byte cap).
+ */
+static struct bt_gatt_exchange_params mtu_params;
+
+static void mtu_exchange_cb(struct bt_conn *conn, uint8_t err,
+			    struct bt_gatt_exchange_params *params)
+{
+	if (err) {
+		printk("STAGE:S4B-MTU FAIL att_err=0x%02x\n", err);
+	} else {
+		printk("STAGE:S4B-MTU OK mtu=%u\n", bt_gatt_get_mtu(conn));
+	}
+	/* Chain S5 regardless: the raw read is a single 0-byte response that fits
+	 * the default MTU, so only S6's multi-byte indication truly needs the
+	 * exchange -- but if it failed we still want the S5 marker for diagnosis. */
+	do_encrypted_read(conn);
+}
+
+static void do_mtu_exchange(struct bt_conn *conn)
+{
+	int err;
+
+	if (tried_mtu) {
+		return;
+	}
+	tried_mtu = true;
+
+	mtu_params.func = mtu_exchange_cb;
+
+	printk("STAGE:S4B-MTU START (exchanging ATT MTU)\n");
+	err = bt_gatt_exchange_mtu(conn, &mtu_params);
+	if (err) {
+		printk("STAGE:S4B-MTU FAIL bt_gatt_exchange_mtu err=%d\n", err);
+		do_encrypted_read(conn);
+	}
+}
 
 /* --- S6: framed Studio GetDeviceInfo round trip (see the block comment above) --- */
 
@@ -398,6 +449,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	printk("STAGE:DISCONNECT %s reason=0x%02x\n", addr, reason);
 	bt_conn_unref(default_conn);
 	default_conn = NULL;
+	tried_mtu = false;
 	tried_read = false;
 	tried_rpc = false;
 	rpc_frame_open = false;
@@ -417,7 +469,9 @@ static void security_changed(struct bt_conn *conn, bt_security_t level,
 	}
 	printk("STAGE:S4-SECURITY-CHANGED OK %s level=%d (encrypted link up)\n", addr, level);
 	if (level >= BT_SECURITY_L2) {
-		do_encrypted_read(conn);
+		/* Raise the ATT MTU first (S4b), then chain the encrypted read (S5)
+		 * and the framed RPC round trip (S6); see do_mtu_exchange(). */
+		do_mtu_exchange(conn);
 	}
 }
 
