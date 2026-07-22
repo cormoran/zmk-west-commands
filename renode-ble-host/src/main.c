@@ -72,6 +72,8 @@ static bool tried_rpc;
 static const uint8_t rpc_get_device_info_req[] = {0xAB, 0x08, 0x01, 0x1A,
 						  0x02, 0x08, 0x01, 0xAD};
 
+static void do_rpc_roundtrip(struct bt_conn *conn);
+
 static uint16_t rpc_value_handle;
 static struct bt_gatt_discover_params rpc_disc_params;
 static struct bt_gatt_subscribe_params rpc_sub_params;
