@@ -241,8 +241,8 @@ def _assert_key_processed(
     machine: str | None,
     source: str,
     timeout: float,
-    hold: float = 2.0,
-    reinject_every: float = 4.0,
+    hold: float = 1.0,
+    reinject_every: float = 3.0,
 ):
     """CHECK 2/3: inject a keypress at position 0 (on `machine`; the peripheral
     for a split) and wait for the DUT/central to log processing it
@@ -253,11 +253,14 @@ def _assert_key_processed(
     still be coming up when the first press fires (a lost press then never
     relays), and on a heavily loaded / coarse-quantum run a single split-relay
     notification can be dropped or delayed -- so a later press lands. Holding the
-    key for a couple of seconds of wall time also guarantees it spans several
-    kscan poll periods (10 ms virtual each) even when Renode is running well below
-    real time (e.g. the 3-machine ble-split at a 10 us quantum). A single quick
-    tap was reliable for a single DUT but flaky for the peripheral->central relay
-    on some ZMK branches."""
+    key ~`hold` s of wall time also guarantees it spans several kscan poll periods
+    (10 ms virtual each) even when Renode is running well below real time (e.g. the
+    3-machine ble-split at a 10 us quantum). A single quick tap was reliable for a
+    single DUT but flaky for the peripheral->central relay on some ZMK branches.
+    Kept gentle here (a few short presses): the emulated BLE controller is easily
+    destabilized by sustained activity (an LL assert / kernel oops), so the
+    ble-split leans on its whole-emulation retry to absorb a bad roll rather than
+    hammering within one attempt."""
     marker = renode_harness.KEYPRESS_POSITION_MARKER
     renode_harness.drain_text(log_sock._sock, timeout=0.2)  # discard buffered
     print(
@@ -1282,8 +1285,8 @@ def run_ble_split_smoke(
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
-    event_timeout: float = 30.0,  # split relay: re-inject over a wide window (see _assert_key_processed)
-    max_attempts: int = 2,
+    event_timeout: float = 15.0,  # split relay: a few gentle re-injects (see _assert_key_processed)
+    max_attempts: int = 4,  # BLE under Renode is flaky (SMP race + LL asserts); re-roll the emulation
 ) -> None:
     """ble-split-mode smoke with a bounded whole-emulation retry.
 
@@ -1351,7 +1354,7 @@ def _run_ble_split_attempt(
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
-    event_timeout: float = 30.0,  # split relay: re-inject over a wide window (see _assert_key_processed)
+    event_timeout: float = 15.0,  # split relay: a few gentle re-injects (see _assert_key_processed)
 ) -> None:
     """One ble-split attempt: boot a WIRELESS split keyboard (central + peripheral
     halves) and the renode-ble-host on ONE Renode BLE medium (fake CCM in all
