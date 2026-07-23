@@ -323,6 +323,36 @@ def wait_for_text(sock, needle: str, timeout: float) -> str:
     return buf
 
 
+# kscan-gpio-direct injection default: on both the renode_tester and renode_split
+# shields the first direct input (xiao_d 0 == gpio0 pin 2) maps to keymap
+# position 0, so pulsing gpio0 pin 2 presses/releases that key. The DUT (or, for
+# a split, the central via the relayed event) then logs "position: 0" (keymap.c
+# LOG_DBG at CONFIG_ZMK_LOG_LEVEL_DBG). Shared by every mode's key-input check.
+KEYPRESS_GPIO_PORT = "gpio0"
+KEYPRESS_GPIO_PIN = 2
+KEYPRESS_POSITION_MARKER = "position: 0"
+
+
+def inject_keypress(
+    session,
+    machine: str | None = None,
+    port: str = KEYPRESS_GPIO_PORT,
+    pin: int = KEYPRESS_GPIO_PIN,
+    hold: float = 0.3,
+) -> None:
+    """Synthesize a keypress at keymap position 0 by pulsing a kscan-direct GPIO
+    over the Renode monitor (press: OnGPIO <pin> true; release: false). `machine`
+    selects the machine to inject on (None for a single-machine session); for a
+    split this is the PERIPHERAL, whose scanned key is then relayed to the
+    central. See KEYPRESS_* above."""
+    assert session.mon is not None
+    if machine is not None:
+        session.mon.execute(f'mach set "{machine}"')
+    session.mon.execute(f"sysbus.{port} OnGPIO {pin} true")
+    time.sleep(hold)
+    session.mon.execute(f"sysbus.{port} OnGPIO {pin} false")
+
+
 # --------------------------------------------------------------------------
 # Protobuf message helpers (compile protos on the fly with protoc)
 # --------------------------------------------------------------------------
@@ -703,6 +733,7 @@ def boot_ble_pair(
         },
         cwd=SKILL_DIR,
     )
+    session.dut_rtt = None
     try:
         session.start(boot_wait=boot_wait)
         assert session.mon is not None
@@ -718,6 +749,18 @@ def boot_ble_pair(
         # selected as the last-created machine). The host app keeps keys in RAM
         # (no NVS backend), so it needs no preload.
         session.mon.execute('mach set "dut"')
+        # Capture the DUT's SEGGER RTT log stream (the real image's console is on
+        # USB CDC, silent under Renode with no host attached) so the smoke can
+        # observe the "position: %d" keymap log after injecting a keypress. The
+        # DUT machine is selected, so CreateVirtualConsole/hook target it; a
+        # no-op on a non-RTT build. Mirrors boot_single_real / boot_ble_split.
+        rtt_port = port_base + 4
+        session.mon.execute(f"include @{SEGGER_RTT_HELPER}")
+        session.mon.execute('machine CreateVirtualConsole "segger_rtt"')
+        session.mon.execute("setup_segger_rtt_wskip sysbus.segger_rtt")
+        session.mon.execute(f'emulation CreateServerSocketTerminal {rtt_port} "dut_rtt" false')
+        session.mon.execute("connector Connect sysbus.segger_rtt dut_rtt")
+        session.dut_rtt = session.connect_uart(rtt_port)
         session.mon.execute(f"sysbus LoadBinary @{ff_path} {hex(storage_addr)}")
         session.go()
     finally:
@@ -968,6 +1011,7 @@ def boot_ble_split(
         cwd=SKILL_DIR,
     )
     session.peripheral_rtt = None
+    session.central_rtt = None
     try:
         session.start(boot_wait=boot_wait)
         assert session.mon is not None
@@ -1000,6 +1044,18 @@ def boot_ble_split(
         session.mon.execute(f'emulation CreateServerSocketTerminal {rtt_port} "prtt_term" false')
         session.mon.execute("connector Connect sysbus.segger_rtt prtt_term")
         session.peripheral_rtt = session.connect_uart(rtt_port)
+
+        # Same SEGGER RTT capture on the CENTRAL machine: the central's console is
+        # also USB-CDC-silent, so the "position: %d" keymap log for a keypress
+        # relayed from the peripheral (the standardized key-input check) is only
+        # observable over the central's RTT. Machine-scoped to "central".
+        crtt_port = port_base + 6
+        session.mon.execute('mach set "central"')
+        session.mon.execute('machine CreateVirtualConsole "segger_rtt"')
+        session.mon.execute("setup_segger_rtt_wskip sysbus.segger_rtt")
+        session.mon.execute(f'emulation CreateServerSocketTerminal {crtt_port} "crtt_term" false')
+        session.mon.execute("connector Connect sysbus.segger_rtt crtt_term")
+        session.central_rtt = session.connect_uart(crtt_port)
 
         # Preload BOTH ZMK halves' erased NVS sectors before the CPUs run.
         # LoadBinary is machine-scoped, so select each half first (the host app

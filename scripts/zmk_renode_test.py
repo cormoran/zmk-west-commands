@@ -297,7 +297,19 @@ class ZMKRenodeTest(WestCommand):
             self._run_module_tests(args, elf)
 
     def _run_ble_studio_smoke(self, args, elf: Path, host_elf: Path, renode_path: str) -> None:
+        import renode_harness  # noqa: E402
         import renode_smoke  # noqa: E402
+
+        # protobuf is a hard runtime dep here: the ble smoke now asserts a real
+        # framed GetDeviceInfo round trip (CHECK 3), parsed from the host's S6 dump.
+        try:
+            import google.protobuf  # noqa: F401
+        except ImportError:
+            log.die(
+                "the `protobuf` Python package is required for the ble-mode Studio RPC "
+                "smoke test -- install it (see requirements-test.txt) or pass --skip-smoke."
+            )
+        proto_dir = self._find_studio_proto_dir(renode_harness)
 
         kwargs = {}
         if args.storage_addr is not None:
@@ -313,6 +325,7 @@ class ZMKRenodeTest(WestCommand):
                 dut_elf=elf,
                 host_elf=host_elf,
                 renode_path=renode_path,
+                studio_proto_dir=proto_dir,
                 virtual_budget=args.virtual_budget,
                 **kwargs,
             )
@@ -323,7 +336,17 @@ class ZMKRenodeTest(WestCommand):
     def _run_ble_split_smoke(
         self, args, central_elf: Path, peripheral_elf: Path, host_elf: Path, renode_path: str
     ) -> None:
+        import renode_harness  # noqa: E402
         import renode_smoke  # noqa: E402
+
+        try:
+            import google.protobuf  # noqa: F401
+        except ImportError:
+            log.die(
+                "the `protobuf` Python package is required for the ble-split Studio RPC "
+                "smoke test -- install it (see requirements-test.txt) or pass --skip-smoke."
+            )
+        proto_dir = self._find_studio_proto_dir(renode_harness)
 
         kwargs = {}
         if args.storage_addr is not None:
@@ -335,7 +358,8 @@ class ZMKRenodeTest(WestCommand):
 
         log.inf(
             "[*] Running BLE-split smoke test (split central + peripheral + renode-ble-host; "
-            "asserts split link L2 then host Studio read)"
+            "3 checks: split L2 + host S4 connection, peripheral key relayed to central, "
+            "host Studio GetDeviceInfo round trip)"
         )
         try:
             renode_smoke.run_ble_split_smoke(
@@ -343,6 +367,7 @@ class ZMKRenodeTest(WestCommand):
                 peripheral_elf=peripheral_elf,
                 host_elf=host_elf,
                 renode_path=renode_path,
+                studio_proto_dir=proto_dir,
                 virtual_budget=max(args.virtual_budget, 120.0),
                 **kwargs,
             )

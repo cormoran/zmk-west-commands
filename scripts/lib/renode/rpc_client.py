@@ -38,6 +38,32 @@ def frame(payload: bytes) -> bytes:
     return bytes(out)
 
 
+def deframe(data: bytes) -> bytes | None:
+    """Extract the first complete frame's decoded payload from `data` (the inverse
+    of frame()): find a SOF, un-escape until the closing EOF. Returns None if no
+    complete SOF..EOF frame is present. Used to reassemble a response captured as
+    raw on-wire bytes elsewhere (e.g. the renode-ble-host's S6 indication-chunk
+    hex dump), rather than over an RpcSocket."""
+    payload = bytearray()
+    in_frame = False
+    escaped = False
+    for byte in data:
+        if not in_frame:
+            if byte == SOF:
+                in_frame = True
+            continue
+        if escaped:
+            payload.append(byte)
+            escaped = False
+        elif byte == ESC:
+            escaped = True
+        elif byte == EOF:
+            return bytes(payload)
+        else:
+            payload.append(byte)
+    return None
+
+
 class RpcSocket:
     """Minimal framed RPC transport over a Renode UART socket."""
 

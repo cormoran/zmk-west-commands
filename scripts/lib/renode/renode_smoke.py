@@ -58,6 +58,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 
 sys.path.insert(0, str(SCRIPTS_DIR))
 import renode_harness  # noqa: E402
+import rpc_client  # noqa: E402
 
 # A Zephyr fatal error parks the CPU spinning in arch_system_halt (observed
 # for the vt~10s BT_ASSERT oops when FICR/NVS is wrong); z_fatal_error /
@@ -66,6 +67,14 @@ import renode_harness  # noqa: E402
 FATAL_SYMBOLS = ("arch_system_halt", "z_fatal_error", "k_sys_fatal_error_handler")
 # Console markers (observation builds only) that also mean a fatal.
 FATAL_CONSOLE_MARKERS = ("FATAL ERROR", "Halting system")
+# A crashed DUT (kernel oops / Zephyr BLE-controller LL assert) printed to a
+# console/RTT stream. Under Renode's coarse quantum the 3-machine ble-split's
+# soft link layer intermittently asserts (lll.c / lll_peripheral.c) and oopses;
+# once that happens the attempt is dead, so the BLE smokes bail on it IMMEDIATELY
+# and let the whole-emulation retry re-roll -- rather than waiting out the full
+# virtual-time budget on a corpse (a crash at vt~7s otherwise burnt ~20 min of
+# wall time running to the 120s budget).
+CRASH_MARKERS = ("ZEPHYR FATAL ERROR", "Kernel oops", "ASSERTION FAIL", "Halting system")
 
 # ---------------------------------------------------------------------------
 # Transport orthogonalization: the test's two independent axes are the
@@ -213,6 +222,117 @@ def _assert_get_device_info(
             raise AssertionError("GetDeviceInfoResponse.name was empty")
         suffix = f" (round {round_index + 1}/{rounds})" if rounds > 1 else ""
         print(f"core Studio RPC GetDeviceInfo OK (name={name!r}){suffix}", file=sys.stderr)
+    return name
+
+
+# ---------------------------------------------------------------------------
+# Standardized smoke checks. Every mode runs the same three, in order:
+#   CHECK 1/3 connection   -- the transport/link the mode exercises is up.
+#   CHECK 2/3 key input    -- a keypress (position 0), injected on the DUT (on the
+#                             PERIPHERAL for a split), is processed by the DUT /
+#                             central, observed as its "position: 0" keymap log.
+#   CHECK 3/3 Studio RPC   -- a real framed GetDeviceInfo round trips a well-formed
+#                             response with a non-empty device name.
+# Per-mode run_*_smoke functions below wire the mode-specific transports into
+# these three. See docs/renode-testing.md.
+# ---------------------------------------------------------------------------
+
+# renode-ble-host S6 markers: it dumps each GetDeviceInfo response indication as
+# `STAGE:S6-RPC-CHUNK <hex>` and prints S6_DONE once the framed response closes.
+S6_CHUNK_MARKER = "STAGE:S6-RPC-CHUNK "
+S6_DONE_MARKER = "STAGE:S6-RPC-DONE"
+
+
+def _assert_key_processed(
+    session,
+    log_sock,
+    machine: str | None,
+    source: str,
+    timeout: float,
+    hold: float = 1.0,
+    reinject_every: float = 3.0,
+):
+    """CHECK 2/3: inject a keypress at position 0 (on `machine`; the peripheral
+    for a split) and wait for the DUT/central to log processing it
+    ("position: 0") on `log_sock` (a console or RTT RpcSocket).
+
+    The press is RE-INJECTED every `reinject_every` s across `timeout`, and each
+    press is held `hold` s. Both matter for the split relay: a split link may
+    still be coming up when the first press fires (a lost press then never
+    relays), and on a heavily loaded / coarse-quantum run a single split-relay
+    notification can be dropped or delayed -- so a later press lands. Holding the
+    key ~`hold` s of wall time also guarantees it spans several kscan poll periods
+    (10 ms virtual each) even when Renode is running well below real time (e.g. the
+    3-machine ble-split at a 10 us quantum). A single quick tap was reliable for a
+    single DUT but flaky for the peripheral->central relay on some ZMK branches.
+    Kept gentle here (a few short presses): the emulated BLE controller is easily
+    destabilized by sustained activity (an LL assert / kernel oops), so the
+    ble-split leans on its whole-emulation retry to absorb a bad roll rather than
+    hammering within one attempt."""
+    marker = renode_harness.KEYPRESS_POSITION_MARKER
+    renode_harness.drain_text(log_sock._sock, timeout=0.2)  # discard buffered
+    print(
+        f"CHECK 2/3 key input: injecting keypress on {source} (retry up to {timeout:.0f}s)...",
+        file=sys.stderr,
+    )
+    deadline = time.monotonic() + timeout
+    buf = ""
+    next_inject = 0.0
+    while time.monotonic() < deadline:
+        if time.monotonic() >= next_inject:
+            renode_harness.inject_keypress(session, machine=machine, hold=hold)
+            next_inject = time.monotonic() + reinject_every
+        buf += renode_harness.drain_text(log_sock._sock, timeout=0.5)
+        if marker in buf:
+            print(f"CHECK 2/3 key input OK ({source} keypress -> {marker!r})", file=sys.stderr)
+            return
+    print("--- key-log tail ---", file=sys.stderr)
+    print("\n".join(buf.splitlines()[-25:]), file=sys.stderr)
+    raise AssertionError(
+        f"keypress injected on {source} was never processed (expected {marker!r} "
+        "-- is the kscan/relay path up and DBG logging enabled?)"
+    )
+
+
+def _parse_ble_device_info(studio_pb2, host_buf: str, expect_name_nonempty: bool = True) -> str:
+    """CHECK 3/3 for the BLE host-link: reassemble the framed GetDeviceInfo
+    response the renode-ble-host dumped as S6-RPC-CHUNK hex lines, parse it and
+    return the device name. Raises AssertionError if the chunks are absent /
+    incomplete or the response is not a well-formed GetDeviceInfoResponse."""
+    chunks: list[bytes] = []
+    for line in host_buf.splitlines():
+        idx = line.find(S6_CHUNK_MARKER)
+        if idx == -1:
+            continue
+        try:
+            chunks.append(bytes.fromhex(line[idx + len(S6_CHUNK_MARKER) :].strip()))
+        except ValueError:
+            pass
+    if not chunks:
+        raise AssertionError(
+            "no S6-RPC-CHUNK response chunks from the host "
+            "(the framed GetDeviceInfo indication never arrived)"
+        )
+    payload = rpc_client.deframe(b"".join(chunks))
+    if payload is None:
+        raise AssertionError(
+            f"the S6 GetDeviceInfo response never closed a frame ({len(chunks)} chunk(s), no EOF)"
+        )
+    resp = studio_pb2.Response()
+    resp.ParseFromString(payload)
+    if resp.WhichOneof("type") != "request_response":
+        raise AssertionError(
+            f"S6 GetDeviceInfo: expected a request_response, got {resp.WhichOneof('type')!r}"
+        )
+    if resp.request_response.WhichOneof("subsystem") != "core":
+        raise AssertionError(
+            "S6 GetDeviceInfo: expected core subsystem, got "
+            f"{resp.request_response.WhichOneof('subsystem')!r}"
+        )
+    name = resp.request_response.core.get_device_info.name
+    if expect_name_nonempty and not name:
+        raise AssertionError("S6 GetDeviceInfoResponse.name was empty")
+    print(f"CHECK 3/3 Studio RPC GetDeviceInfo OK over BLE (name={name!r})", file=sys.stderr)
     return name
 
 
@@ -374,6 +494,7 @@ def run_usb_smoke(
     expect_name_nonempty: bool = True,
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
+    event_timeout: float = 10.0,
     max_attempts: int = 2,
 ) -> None:
     """usb-mode smoke with a bounded whole-emulation retry.
@@ -422,6 +543,7 @@ def run_usb_smoke(
                 expect_name_nonempty=expect_name_nonempty,
                 storage_addr=storage_addr,
                 storage_size=storage_size,
+                event_timeout=event_timeout,
             )
             if attempt > 1:
                 print(f"usb smoke OK on attempt {attempt}", file=sys.stderr)
@@ -449,6 +571,7 @@ def _run_usb_attempt(
     expect_name_nonempty: bool,
     storage_addr: int,
     storage_size: int,
+    event_timeout: float = 10.0,
 ) -> None:
     """One usb-mode attempt: boot, attach the bridge, assert (see run_usb_smoke)."""
     import random
@@ -465,6 +588,7 @@ def _run_usb_attempt(
         storage_size=storage_size,
         port_base=port_base,
         repl_template=USB_REPL_TEMPLATE,
+        rtt=True,  # capture the DUT's SEGGER RTT log for the key-input check
     )
     assert session.mon is not None
     mon = session.mon
@@ -526,10 +650,26 @@ def _run_usb_attempt(
                 file=sys.stderr,
             )
             studio = cdc[0]
+        print("CHECK 1/3 connection OK (USB enumerated; Studio CDC wired)", file=sys.stderr)
 
-        # Two rounds: the USB path is where request #2 used to be lost (only the
-        # first device->host IN transfer per session was delivered before the
-        # bridge's read one-shot re-arm was fixed), so guard against regressing it.
+        # CHECK 2/3 key input: inject a keypress on the DUT and confirm it is
+        # processed. The single-CDC Studio image has no console CDC, so the
+        # "position: 0" keymap log rides the DUT's SEGGER RTT (renode_tester.conf
+        # RTT logging + boot_single_real rtt=True).
+        if session.rtt_socket is None:
+            raise AssertionError(
+                "usb mode: no DUT RTT socket for the key-input check "
+                "(boot_single_real rtt=True + renode_tester RTT logging required)"
+            )
+        _assert_key_processed(
+            session, session.rtt_socket, machine="single", source="the DUT", timeout=event_timeout
+        )
+
+        # CHECK 3/3 Studio RPC. Two rounds: the USB path is where request #2 used
+        # to be lost (only the first device->host IN transfer per session was
+        # delivered before the bridge's read one-shot re-arm was fixed), so guard
+        # against regressing it.
+        print("CHECK 3/3 Studio RPC GetDeviceInfo over USB CDC...", file=sys.stderr)
         _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2)
         # And a genuine device->host burst (two dev->host transfers back-to-back:
         # a lock_state_changed notification + the CallResponse), which the
@@ -649,7 +789,7 @@ def run_usb_wired_smoke(
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     settle: float = 3.0,
-    event_timeout: float = 10.0,
+    event_timeout: float = 30.0,  # split relay: re-inject over a wide window (see _assert_key_processed)
     max_attempts: int = 2,
 ) -> None:
     """usb+wired-split smoke (the orthogonal usb host-link x wired split-link
@@ -754,24 +894,26 @@ def _run_usb_wired_attempt(
     mon = session.mon
     cdc: list = []
     try:
-        # 1. The central boots and prints its banner on uart0 (console stays on
-        #    the UART; USB carries Studio, not console).
+        # CHECK 1/3 connection: the central boots (banner on uart0) AND its USB is
+        # enumerated by the host bridge. Attaching the bridge here -- as part of
+        # the connection check, before the key injection below -- is LOAD-BEARING:
+        # the central is a real USB image that busy-waits in USB init until the
+        # host enumerates it, so until the DualCdcAcmBridge attaches the central
+        # cannot run its main loop and would never process a relayed key event.
+        # (Observed on the main+dya ZMK branch, where that stall is pronounced.)
         print("waiting for central ZMK boot banner (uart0 console)...", file=sys.stderr)
         banner = renode_harness.wait_for_text(
             central_console._sock, "Welcome to ZMK", timeout=boot_timeout
         )
         if "Welcome to ZMK" not in banner:
             raise AssertionError(f"central never saw the ZMK boot banner on uart0; got:\n{banner}")
-        print("central boot banner OK", file=sys.stderr)
 
-        # 2. Let the guest finish USB bring-up before the host attaches (a SETUP
-        #    fired before the guest's INTEN is set is silently lost). boot_usb_wired_split
-        #    leaves the central machine selected, so sysbus.usbd targets it.
+        # Let the guest finish USB bring-up before the host attaches (a SETUP
+        # fired before the guest's INTEN is set is silently lost), then attach the
+        # USB CDC bridge and wait for enumeration to wire the Studio CDC.
         t0 = time.monotonic()
         while time.monotonic() - t0 < boot_settle:
             renode_harness.drain_text(central_console._sock, timeout=0.5)
-
-        # 3. Attach the USB CDC bridge and assert Studio GetDeviceInfo over it.
         cdc = list(renode_harness.attach_dual_cdc_bridge(session, port_base + 4, port_base + 5))
         deadline = time.monotonic() + wiring_timeout
         while time.monotonic() < deadline:
@@ -789,37 +931,33 @@ def _run_usb_wired_attempt(
         dual_cdc = bool(_mon_flag(mon, f"sysbus.{USB_BRIDGE_NAME}_cdc1 IsWired"))
         time.sleep(2.0)
         studio = cdc[1] if dual_cdc else cdc[0]
-        # Two rounds, as the single-CDC usb smoke does: the device->host pump must
-        # deliver more than the first reply per session (regression guard for the
-        # DualCdcAcmBridge re-arm fix).
-        _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2)
-
-        # 4. Wired split relay: after both sides settle, pulse the peripheral's
-        #    first kscan GPIO and expect the central to log the relayed position.
-        time.sleep(settle)
-        renode_harness.drain_text(central_console._sock, timeout=0.2)
         print(
-            f"injecting keypress on peripheral ({SPLIT_KEYPRESS_GPIO_PORT} pin "
-            f"{SPLIT_KEYPRESS_GPIO_PIN})...",
+            "CHECK 1/3 connection OK (central booted; USB enumerated; wired split link ready)",
             file=sys.stderr,
         )
-        mon.execute('mach set "peripheral"')
-        mon.execute(f"sysbus.{SPLIT_KEYPRESS_GPIO_PORT} OnGPIO {SPLIT_KEYPRESS_GPIO_PIN} true")
-        time.sleep(0.3)
-        mon.execute(f"sysbus.{SPLIT_KEYPRESS_GPIO_PORT} OnGPIO {SPLIT_KEYPRESS_GPIO_PIN} false")
-        central_log = renode_harness.wait_for_text(
-            central_console._sock, SPLIT_RELAYED_EVENT_MARKER, timeout=event_timeout
+
+        # CHECK 2/3 key input: a keypress injected on the PERIPHERAL is relayed
+        # over the wired split link and processed by the now-unblocked central
+        # ("position: 0" on uart0). Settle first (the split boot-order race -- see
+        # boot_split_wired).
+        time.sleep(settle)
+        _assert_key_processed(
+            session,
+            central_console,
+            machine="peripheral",
+            source="the peripheral (relayed over the wired split link)",
+            timeout=event_timeout,
         )
-        if SPLIT_RELAYED_EVENT_MARKER not in central_log:
-            print("--- central console tail ---", file=sys.stderr)
-            print("\n".join(central_log.splitlines()[-25:]), file=sys.stderr)
-            raise AssertionError(
-                "central never processed a key event relayed from the peripheral "
-                f"(expected {SPLIT_RELAYED_EVENT_MARKER!r}) -- wired split link not up"
-            )
+
+        # CHECK 3/3 Studio RPC GetDeviceInfo over the central's USB CDC. Two
+        # rounds, as the single-CDC usb smoke does: the device->host pump must
+        # deliver more than the first reply per session (regression guard for the
+        # DualCdcAcmBridge re-arm fix).
+        print("CHECK 3/3 Studio RPC GetDeviceInfo over USB CDC...", file=sys.stderr)
+        _assert_get_device_info(studio_pb2, studio, rpc_timeout, expect_name_nonempty, rounds=2)
         print(
-            f"usb+wired OK (Studio RPC over USB CDC + wired relay "
-            f"{SPLIT_RELAYED_EVENT_MARKER!r} on the central)",
+            "usb+wired OK (all 3 checks: central boot + USB enum + wired relay "
+            f"{renode_harness.KEYPRESS_POSITION_MARKER!r} + Studio RPC over USB CDC)",
             file=sys.stderr,
         )
     finally:
@@ -966,23 +1104,33 @@ def run_ble_studio_smoke(
     dut_elf: Path,
     host_elf: Path,
     renode_path: str,
+    studio_proto_dir: Path,
     virtual_budget: float = 20.0,
-    wall_budget: float = 780.0,
+    wall_budget: float = 300.0,  # keep the single (ble+usb) job under the 15 min CI cap
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
+    event_timeout: float = 10.0,
 ) -> None:
-    """ble-mode Studio smoke (with host): boot a real ZMK DUT and the renode-ble-host app on
-    one Renode BLE medium (fake CCM in both machines), then assert the host
-    reaches an encrypted GATT read of the ZMK Studio RPC characteristic.
+    """ble-mode Studio smoke (with host): boot a real ZMK DUT and the
+    renode-ble-host app on one Renode BLE medium (fake CCM in both machines), then
+    run the three standardized checks over the encrypted BLE link:
 
-    PASSES when the host console shows both `STAGE:S4-SECURITY-CHANGED OK`
-    (encrypted link up) and `STAGE:S5-GATT-READ OK` (encrypted read) before the
-    DUT clocks `virtual_budget` virtual seconds (default 20s -- generous vs the
-    ~3.3s observed). FAILS on any host FAIL marker, on the virtual-time budget,
-    or on the `wall_budget` wall-clock safety net. On failure the tails of both
-    consoles are printed. NOT a cryptographic assertion -- the CCM is a shared
-    identity transform (see README.md's Studio-over-BLE section).
+      CHECK 1/3 connection -- the host reaches an encrypted link (STAGE:S4).
+      CHECK 2/3 key input  -- a keypress injected on the DUT is processed
+                              ("position: 0" on the DUT's SEGGER RTT log).
+      CHECK 3/3 Studio RPC -- the host completes a real framed GetDeviceInfo
+                              round trip over the RPC characteristic (STAGE:S6:
+                              write request -> reassemble the indicated response);
+                              this Python side parses it and asserts a non-empty
+                              device name.
+
+    The host app drives S1-S6 autonomously (scan/connect/pair/read/RPC); this
+    function waits for S4 + the S6 round trip to complete, then actively injects
+    the keypress. FAILS on any host FAIL marker, the virtual-time budget, or the
+    `wall_budget` wall-clock safety net. On failure the tails of both consoles are
+    printed. NOT a cryptographic assertion -- the CCM is a shared identity
+    transform (see README.md's Studio-over-BLE section).
 
     `steady_quantum` (e.g. "0.001") enables the validated "fine-then-coarse"
     schedule: as soon as the encrypted link is up (host STAGE:S4) the global
@@ -1015,6 +1163,7 @@ def run_ble_studio_smoke(
     assert session.mon is not None
     mon = session.mon
     dut_buf = ""
+    dut_rtt_buf = ""
     host_buf = ""
     reason = None
     steady_raised = False
@@ -1024,6 +1173,15 @@ def run_ble_studio_smoke(
         while time.monotonic() < deadline:
             host_buf += renode_harness.drain_text(host_console._sock, timeout=0.5)
             dut_buf += renode_harness.drain_text(dut_console._sock, timeout=0.5)
+            if session.dut_rtt is not None:
+                dut_rtt_buf += renode_harness.drain_text(session.dut_rtt._sock, timeout=0.1)
+
+            # Fail fast if the DUT oopsed / hit an LL assert -- no point waiting out
+            # the budget on a corpse (see CRASH_MARKERS).
+            crash = next((m for m in CRASH_MARKERS if m in dut_rtt_buf or m in dut_buf), None)
+            if crash:
+                reason = f"the DUT crashed ({crash!r} -- Renode BLE-controller instability)"
+                break
 
             # Fine-then-coarse: once the encrypted link is up (S4), raise the
             # global quantum so the steady-state phase runs coarser/faster. The
@@ -1036,7 +1194,9 @@ def run_ble_studio_smoke(
                     file=sys.stderr,
                 )
 
-            if BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf:
+            # The host app chains S1..S6 autonomously; the S6 round trip completing
+            # (S6_DONE) implies the S4 encrypted link. Require both explicitly.
+            if S6_DONE_MARKER in host_buf and BLE_SECURITY_OK in host_buf:
                 break
             bad = next((m for m in BLE_FAIL_MARKERS if m in host_buf), None)
             if bad:
@@ -1066,11 +1226,29 @@ def run_ble_studio_smoke(
         trimming = renode_log.count("trimming")
 
         stages = [ln.strip() for ln in host_buf.splitlines() if "STAGE:" in ln]
-        if reason is None and BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf:
+        if reason is None and S6_DONE_MARKER in host_buf and BLE_SECURITY_OK in host_buf:
             for ln in stages:
                 print(f"  host| {ln}", file=sys.stderr)
+
+            # The three standardized checks. Connection (S4) is already proven by
+            # reaching here; then actively inject the keypress, then parse the RPC.
             print(
-                f"BLE smoke OK (encrypted Studio RPC read reached at vt~{vt:.1f}s; "
+                f"CHECK 1/3 connection OK (encrypted BLE link up, host S4, vt~{vt:.1f}s)",
+                file=sys.stderr,
+            )
+            if session.dut_rtt is None:
+                raise AssertionError(
+                    "ble mode: no DUT RTT socket for the key-input check "
+                    "(renode_tester RTT logging required)"
+                )
+            _assert_key_processed(
+                session, session.dut_rtt, machine="dut", source="the DUT", timeout=event_timeout
+            )
+            studio_pb2 = renode_harness.load_studio_pb2(studio_proto_dir)
+            _parse_ble_device_info(studio_pb2, host_buf)
+
+            print(
+                f"BLE smoke OK (all 3 checks over the encrypted link; "
                 f"radio 'trimming' warnings: {trimming})",
                 file=sys.stderr,
             )
@@ -1101,6 +1279,8 @@ def run_ble_studio_smoke(
             os.unlink(log_path)
         except OSError:
             pass
+        if session.dut_rtt is not None:
+            session.dut_rtt.close()
         host_console.close()
         dut_rpc.close()
         dut_console.close()
@@ -1112,39 +1292,56 @@ def run_ble_split_smoke(
     peripheral_elf: Path,
     host_elf: Path,
     renode_path: str,
-    virtual_budget: float = 120.0,
-    wall_budget: float = 1500.0,
+    studio_proto_dir: Path,
+    virtual_budget: float = 45.0,
+    wall_budget: float = 240.0,
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
-    max_attempts: int = 2,
+    event_timeout: float = 15.0,  # split relay: a few gentle re-injects (see _assert_key_processed)
+    max_attempts: int = 8,
+    total_wall_budget: float = 360.0,  # HARD cap on the whole smoke (all retries) -- the CI job also
+    # spends ~7 min building the 3 images, so keep the smoke ~6 min to fit the 15 min job cap
 ) -> None:
-    """ble-split-mode smoke with a bounded whole-emulation retry.
+    """ble-split-mode smoke with a time-bounded whole-emulation retry.
 
-    Runs `_run_ble_split_attempt` (one fresh 3-machine boot) up to `max_attempts`
-    times, succeeding on the first attempt that reaches the full chain.
+    Runs `_run_ble_split_attempt` (one fresh 3-machine boot) repeatedly until one
+    reaches the full chain, up to `max_attempts` or until `total_wall_budget` s
+    have elapsed -- whichever comes first -- so the whole smoke (all retries) fits
+    the ~15 min CI job cap.
 
     WHY the retry: the split (peripheral<->central) and host (host<->central)
     links each do an LE Secure Connections pairing, and on Renode's shared BLE
     medium two pairings running close together can cross their SMP DHKey-Check
     PDUs ("Unexpected SMP code 0x0d" -> "in-progress pairing has been deleted" ->
-    err 9). Whichever link pairs first wins; the loser can fail to recover within
-    the budget. This is a transient property of the emulated radio, NOT a
-    firmware regression (both links pair fine in isolation, and a real radio has
-    no such cross-talk). A fresh emulation re-rolls the timing, so a single
-    bounded retry makes the smoke reliably green without masking a real failure:
-    a genuine break fails BOTH attempts. Sequencing the two pairings by delaying
-    the host does NOT help -- once one link is an active connection its
-    connection events collide with the other link's pairing just the same.
+    err 9), and the 3-machine soft link layer at a 10us quantum intermittently
+    hits a controller LL assert (lll.c / lll_peripheral.c -> kernel oops). Both
+    are transient properties of the emulated radio, NOT firmware regressions (a
+    real radio has no cross-talk and meets the LL timing). A fresh emulation
+    re-rolls the timing. `_run_ble_split_attempt` BAILS an attempt the instant a
+    half crashes (see CRASH_MARKERS), so a bad roll costs ~1-2 min, not the full
+    virtual-time budget -- which is what lets several retries fit the cap.
+    Sequencing the two pairings by delaying the host does NOT help -- once one
+    link is an active connection its events collide with the other's pairing.
 
     See `_run_ble_split_attempt` for the per-attempt assertions and parameters.
     """
     last_err: AssertionError | None = None
-    for attempt in range(1, max_attempts + 1):
+    deadline = time.monotonic() + total_wall_budget
+    attempt = 0
+    # A fresh attempt needs enough runway to actually reach the chain (~a winning
+    # attempt is ~3-4 min wall); don't start one that can't finish in the time left.
+    min_runway = 150.0
+    while attempt < max_attempts and time.monotonic() < deadline - min_runway:
+        attempt += 1
+        # Cap this attempt to the remaining total budget, so all retries together
+        # never exceed total_wall_budget (the outer deadline is only checked
+        # BETWEEN attempts; without this a late attempt could overrun it).
+        attempt_wall = min(wall_budget, deadline - time.monotonic())
         if attempt > 1:
             print(
-                f"--- ble-split attempt {attempt}/{max_attempts} "
-                "(fresh emulation; previous attempt hit the transient SMP race) ---",
+                f"--- ble-split attempt {attempt} "
+                "(fresh emulation; previous attempt hit the transient SMP race / LL assert) ---",
                 file=sys.stderr,
             )
         try:
@@ -1153,22 +1350,27 @@ def run_ble_split_smoke(
                 peripheral_elf=peripheral_elf,
                 host_elf=host_elf,
                 renode_path=renode_path,
+                studio_proto_dir=studio_proto_dir,
                 virtual_budget=virtual_budget,
-                wall_budget=wall_budget,
+                wall_budget=attempt_wall,
                 storage_addr=storage_addr,
                 storage_size=storage_size,
                 steady_quantum=steady_quantum,
+                event_timeout=event_timeout,
             )
             if attempt > 1:
                 print(f"ble-split smoke OK on attempt {attempt}", file=sys.stderr)
             return
         except AssertionError as err:
             last_err = err
-            print(
-                f"ble-split attempt {attempt}/{max_attempts} FAILED: {err}",
-                file=sys.stderr,
-            )
-    assert last_err is not None
+            print(f"ble-split attempt {attempt} FAILED: {err}", file=sys.stderr)
+    if last_err is None:
+        raise AssertionError("ble-split smoke made no attempt (total wall budget too small?)")
+    print(
+        f"ble-split smoke exhausted {attempt} attempt(s) in "
+        f"{total_wall_budget:.0f}s without a clean run (Renode BLE instability)",
+        file=sys.stderr,
+    )
     raise last_err
 
 
@@ -1177,34 +1379,38 @@ def _run_ble_split_attempt(
     peripheral_elf: Path,
     host_elf: Path,
     renode_path: str,
-    virtual_budget: float = 120.0,
-    wall_budget: float = 1500.0,
+    studio_proto_dir: Path,
+    virtual_budget: float = 45.0,
+    wall_budget: float = 300.0,
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
+    event_timeout: float = 15.0,  # split relay: a few gentle re-injects (see _assert_key_processed)
 ) -> None:
     """One ble-split attempt: boot a WIRELESS split keyboard (central + peripheral
     halves) and the renode-ble-host on ONE Renode BLE medium (fake CCM in all
-    three machines), then assert the full peripheral -> central -> host encrypted
-    chain, IN ORDER:
+    three machines), then run the three standardized checks over the full
+    peripheral -> central -> host chain:
 
-      1. the split link comes up encrypted -- the peripheral's RTT log shows
-         "Security changed: ... level 2" (BT_SECURITY_L2 between the peripheral
-         and central halves); THEN
-      2. the host reaches an encrypted Studio GATT read of the CENTRAL half --
-         both STAGE:S4-SECURITY-CHANGED OK (encrypted link up) and
-         STAGE:S5-GATT-READ OK (encrypted read).
+      CHECK 1/3 connection -- BOTH encrypted links are up: the split link (the
+                              peripheral's RTT shows "Security changed ... level
+                              2") AND the host<->central link (host STAGE:S4).
+      CHECK 2/3 key input  -- a keypress injected on the PERIPHERAL is relayed
+                              over the encrypted split link and processed by the
+                              central ("position: 0" on the central's RTT).
+      CHECK 3/3 Studio RPC -- the host completes a real framed GetDeviceInfo round
+                              trip against the CENTRAL (STAGE:S6); parsed here.
 
-    Reaching S5 through the split central proves the whole chain: the host's
-    encrypted Studio read is served by the same central that holds the encrypted
-    split link to the peripheral. Also asserts 0 radio "trimming" warnings on
-    either link (the DLE-27 cap on both halves + host should keep every on-air
-    PDU within Renode's 31-byte radio cap).
+    Passing all three proves the whole chain end to end: the same central holds
+    the encrypted split link to the peripheral (whose key it relays) AND serves
+    Studio RPC to the host. Also asserts 0 radio "trimming" warnings on either
+    link (the DLE-27 cap on both halves + host keeps every on-air PDU within
+    Renode's 31-byte radio cap).
 
-    FAILS on the peripheral's "Security failed" marker, any host FAIL marker, the
-    virtual-time budget, or the `wall_budget` wall-clock safety net. Also fails if
-    the host reaches S5 but the split link never secured (that would mean the
-    central served Studio without the peripheral -- not the full chain). On
+    FAILS on the virtual-time budget or the `wall_budget` wall-clock safety net,
+    or if the host completes the RPC but the split link never secured (the central
+    served Studio without the peripheral -- not the full chain). Transient pairing
+    "Security failed" markers are NOT fatal (the links rescan and retry). On
     failure the peripheral RTT + host console tails are printed. NOT a
     cryptographic assertion -- the CCM is a shared identity transform.
 
@@ -1236,6 +1442,7 @@ def _run_ble_split_attempt(
     rtt_buf = ""
     host_buf = ""
     central_buf = ""
+    crtt_buf = ""
     reason = None
     split_l2_at = None
     steady_raised = False
@@ -1249,6 +1456,22 @@ def _run_ble_split_attempt(
                 rtt_buf += renode_harness.drain_text(peripheral_rtt._sock, timeout=0.3)
             host_buf += renode_harness.drain_text(host_console._sock, timeout=0.3)
             central_buf += renode_harness.drain_text(central_console._sock, timeout=0.2)
+            if session.central_rtt is not None:
+                crtt_buf += renode_harness.drain_text(session.central_rtt._sock, timeout=0.1)
+
+            # Fail fast: if either half oopsed / hit an LL assert, this attempt is
+            # a corpse -- bail now and let the whole-emulation retry re-roll,
+            # rather than running to the virtual-time budget (~20 min wall).
+            crash = next(
+                (m for m in CRASH_MARKERS if m in rtt_buf or m in crtt_buf or m in central_buf),
+                None,
+            )
+            if crash:
+                reason = (
+                    f"a split half crashed ({crash!r} -- transient Renode BLE-controller "
+                    "instability); bailing early to retry"
+                )
+                break
 
             if split_l2_at is None and _split_l2_seen(rtt_buf):
                 split_l2_at = vt
@@ -1271,8 +1494,10 @@ def _run_ble_split_attempt(
                     file=sys.stderr,
                 )
 
+            # The host chains S1..S6; S6_DONE (the framed GetDeviceInfo round trip)
+            # implies its S4 encrypted link. Require it plus the secured split link.
             if (
-                BLE_GATT_READ_OK in host_buf
+                S6_DONE_MARKER in host_buf
                 and BLE_SECURITY_OK in host_buf
                 and split_l2_at is not None
             ):
@@ -1314,7 +1539,7 @@ def _run_ble_split_attempt(
             pass
         trimming = renode_log.count("trimming")
 
-        host_reached = BLE_GATT_READ_OK in host_buf and BLE_SECURITY_OK in host_buf
+        host_reached = S6_DONE_MARKER in host_buf and BLE_SECURITY_OK in host_buf
         split_ok = split_l2_at is not None
         stages = [ln.strip() for ln in host_buf.splitlines() if "STAGE:" in ln]
 
@@ -1325,15 +1550,11 @@ def _run_ble_split_attempt(
             )
             retry_note = f" (recovered after transient pairing retry on: {which})"
 
-        # Success requires BOTH: the split link secured AND the host read.
+        # Success requires BOTH: the split link secured AND the host RPC round trip.
         if reason is None and host_reached and split_ok:
             for ln in stages:
                 print(f"  host| {ln}", file=sys.stderr)
-            print(
-                f"BLE-split smoke OK: split link L2 (vt~{split_l2_at:.1f}s) then host "
-                f"encrypted Studio read; radio 'trimming' warnings: {trimming}{retry_note}",
-                file=sys.stderr,
-            )
+
             if trimming:
                 print(
                     f"WARNING: {trimming} radio 'trimming' line(s) in the Renode log "
@@ -1344,11 +1565,40 @@ def _run_ble_split_attempt(
                     f"{trimming} radio 'trimming' warning(s) -- an on-air PDU exceeded "
                     "Renode's 31-byte cap (DLE not capped to 27 on some link)"
                 )
+
+            # The three standardized checks. Connection (both encrypted links) is
+            # already proven; then actively inject the peripheral keypress and
+            # parse the RPC response.
+            print(
+                f"CHECK 1/3 connection OK (split link L2 vt~{split_l2_at:.1f}s + host S4"
+                f"{retry_note})",
+                file=sys.stderr,
+            )
+            if session.central_rtt is None:
+                raise AssertionError(
+                    "ble-split mode: no central RTT socket for the key-input check "
+                    "(renode_split_left.conf RTT logging required)"
+                )
+            _assert_key_processed(
+                session,
+                session.central_rtt,
+                machine="peripheral",
+                source="the peripheral (relayed over the encrypted split link)",
+                timeout=event_timeout,
+            )
+            studio_pb2 = renode_harness.load_studio_pb2(studio_proto_dir)
+            _parse_ble_device_info(studio_pb2, host_buf)
+
+            print(
+                f"BLE-split smoke OK (all 3 checks: peripheral->central->host chain; "
+                f"radio 'trimming' warnings: {trimming})",
+                file=sys.stderr,
+            )
             return
 
         if reason is None and host_reached and not split_ok:
             reason = (
-                "host reached the encrypted Studio read but the split link never "
+                "host completed the Studio RPC round trip but the split link never "
                 "secured (no peripheral 'Security changed ... level 2') -- the central "
                 "served Studio without the peripheral, so the full chain is unproven"
             )
@@ -1374,6 +1624,8 @@ def _run_ble_split_attempt(
             pass
         if peripheral_rtt is not None:
             peripheral_rtt.close()
+        if getattr(session, "central_rtt", None) is not None:
+            session.central_rtt.close()
         host_console.close()
         central_console.close()
         for sock in getattr(session, "_idle_sockets", []):
@@ -1549,11 +1801,15 @@ def main(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
                 return 2
+            proto_dir = _proto_dir()  # needed to parse the S6 GetDeviceInfo response
+            if proto_dir is None:
+                return 2
             run_ble_split_smoke(
                 central_elf=args.elf,
                 peripheral_elf=args.peripheral_elf,
                 host_elf=args.host_elf,
                 renode_path=renode_path,
+                studio_proto_dir=proto_dir,
                 virtual_budget=args.virtual_budget,
                 storage_addr=args.storage_addr,
                 storage_size=args.storage_size,
@@ -1578,10 +1834,14 @@ def main(argv: list[str] | None = None) -> int:
                 if not args.host_elf.is_file():
                     print(f"host ELF not found: {args.host_elf}", file=sys.stderr)
                     return 2
+                proto_dir = _proto_dir()  # needed to parse the S6 GetDeviceInfo response
+                if proto_dir is None:
+                    return 2
                 run_ble_studio_smoke(
                     dut_elf=args.elf,
                     host_elf=args.host_elf,
                     renode_path=renode_path,
+                    studio_proto_dir=proto_dir,
                     virtual_budget=args.virtual_budget,
                     storage_addr=args.storage_addr,
                     storage_size=args.storage_size,

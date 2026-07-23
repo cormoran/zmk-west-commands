@@ -14,6 +14,22 @@ DUT (the central half in `split` / `ble-split`). The generic smoke (boot + Studi
 module-specific test. A module's own `tests/renode/*_test.py` run afterwards and
 `import renode_harness` directly for anything more specific.
 
+## The three standardized checks
+
+Every mode's smoke runs the **same three checks**, in order, so a green run means
+the same thing regardless of transport:
+
+| # | Check | What it does |
+|---|-------|--------------|
+| **1** | connection | the mode's transport/link is up (USB enumerated, or the encrypted BLE link — and the encrypted split link for a split). |
+| **2** | key input | a keypress at position 0, injected on the DUT (on the **peripheral** for a split), is processed by the DUT/central — observed as its `position: 0` keymap log (`keymap.c` `LOG_DBG`). The non-split `usb`/`ble` DUT and the split central read this off **SEGGER RTT** (their console is USB-CDC, silent under Renode); the wired-split central reads it off its uart0 console. |
+| **3** | Studio RPC | a real framed Studio `GetDeviceInfo` round trip returns a well-formed response with a non-empty device name. Over USB CDC in `usb`/`wired-split`; over the encrypted BLE RPC characteristic in `ble`/`ble-split` (the `renode-ble-host` app writes the framed request and reassembles the indicated response — its `STAGE:S6` markers — which the harness parses). |
+
+The per-mode sections below detail how each mode wires its transports into these
+three (and the extra guarantees a mode adds, e.g. the ble-split full chain or the
+USB device→host burst regression guard). The smoke prints `CHECK 1/3` … `CHECK
+3/3` lines as it goes.
+
 ## Command reference
 
 ```
@@ -69,10 +85,14 @@ firmware — the same code paths as a hardware Studio-over-BLE session — with
 cryptographic one (see the fake-CCM disclaimer in
 [renode-internals.md](design/renode-internals.md#fake-ccm--not-cryptographically-real)).
 
-The smoke passes as soon as S4+S5 appear; `--virtual-budget` (default 20 virtual
-seconds) caps how long it waits, and a wall-clock safety net stops a wedged run.
-A run reaches the encrypted read (S5) at ~3.3 s virtual and ~**35–50 s wall**
-(≈0.10× realtime on a lightly-loaded host).
+The smoke waits for the encrypted link (S4) and the framed `GetDeviceInfo` round
+trip (the host's `STAGE:S6`) — the [three standardized checks](#the-three-standardized-checks)
+are then CHECK 1 (S4 connection), CHECK 2 (inject a keypress on the DUT, confirm
+`position: 0` on its RTT) and CHECK 3 (parse the S6 response). `--virtual-budget`
+(default 20 virtual seconds) caps how long it waits, and a wall-clock safety net
+stops a wedged run. A run reaches the encrypted read at ~3.3 s virtual and
+~**35–50 s wall** (≈0.10× realtime on a lightly-loaded host). (The host still does
+its S5 raw GATT read first — it chains straight into the S6 framed round trip.)
 
 **Without `--host-elf`**, ble mode degrades to a **boot-liveness check**: it
 boots just the real DUT image (no host, no BLE peer) and proves it is still
