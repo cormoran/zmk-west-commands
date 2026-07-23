@@ -67,6 +67,14 @@ import rpc_client  # noqa: E402
 FATAL_SYMBOLS = ("arch_system_halt", "z_fatal_error", "k_sys_fatal_error_handler")
 # Console markers (observation builds only) that also mean a fatal.
 FATAL_CONSOLE_MARKERS = ("FATAL ERROR", "Halting system")
+# A crashed DUT (kernel oops / Zephyr BLE-controller LL assert) printed to a
+# console/RTT stream. Under Renode's coarse quantum the 3-machine ble-split's
+# soft link layer intermittently asserts (lll.c / lll_peripheral.c) and oopses;
+# once that happens the attempt is dead, so the BLE smokes bail on it IMMEDIATELY
+# and let the whole-emulation retry re-roll -- rather than waiting out the full
+# virtual-time budget on a corpse (a crash at vt~7s otherwise burnt ~20 min of
+# wall time running to the 120s budget).
+CRASH_MARKERS = ("ZEPHYR FATAL ERROR", "Kernel oops", "ASSERTION FAIL", "Halting system")
 
 # ---------------------------------------------------------------------------
 # Transport orthogonalization: the test's two independent axes are the
@@ -1098,7 +1106,7 @@ def run_ble_studio_smoke(
     renode_path: str,
     studio_proto_dir: Path,
     virtual_budget: float = 20.0,
-    wall_budget: float = 780.0,
+    wall_budget: float = 300.0,  # keep the single (ble+usb) job under the 15 min CI cap
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
@@ -1155,6 +1163,7 @@ def run_ble_studio_smoke(
     assert session.mon is not None
     mon = session.mon
     dut_buf = ""
+    dut_rtt_buf = ""
     host_buf = ""
     reason = None
     steady_raised = False
@@ -1165,10 +1174,14 @@ def run_ble_studio_smoke(
             host_buf += renode_harness.drain_text(host_console._sock, timeout=0.5)
             dut_buf += renode_harness.drain_text(dut_console._sock, timeout=0.5)
             if session.dut_rtt is not None:
-                # Keep the DUT RTT socket drained during the wait (its buffered
-                # boot log is discarded; the key-input check re-drains and injects
-                # afterwards) so it does not back up over a long pairing phase.
-                renode_harness.drain_text(session.dut_rtt._sock, timeout=0.1)
+                dut_rtt_buf += renode_harness.drain_text(session.dut_rtt._sock, timeout=0.1)
+
+            # Fail fast if the DUT oopsed / hit an LL assert -- no point waiting out
+            # the budget on a corpse (see CRASH_MARKERS).
+            crash = next((m for m in CRASH_MARKERS if m in dut_rtt_buf or m in dut_buf), None)
+            if crash:
+                reason = f"the DUT crashed ({crash!r} -- Renode BLE-controller instability)"
+                break
 
             # Fine-then-coarse: once the encrypted link is up (S4), raise the
             # global quantum so the steady-state phase runs coarser/faster. The
@@ -1280,40 +1293,55 @@ def run_ble_split_smoke(
     host_elf: Path,
     renode_path: str,
     studio_proto_dir: Path,
-    virtual_budget: float = 120.0,
-    wall_budget: float = 1500.0,
+    virtual_budget: float = 45.0,
+    wall_budget: float = 240.0,
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
     event_timeout: float = 15.0,  # split relay: a few gentle re-injects (see _assert_key_processed)
-    max_attempts: int = 4,  # BLE under Renode is flaky (SMP race + LL asserts); re-roll the emulation
+    max_attempts: int = 8,
+    total_wall_budget: float = 360.0,  # HARD cap on the whole smoke (all retries) -- the CI job also
+    # spends ~7 min building the 3 images, so keep the smoke ~6 min to fit the 15 min job cap
 ) -> None:
-    """ble-split-mode smoke with a bounded whole-emulation retry.
+    """ble-split-mode smoke with a time-bounded whole-emulation retry.
 
-    Runs `_run_ble_split_attempt` (one fresh 3-machine boot) up to `max_attempts`
-    times, succeeding on the first attempt that reaches the full chain.
+    Runs `_run_ble_split_attempt` (one fresh 3-machine boot) repeatedly until one
+    reaches the full chain, up to `max_attempts` or until `total_wall_budget` s
+    have elapsed -- whichever comes first -- so the whole smoke (all retries) fits
+    the ~15 min CI job cap.
 
     WHY the retry: the split (peripheral<->central) and host (host<->central)
     links each do an LE Secure Connections pairing, and on Renode's shared BLE
     medium two pairings running close together can cross their SMP DHKey-Check
     PDUs ("Unexpected SMP code 0x0d" -> "in-progress pairing has been deleted" ->
-    err 9). Whichever link pairs first wins; the loser can fail to recover within
-    the budget. This is a transient property of the emulated radio, NOT a
-    firmware regression (both links pair fine in isolation, and a real radio has
-    no such cross-talk). A fresh emulation re-rolls the timing, so a single
-    bounded retry makes the smoke reliably green without masking a real failure:
-    a genuine break fails BOTH attempts. Sequencing the two pairings by delaying
-    the host does NOT help -- once one link is an active connection its
-    connection events collide with the other link's pairing just the same.
+    err 9), and the 3-machine soft link layer at a 10us quantum intermittently
+    hits a controller LL assert (lll.c / lll_peripheral.c -> kernel oops). Both
+    are transient properties of the emulated radio, NOT firmware regressions (a
+    real radio has no cross-talk and meets the LL timing). A fresh emulation
+    re-rolls the timing. `_run_ble_split_attempt` BAILS an attempt the instant a
+    half crashes (see CRASH_MARKERS), so a bad roll costs ~1-2 min, not the full
+    virtual-time budget -- which is what lets several retries fit the cap.
+    Sequencing the two pairings by delaying the host does NOT help -- once one
+    link is an active connection its events collide with the other's pairing.
 
     See `_run_ble_split_attempt` for the per-attempt assertions and parameters.
     """
     last_err: AssertionError | None = None
-    for attempt in range(1, max_attempts + 1):
+    deadline = time.monotonic() + total_wall_budget
+    attempt = 0
+    # A fresh attempt needs enough runway to actually reach the chain (~a winning
+    # attempt is ~3-4 min wall); don't start one that can't finish in the time left.
+    min_runway = 150.0
+    while attempt < max_attempts and time.monotonic() < deadline - min_runway:
+        attempt += 1
+        # Cap this attempt to the remaining total budget, so all retries together
+        # never exceed total_wall_budget (the outer deadline is only checked
+        # BETWEEN attempts; without this a late attempt could overrun it).
+        attempt_wall = min(wall_budget, deadline - time.monotonic())
         if attempt > 1:
             print(
-                f"--- ble-split attempt {attempt}/{max_attempts} "
-                "(fresh emulation; previous attempt hit the transient SMP race) ---",
+                f"--- ble-split attempt {attempt} "
+                "(fresh emulation; previous attempt hit the transient SMP race / LL assert) ---",
                 file=sys.stderr,
             )
         try:
@@ -1324,7 +1352,7 @@ def run_ble_split_smoke(
                 renode_path=renode_path,
                 studio_proto_dir=studio_proto_dir,
                 virtual_budget=virtual_budget,
-                wall_budget=wall_budget,
+                wall_budget=attempt_wall,
                 storage_addr=storage_addr,
                 storage_size=storage_size,
                 steady_quantum=steady_quantum,
@@ -1335,11 +1363,14 @@ def run_ble_split_smoke(
             return
         except AssertionError as err:
             last_err = err
-            print(
-                f"ble-split attempt {attempt}/{max_attempts} FAILED: {err}",
-                file=sys.stderr,
-            )
-    assert last_err is not None
+            print(f"ble-split attempt {attempt} FAILED: {err}", file=sys.stderr)
+    if last_err is None:
+        raise AssertionError("ble-split smoke made no attempt (total wall budget too small?)")
+    print(
+        f"ble-split smoke exhausted {attempt} attempt(s) in "
+        f"{total_wall_budget:.0f}s without a clean run (Renode BLE instability)",
+        file=sys.stderr,
+    )
     raise last_err
 
 
@@ -1349,8 +1380,8 @@ def _run_ble_split_attempt(
     host_elf: Path,
     renode_path: str,
     studio_proto_dir: Path,
-    virtual_budget: float = 120.0,
-    wall_budget: float = 1500.0,
+    virtual_budget: float = 45.0,
+    wall_budget: float = 300.0,
     storage_addr: int = renode_harness.STORAGE_ADDR_DEFAULT,
     storage_size: int = renode_harness.STORAGE_SIZE_DEFAULT,
     steady_quantum: str | None = None,
@@ -1411,6 +1442,7 @@ def _run_ble_split_attempt(
     rtt_buf = ""
     host_buf = ""
     central_buf = ""
+    crtt_buf = ""
     reason = None
     split_l2_at = None
     steady_raised = False
@@ -1425,9 +1457,21 @@ def _run_ble_split_attempt(
             host_buf += renode_harness.drain_text(host_console._sock, timeout=0.3)
             central_buf += renode_harness.drain_text(central_console._sock, timeout=0.2)
             if session.central_rtt is not None:
-                # Keep the central RTT drained (its buffered boot log is discarded;
-                # the key-input check re-drains and injects afterwards).
-                renode_harness.drain_text(session.central_rtt._sock, timeout=0.1)
+                crtt_buf += renode_harness.drain_text(session.central_rtt._sock, timeout=0.1)
+
+            # Fail fast: if either half oopsed / hit an LL assert, this attempt is
+            # a corpse -- bail now and let the whole-emulation retry re-roll,
+            # rather than running to the virtual-time budget (~20 min wall).
+            crash = next(
+                (m for m in CRASH_MARKERS if m in rtt_buf or m in crtt_buf or m in central_buf),
+                None,
+            )
+            if crash:
+                reason = (
+                    f"a split half crashed ({crash!r} -- transient Renode BLE-controller "
+                    "instability); bailing early to retry"
+                )
+                break
 
             if split_l2_at is None and _split_l2_seen(rtt_buf):
                 split_l2_at = vt

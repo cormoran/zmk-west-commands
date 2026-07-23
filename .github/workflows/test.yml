@@ -77,7 +77,7 @@ jobs:
           - { zmk_remote: zmkfirmware, zmk_revision: main }
           - { zmk_remote: cormoran, zmk_revision: main+dya }
           - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
-    timeout-minutes: 45
+    timeout-minutes: 15
     container:
       image: zmkfirmware/zmk-build-arm:stable
     # Single-machine (non-split) host-link coverage: boots the one real image and
@@ -140,7 +140,7 @@ jobs:
           - { zmk_remote: zmkfirmware, zmk_revision: main }
           - { zmk_remote: cormoran, zmk_revision: main+dya }
           - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
-    timeout-minutes: 45
+    timeout-minutes: 15
     container:
       image: zmkfirmware/zmk-build-arm:stable
     name: "Renode (wired split) [${{ matrix.zmk_revision }}]"
@@ -185,12 +185,14 @@ jobs:
 
   renode-ble-split:
     runs-on: ubuntu-latest
-    # HEAVY: three emulated nRF52840s on one BLE medium at a 10us quantum runs
+    # HEAVY: three emulated nRF52840s on one BLE medium at a 10us quantum run
     # ~0.1x realtime; a winning attempt completes by ~18s virtual (~3 min wall).
-    # The split and host LE-SC pairings race on the shared radio, so the smoke
-    # retries the whole emulation once (see renode_smoke.run_ble_split_smoke);
-    # give a generous ceiling for two 120s-virtual attempts + the two extra
-    # firmware builds on a slow shared runner.
+    # The split + host LE-SC pairings race on the shared radio and the soft link
+    # layer intermittently hits an LL assert, so the smoke re-rolls the whole
+    # emulation, bailing a crashed attempt immediately (see
+    # renode_smoke.run_ble_split_smoke: total_wall_budget keeps all retries under
+    # this cap). NOTE: cormoran/zmk main+dya can genuinely fail the wired-split
+    # relay too (a separate branch firmware issue) -- tracked separately.
     strategy:
       fail-fast: false
       matrix:
@@ -198,7 +200,7 @@ jobs:
           - { zmk_remote: zmkfirmware, zmk_revision: main }
           - { zmk_remote: cormoran, zmk_revision: main+dya }
           - { zmk_remote: cormoran, zmk_revision: main+custom-studio-protocol }
-    timeout-minutes: 90
+    timeout-minutes: 15
     container:
       image: zmkfirmware/zmk-build-arm:stable
     name: "Renode (BLE split) [${{ matrix.zmk_revision }}]"
